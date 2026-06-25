@@ -1,0 +1,107 @@
+--- a/main.c	2024-12-03 02:15:44.000000000 +0100
++++ b/main.c	2026-06-26 00:27:31.954403854 +0200
+@@ -284,6 +284,15 @@
+ #define setpgrp setpgid
+ #endif
+ 
++/* Phoenix-RTOS: POSIX session semantics. Use the SysV pgrp path (setsid() +
++ * setpgrp(void)); the BSD path calls the 2-arg setpgrp(pid,pgrp) and the
++ * obsolete TIOCSPGRP, neither of which Phoenix provides. */
++#ifdef __phoenix__
++#ifndef USE_SYSV_PGRP
++#define USE_SYSV_PGRP
++#endif
++#endif
++
+ #ifndef __linux__
+ #ifndef USE_POSIX_TERMIOS
+ #ifndef USE_ANY_SYSV_TERMIO
+@@ -3120,6 +3129,23 @@
+ 			       save_ruid, from)) < 0);
+ #elif defined(__QNXNTO__)
+     result = pty_search(pty);
++#elif defined(__phoenix__)
++    /* Phoenix-RTOS: posixsrv provides an SVR4-style /dev/ptmx multiplexor.
++     * open() returns the pty master fd, unlockpt() arms the slave, and
++     * ptsname() yields the /dev/pts/N slave path. There is no BSD /dev/ptyXX
++     * clone set to iterate, so neither openpty() nor pty_search() applies. */
++    if ((*pty = open("/dev/ptmx", O_RDWR)) >= 0) {
++	char *name;
++	(void) grantpt(*pty);
++	(void) unlockpt(*pty);
++	if ((name = ptsname(*pty)) != NULL) {
++	    strcpy(ttydev, name);
++	    result = 0;
++	} else {
++	    close(*pty);
++	    *pty = -1;
++	}
++    }
+ #else
+ #if defined(USE_USG_PTYS) || defined(__CYGWIN__)
+     result = ((*pty = open("/dev/ptmx", O_RDWR)) < 0);
+@@ -3799,10 +3825,21 @@
+ }
+ #endif
+ 
++/* Phoenix-RTOS: the compile-time fallback shell. On the netboot Pi "/" is the
++ * RAM dummyfs root and the real rootfs (incl. the shell) lives at /nfstest, so
++ * "/bin/sh" does not exist. xterm resolves its shell as: explicit -e program,
++ * then $SHELL, then the passwd pw_shell, then this hardcoded fallback. The
++ * xlaunch launcher sets neither $SHELL nor pw_shell, so this fallback is what
++ * xterm actually exec's — point it at the busybox ash on the export. Guarded
++ * with #ifndef so the -DDEFSHELL_NAME=... in build-xterm.sh wins (idempotent). */
++#ifndef DEFSHELL_NAME
++#define DEFSHELL_NAME "/bin/sh"
++#endif
++
+ static char *
+ resetShell(char *oldPath)
+ {
+-    char *newPath = x_strdup("/bin/sh");
++    char *newPath = x_strdup(DEFSHELL_NAME);
+     char *envPath = getenv("SHELL");
+     free(oldPath);
+     if (!IsEmpty(envPath))
+--- a/xterm_io.h	2024-12-03 02:15:44.000000000 +0100
++++ b/xterm_io.h	2026-06-26 00:24:21.871411834 +0200
+@@ -77,6 +77,17 @@
+ #define HAVE_GRANTPT_PTY_ISATTY 1
+ #endif
+ 
++/* Phoenix-RTOS: POSIX termios + an SVR4 /dev/ptmx pty multiplexor (posixsrv).
++ * Without this branch no platform conditional matches aarch64-phoenix, so
++ * <termios.h> is never included and TERMIO_STRUCT/struct winsize/ICANON are all
++ * undefined (compile-time #errors in xterm_io.h). The pty side is handled
++ * explicitly in main.c get_pty() (a __phoenix__ branch opening /dev/ptmx), so
++ * we deliberately do NOT set HAVE_POSIX_OPENPT here. Phoenix's <termios.h>
++ * pulls in <sys/ioctl.h> (struct winsize, TIOCSWINSZ) for us. */
++#ifdef __phoenix__
++#define USE_POSIX_TERMIOS
++#endif
++
+ #ifdef __SCO__
+ #define USE_TERMIOS
+ #ifndef _SVID3
+--- a/xtermcap.h	2024-12-03 02:15:44.000000000 +0100
++++ b/xtermcap.h	2026-06-26 00:26:49.734188217 +0200
+@@ -58,6 +58,11 @@
+ 
+ #undef ERR			/* workaround for glibc 2.1.3 */
+ 
++#ifdef __phoenix__
++/* Phoenix-RTOS has no curses/termcap library; use the local stub (declares
++ * tgetent/tgetstr et al as "no termcap database"). See phoenix_termcap.[ch]. */
++#include "phoenix_termcap.h"
++#else
+ #ifdef HAVE_NCURSES_CURSES_H
+ #include <ncurses/curses.h>
+ #else
+@@ -75,6 +80,7 @@
+ #elif defined(HAVE_TERM_H)
+ #include <term.h>		/* tgetent() */
+ #endif
++#endif /* __phoenix__ */
+ 
+ /*
+  * Get rid of conflicting symbols from term.h
