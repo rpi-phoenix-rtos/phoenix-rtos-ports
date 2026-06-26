@@ -1,6 +1,6 @@
 --- a/main.c	2024-12-03 02:15:44.000000000 +0100
-+++ b/main.c	2026-06-26 00:27:31.954403854 +0200
-@@ -284,6 +284,15 @@
++++ b/main.c	2026-06-26 16:54:29.874626306 +0200
+@@ -284,6 +284,27 @@
  #define setpgrp setpgid
  #endif
  
@@ -11,12 +11,57 @@
 +#ifndef USE_SYSV_PGRP
 +#define USE_SYSV_PGRP
 +#endif
++/* Phoenix-RTOS: complete the SVR4 pty model. get_pty() opens the master via
++ * /dev/ptmx (the __phoenix__ branch below), so the CHILD must open the matching
++ * slave via ptsname()+open() — that child slave-open lives in the USE_USG_PTYS
++ * block. Without this define the child has NO slave-open path at all (the BSD
++ * default and the handshake slave-open are both branched out), so it would exec
++ * the shell on a dead fd. SYSV stays undefined, so the SYSV-only STREAMS header
++ * includes (sys/stream.h, sys/stropts.h) are NOT pulled in; the child's I_PUSH
++ * STREAMS calls are #ifdef I_PUSH (undefined on Phoenix) and thus skipped. Pairs
++ * with ptyHandshake defaulted off (the /dev/tty break-loop is handshake-only). */
++#ifndef USE_USG_PTYS
++#define USE_USG_PTYS
++#endif
 +#endif
 +
  #ifndef __linux__
  #ifndef USE_POSIX_TERMIOS
  #ifndef USE_ANY_SYSV_TERMIO
-@@ -3120,6 +3129,23 @@
+@@ -926,7 +947,17 @@
+ #endif
+ #if OPT_PTY_HANDSHAKE
+     Bres(XtNwaitForMap, XtCWaitForMap, wait_for_map, False),
++    /* Phoenix-RTOS: default the pty handshake OFF. The handshake child loop
++     * (USE_SYSV_PGRP path) only breaks once it can open("/dev/tty"), and
++     * posixsrv provides no /dev/tty controlling-terminal node — so the forked
++     * child would spin forever and never exec the shell. The handshake only
++     * guards pty races on older systems; without it the child uses the slave fd
++     * the parent already opened, then exec's. */
++#ifdef __phoenix__
++    Bres(XtNptyHandshake, XtCPtyHandshake, ptyHandshake, False),
++#else
+     Bres(XtNptyHandshake, XtCPtyHandshake, ptyHandshake, True),
++#endif
+     Bres(XtNptySttySize, XtCPtySttySize, ptySttySize, DEF_PTY_STTY_SIZE),
+ #endif
+ #if OPT_REPORT_CCLASS
+@@ -2988,7 +3019,13 @@
+     }
+ #endif
+ #endif
+-#if defined(USE_ANY_SYSV_TERMIO) || defined(__minix)
++#if defined(USE_ANY_SYSV_TERMIO) || defined(__minix) || defined(__phoenix__)
++    /* Phoenix-RTOS: set the pty master non-blocking via fcntl(F_SETFL), not the
++     * FIONBIO ioctl. posixsrv ptys delegate ioctls to libtty, whose handler
++     * EINVALs every request it does not implement (FIONBIO among them) — that
++     * EINVAL hit SysError(ERROR_FIONBIO)->Cleanup, the early-startup crash.
++     * fcntl(F_GETFL/F_SETFL) is a distinct libphoenix path that posixsrv
++     * supports, and O_NDELAY==O_NONBLOCK here. */
+     if (0 > (mode = fcntl(screen->respond, F_GETFL, 0)))
+ 	SysError(ERROR_F_GETFL);
+ #ifdef O_NDELAY
+@@ -3120,6 +3157,23 @@
  			       save_ruid, from)) < 0);
  #elif defined(__QNXNTO__)
      result = pty_search(pty);
@@ -40,7 +85,7 @@
  #else
  #if defined(USE_USG_PTYS) || defined(__CYGWIN__)
      result = ((*pty = open("/dev/ptmx", O_RDWR)) < 0);
-@@ -3799,10 +3825,21 @@
+@@ -3799,10 +3853,21 @@
  }
  #endif
  
@@ -64,7 +109,7 @@
      free(oldPath);
      if (!IsEmpty(envPath))
 --- a/xterm_io.h	2024-12-03 02:15:44.000000000 +0100
-+++ b/xterm_io.h	2026-06-26 00:24:21.871411834 +0200
++++ b/xterm_io.h	2026-06-26 01:16:43.479182768 +0200
 @@ -77,6 +77,17 @@
  #define HAVE_GRANTPT_PTY_ISATTY 1
  #endif
@@ -84,7 +129,7 @@
  #define USE_TERMIOS
  #ifndef _SVID3
 --- a/xtermcap.h	2024-12-03 02:15:44.000000000 +0100
-+++ b/xtermcap.h	2026-06-26 00:26:49.734188217 +0200
++++ b/xtermcap.h	2026-06-26 01:16:43.479259842 +0200
 @@ -58,6 +58,11 @@
  
  #undef ERR			/* workaround for glibc 2.1.3 */
