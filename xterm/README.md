@@ -69,14 +69,14 @@ Two small libphoenix additions were made for this port (committed in the
 
 On the RPi4 netboot image the rootfs (including the shell) is mounted at
 `/nfstest`, not `/`, so the wrapper builds with
-`XTERM_DEFSHELL=/nfstest/bin/sh`. Launch via the X session launcher:
+`XTERM_DEFSHELL=/bin/sh`. Launch via the X session launcher:
 
 ```
-/nfstest/bin/startx term      # twm (window manager, for focus) + xterm
+/bin/startx term      # twm (window manager, for focus) + xterm
 ```
 
 A window manager is required, not cosmetic: with no WM the server uses
 PointerRoot focus, so keystrokes go to whatever window the pointer is over;
 `twm` gives xterm click-to-focus so typed keys reliably reach the shell. In the
-xterm window, type e.g. `ls /nfstest/bin` and Enter to confirm input round-trips
+xterm window, type e.g. `ls /bin` and Enter to confirm input round-trips
 through HID -> X -> pty -> shell.

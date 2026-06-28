@@ -70,11 +70,11 @@ of the deliverable, not a runtime detail.
 ## Launch
 
 `wmaker` runs menu/`<exec>` commands via `WMAKER_SHELL` (compiled in as
-`/nfstest/bin/sh`). It finds its background helper via `execlp("wmsetbg", …)`
-and dock/menu apps via `execvp`, so **`PATH` must include `/nfstest/bin`**, and
+`/bin/sh`). It finds its background helper via `execlp("wmsetbg", …)`
+and dock/menu apps via `execvp`, so **`PATH` must include `/bin`**, and
 it computes `~/GNUstep` from `$HOME`, so **`HOME` should be set** to a writable
 dir (it degrades to `/` with warnings if unset). On the netboot Pi:
 
 ```
-HOME=/nfstest/root PATH=/nfstest/bin:$PATH /nfstest/bin/startx wmaker
+HOME=/root PATH=/bin:$PATH /bin/startx wmaker
 ```
