@@ -51,8 +51,8 @@
 #       for wmaker's UI coordinate/colour rounding (wcolorpanel.c, wbrowser.c)
 #   source patch:
 #     - src/main.c ExecuteShellCommand() hardcodes shell="/bin/sh"; guard with
-#       #ifndef WMAKER_SHELL and override via -DWMAKER_SHELL (the netboot Pi's
-#       shell is /nfstest/bin/sh, not /bin/sh) — same trap as the xterm/JWM ports.
+#       #ifndef WMAKER_SHELL and override via -DWMAKER_SHELL (the Pi's shell is
+#       /bin/sh on the NFS root) — same trap as the xterm/JWM ports.
 #
 # fontconfig (a wmaker build dependency) also needed two Phoenix source fixes:
 #   - fccache.c: libphoenix <sys/time.h> ships a non-standard value-based
@@ -71,8 +71,8 @@ p_build() {
 	# Where the X11 lib stack + font stack were installed. On the RPi4 port this
 	# is the coordination repo's combined dependency prefix (see README).
 	: "${WMAKER_DEPS:=/tmp/wmaker-deps}"
-	# Compile-time fallback shell; on a netboot RAM root /bin/sh does not exist.
-	local wmshell="${WMAKER_SHELL:-/nfstest/bin/sh}"
+	# Compile-time fallback shell; the NFS root provides /bin/sh.
+	local wmshell="${WMAKER_SHELL:-/bin/sh}"
 
 	# libphoenix gap-fill lib (nftw/scandir/nice) + its -include'd prototypes.
 	local gapdefs="-D_SC_LINE_MAX=5 -Drint=round -include wmaker-phoenix-compat.h"
