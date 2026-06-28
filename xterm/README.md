@@ -68,7 +68,7 @@ Two small libphoenix additions were made for this port (committed in the
 ## Netboot launch + keyboard test
 
 On the RPi4 netboot image the rootfs (including the shell) is mounted at
-`/nfstest`, not `/`, so the wrapper builds with
+`/mnt`, not `/`, so the wrapper builds with
 `XTERM_DEFSHELL=/bin/sh`. Launch via the X session launcher:
 
 ```

@@ -90,7 +90,7 @@
  #endif
  
 +/* Phoenix-RTOS: the compile-time fallback shell. On the netboot Pi "/" is the
-+ * RAM dummyfs root and the real rootfs (incl. the shell) lives at /nfstest, so
++ * RAM dummyfs root and the real rootfs (incl. the shell) lives at /, so
 + * "/bin/sh" does not exist. xterm resolves its shell as: explicit -e program,
 + * then $SHELL, then the passwd pw_shell, then this hardcoded fallback. The
 + * xlaunch launcher sets neither $SHELL nor pw_shell, so this fallback is what

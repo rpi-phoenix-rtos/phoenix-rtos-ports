@@ -51,7 +51,7 @@ For an eventual upstream port, `ftw.h`/`nftw`, `scandir`/`alphasort`, and
 
 Host build dependency: **gperf** (fontconfig's `fcobjshash.h` codegen).
 
-## Runtime staging (netboot, NFS rootfs at /nfstest)
+## Runtime staging (netboot, NFS rootfs at /mnt)
 
 The coordination repo stages onto the NFS export `/srv/phoenix-rpi4-nfs`:
 
