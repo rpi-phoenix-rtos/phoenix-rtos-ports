@@ -53,7 +53,7 @@
                                    libnfs-private.h:105 redefines it ONLY when this
                                    is unset -> must set to avoid "redefinition" */
 #define HAVE_CLOCK_GETTIME 1    /* time.h:104 declares clock_gettime */
-#define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1 /* sys/stat.h uses st_mtim.tv_sec */
+#define HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC 1 /* sys/stat.h uses st_mtim.tv_nsec */
 #define MAJOR_IN_SYSMACROS 1    /* major()/minor()/makedev() in <sys/sysmacros.h> */
 
 /*

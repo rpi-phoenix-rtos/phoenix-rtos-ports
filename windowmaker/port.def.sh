@@ -75,7 +75,7 @@ p_build() {
 	local wmshell="${WMAKER_SHELL:-/bin/sh}"
 
 	# libphoenix gap-fill lib (nftw/scandir/nice) + its -include'd prototypes.
-	local gapdefs="-D_SC_LINE_MAX=5 -Drint=round -include wmaker-phoenix-compat.h"
+	local gapdefs="-Drint=round -include wmaker-phoenix-compat.h"
 	local pwddefs="-DMAXHOSTNAMELEN=256 -DO_NOFOLLOW=0 -DXOS_USE_MTSAFE_PWDAPI -D_POSIX_THREAD_SAFE_FUNCTIONS=200809L"
 	local cf="--sysroot=${SYSROOT} -I${WMAKER_DEPS}/include ${pwddefs} ${gapdefs} -DWMAKER_SHELL=\"${wmshell}\""
 	local xclosure="-lXft -lfontconfig -lexpat -lfreetype -lXrender -lXpm -lXext -lXmu -lXt -lSM -lICE -lX11 -lxcb -lXau -lXdmcp -lz -lftw -lm"
