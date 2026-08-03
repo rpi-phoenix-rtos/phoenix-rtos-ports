@@ -1,0 +1,172 @@
+diff --git a/include/libnfs-private.h b/include/libnfs-private.h
+index 6d7ae49..b3f1838 100644
+--- a/include/libnfs-private.h
++++ b/include/libnfs-private.h
+@@ -936,6 +936,7 @@ int nfs3_write_async(struct nfs_context *nfs, struct nfsfh *nfsfh,
+                      const void *buf, size_t count, nfs_cb cb,
+                      void *private_data);
+ 
++int nfs4_renew_async(struct nfs_context *nfs, nfs_cb cb, void *private_data);
+ int nfs4_access_async(struct nfs_context *nfs, const char *path, int mode,
+                       nfs_cb cb, void *private_data);
+ int nfs4_access2_async(struct nfs_context *nfs, const char *path, nfs_cb cb,
+diff --git a/include/nfsc/libnfs.h b/include/nfsc/libnfs.h
+index 2bc0918..31440f8 100755
+--- a/include/nfsc/libnfs.h
++++ b/include/nfsc/libnfs.h
+@@ -420,6 +420,19 @@ EXTERN int nfs_umount_async(struct nfs_context *nfs, nfs_cb cb,
+  */
+ EXTERN int nfs_umount(struct nfs_context *nfs);
+ 
++/*
++ * Sync NFSv4 lease renewal (Phoenix-RTOS addition).
++ * Sends a single RENEW operation to keep an otherwise-idle NFSv4.0 lease alive.
++ * For NFSv3 (stateless) this is a NO-OP that returns 0.
++ *
++ * Function returns
++ *      0 : The operation was successful (or NFSv3).
++ * -errno : The command failed. Notably -ERANGE with an NFS4ERR_EXPIRED /
++ *          NFS4ERR_STALE_CLIENTID string in nfs_get_error() means the lease has
++ *          already lapsed and client state must be re-established (re-mount).
++ */
++EXTERN int nfs_renew(struct nfs_context *nfs);
++
+ 
+ 
+ 
+diff --git a/lib/libnfs-sync.c b/lib/libnfs-sync.c
+index 51c4ca1..e303a94 100644
+--- a/lib/libnfs-sync.c
++++ b/lib/libnfs-sync.c
+@@ -425,6 +425,51 @@ nfs_umount(struct nfs_context *nfs)
+ }
+ 
+ 
++/*
++ * renew the NFSv4 lease (Phoenix-RTOS addition; NO-OP for NFSv3)
++ */
++static void
++renew_cb(int status, struct nfs_context *nfs, void *data, void *private_data)
++{
++	struct sync_cb_data *cb_data = private_data;
++
++	if (status < 0) {
++		nfs_set_error(nfs, "%s: %s", __FUNCTION__, nfs_get_error(nfs));
++	}
++	cb_data_is_finished(cb_data, status);
++}
++
++int
++nfs_renew(struct nfs_context *nfs)
++{
++	struct sync_cb_data cb_data;
++	struct rpc_context *rpc = nfs_get_rpc_context(nfs);
++
++	assert(rpc->magic == RPC_CONTEXT_MAGIC);
++
++	/* NFSv3 is stateless: no lease to renew. */
++	if (nfs->nfsi->version != NFS_V4) {
++		return 0;
++	}
++
++	if (nfs_init_cb_data(&nfs, &cb_data)) {
++		return -1;
++	}
++
++	if (nfs4_renew_async(nfs, renew_cb, &cb_data) != 0) {
++		nfs_set_error(nfs, "nfs4_renew_async failed. %s",
++			      nfs_get_error(nfs));
++		nfs_destroy_cb_sem(&cb_data);
++		return -1;
++	}
++
++	wait_for_nfs_reply(nfs, &cb_data);
++	nfs_destroy_cb_sem(&cb_data);
++
++	return cb_data.status;
++}
++
++
+ /*
+  * stat()
+  */
+diff --git a/lib/nfs_v4.c b/lib/nfs_v4.c
+index 31d89d7..8270d1b 100644
+--- a/lib/nfs_v4.c
++++ b/lib/nfs_v4.c
+@@ -1592,6 +1592,75 @@ nfs4_mount_2_cb(struct rpc_context *rpc, int status, void *command_data,
+         }
+ }
+ 
++/*
++ * RENEW - keep the NFSv4.0 lease alive without doing any file operation.
++ *
++ * libnfs otherwise never sends RENEW, so an idle client's lease expires (~90s on
++ * Linux nfsd) and the next stateful op fails with NFS4ERR_EXPIRED. A single-op
++ * COMPOUND carrying the client id renews the lease (RFC 7530 section 9.5). This
++ * is a Phoenix-RTOS addition (see phoenix-rtos-ports/libnfs patches).
++ */
++static void
++nfs4_renew_cb(struct rpc_context *rpc, int status, void *command_data,
++              void *private_data)
++{
++        struct nfs4_cb_data *data = private_data;
++        struct nfs_context *nfs = data->nfs;
++        COMPOUND4res *res = command_data;
++
++        assert(rpc->magic == RPC_CONTEXT_MAGIC);
++
++        if (check_nfs4_error(nfs, status, data, res, "RENEW")) {
++                return;
++        }
++
++        data->cb(0, nfs, NULL, data->private_data);
++        free_nfs4_cb_data(data);
++}
++
++int
++nfs4_renew_async(struct nfs_context *nfs, nfs_cb cb, void *private_data)
++{
++        struct nfs4_cb_data *data;
++        COMPOUND4args args;
++        nfs_argop4 op[1];
++
++        data = calloc(1, sizeof(*data));
++        if (data == NULL) {
++                nfs_set_error(nfs, "Out of memory. Failed to allocate "
++                              "nfs4_cb_data for RENEW");
++                return -1;
++        }
++        data->nfs          = nfs;
++        data->cb           = cb;
++        data->private_data = private_data;
++        /* check_nfs4_error formats data->path into its error message. */
++        data->path         = strdup("<renew>");
++        if (data->path == NULL) {
++                nfs_set_error(nfs, "Out of memory. Failed to allocate "
++                              "path for RENEW");
++                free(data);
++                return -1;
++        }
++
++        memset(op, 0, sizeof(op));
++        op[0].argop = OP_RENEW;
++        op[0].nfs_argop4_u.oprenew.clientid = nfs->nfsi->clientid;
++
++        memset(&args, 0, sizeof(args));
++        args.argarray.argarray_len = 1;
++        args.argarray.argarray_val = op;
++
++        if (rpc_nfs4_compound_task(nfs->rpc, nfs4_renew_cb, &args, data) == NULL) {
++                nfs_set_error(nfs, "Failed to queue RENEW. %s",
++                              nfs_get_error(nfs));
++                free_nfs4_cb_data(data);
++                return -1;
++        }
++
++        return 0;
++}
++
+ static void
+ nfs4_mount_1_cb(struct rpc_context *rpc, int status, void *command_data,
+                 void *private_data)
