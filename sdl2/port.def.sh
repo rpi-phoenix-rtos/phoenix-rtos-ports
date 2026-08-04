@@ -26,6 +26,14 @@
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
+
+	# Overlay the phoenix video+input driver sources into the SDL tree. patches/
+	# 0005 adds src/video/phoenix/*.c to the PHOENIX cmake branch via file(GLOB);
+	# the actual sources live here (not as a patch) because they are whole new
+	# files. Copied every prepare so edits under overlay/ take effect on rebuild.
+	# NOTE: the GL-context glue in glue/ is deliberately NOT overlaid — it needs
+	# Mesa-internal headers this cmake build lacks and is compiled by the game.
+	cp -a "${PREFIX_PORT}/overlay/." "${PREFIX_PORT_WORKDIR}/"
 }
 
 p_build() {

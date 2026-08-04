@@ -1,0 +1,75 @@
+Phoenix-RTOS: wire the phoenix video + input driver into the build.
+
+Adds the phoenix video driver (src/video/phoenix/, copied into the tree by the
+port's p_prepare overlay step) to the PHOENIX cmake branch and enables desktop
+OpenGL. The driver is one always-fullscreen /dev/fb0 window rendered by the
+in-process ported Mesa V3D GL stack, with keyboard/mouse drained from
+/dev/kbd0 + /dev/mouse0 in PumpEvents. SDL_VIDEO_DRIVER_PHOENIX gates the driver
+sources + the SDL_config.h define + the bootstrap-table entry (placed first, so
+it is auto-selected ahead of the dummy driver). SDL_VIDEO_OPENGL turns on SDL's
+desktop-GL attribute plumbing (it uses SDL_GL_GetProcAddress internally, so it
+adds no direct GL link dependency to libSDL2.a).
+
+The GL-context bring-up itself (Mesa state-tracker + V3D winsys, which needs
+Mesa-internal headers this cross build never sees) lives OUTSIDE libSDL2.a in a
+separately-compiled glue TU that the game links; the driver references its
+plain-C entry points as unresolved externs. This keeps libSDL2.a pure zlib.
+
+--- a/CMakeLists.txt	2026-08-04 23:18:49.141588853 +0200
++++ b/CMakeLists.txt	2026-08-04 23:19:00.078554853 +0200
+@@ -1474,6 +1474,23 @@
+   endif()
+   CheckPTHREAD()
+ 
++  # Phoenix-RTOS video + input driver (SDL2 port plan phase 1, step 4). A single
++  # always-fullscreen window backed by /dev/fb0 (geometry from the RPI4FB_GETMODE
++  # ioctl), rendered with the in-process ported Mesa V3D OpenGL stack (no EGL/GLX);
++  # input is drained from /dev/kbd0 (raw 8-byte HID) and /dev/mouse0 (4-byte HID)
++  # in PumpEvents. The GL-context bring-up itself (Mesa state-tracker + V3D winsys)
++  # lives OUTSIDE libSDL2.a in a separately-compiled glue TU that the game links
++  # (it needs Mesa-internal headers this cross build never sees); the driver only
++  # references its plain-C entry points as unresolved externs. See the port's
++  # glue/ directory and the SDL2 port plan for the licensing note on that glue.
++  if(SDL_VIDEO)
++    set(SDL_VIDEO_DRIVER_PHOENIX 1)
++    set(SDL_VIDEO_OPENGL 1)
++    file(GLOB VIDEO_PHOENIX_SOURCES ${SDL2_SOURCE_DIR}/src/video/phoenix/*.c)
++    list(APPEND SOURCE_FILES ${VIDEO_PHOENIX_SOURCES})
++    set(HAVE_SDL_VIDEO TRUE)
++  endif()
++
+ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+   if(SDL_AUDIO)
+     if(SYSV5 OR SOLARIS OR HPUX)
+--- a/include/SDL_config.h.cmake	2026-08-04 23:18:49.093031166 +0200
++++ b/include/SDL_config.h.cmake	2026-08-04 23:19:05.322565775 +0200
+@@ -412,6 +412,7 @@
+ #cmakedefine SDL_VIDEO_DRIVER_DIRECTFB_DYNAMIC @SDL_VIDEO_DRIVER_DIRECTFB_DYNAMIC@
+ #cmakedefine SDL_VIDEO_DRIVER_DUMMY @SDL_VIDEO_DRIVER_DUMMY@
+ #cmakedefine SDL_VIDEO_DRIVER_OFFSCREEN @SDL_VIDEO_DRIVER_OFFSCREEN@
++#cmakedefine SDL_VIDEO_DRIVER_PHOENIX @SDL_VIDEO_DRIVER_PHOENIX@
+ #cmakedefine SDL_VIDEO_DRIVER_WINDOWS @SDL_VIDEO_DRIVER_WINDOWS@
+ #cmakedefine SDL_VIDEO_DRIVER_WINRT @SDL_VIDEO_DRIVER_WINRT@
+ #cmakedefine SDL_VIDEO_DRIVER_WAYLAND @SDL_VIDEO_DRIVER_WAYLAND@
+--- a/src/video/SDL_video.c	2026-08-04 23:18:49.110809745 +0200
++++ b/src/video/SDL_video.c	2026-08-04 23:19:12.024579733 +0200
+@@ -70,6 +70,9 @@
+ 
+ /* Available video drivers */
+ static VideoBootStrap *bootstrap[] = {
++#ifdef SDL_VIDEO_DRIVER_PHOENIX
++    &PHOENIX_bootstrap,
++#endif
+ #ifdef SDL_VIDEO_DRIVER_COCOA
+     &COCOA_bootstrap,
+ #endif
+--- a/src/video/SDL_sysvideo.h	2026-08-04 23:18:49.110789618 +0200
++++ b/src/video/SDL_sysvideo.h	2026-08-04 23:19:22.851602285 +0200
+@@ -481,6 +481,7 @@
+ extern VideoBootStrap Emscripten_bootstrap;
+ extern VideoBootStrap QNX_bootstrap;
+ extern VideoBootStrap OFFSCREEN_bootstrap;
++extern VideoBootStrap PHOENIX_bootstrap;
+ extern VideoBootStrap NGAGE_bootstrap;
+ extern VideoBootStrap OS2DIVE_bootstrap;
+ extern VideoBootStrap OS2VMAN_bootstrap;
