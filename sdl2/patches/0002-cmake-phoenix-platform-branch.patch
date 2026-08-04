@@ -1,0 +1,46 @@
+Phoenix-RTOS: add a dedicated platform branch to SDL's CMake configuration.
+
+Without this, a cross build (CMAKE_SYSTEM_NAME=Generic) matches no platform
+branch, so CheckPTHREAD is never called and the configure aborts at the
+"Threads ... may not be disabled" gate. Making it *look* like Linux instead is
+worse: the UNIX/Linux branch runs host-toolchain probes (X11/Wayland/KMSDRM/
+udev/dbus/GL/ALSA) that leak host include paths such as -I/usr/include into
+every subsequent try_compile and break the cross build.
+
+This branch wires only the portable subsystems libphoenix already backs: the
+unix (CLOCK_MONOTONIC) timer and pthread threads. Video, audio, joystick,
+filesystem, loadso, etc. fall back to SDL's dummy drivers automatically. The
+phoenix video/input/audio drivers get wired into this same branch by later
+patches. Enabled by -DPHOENIX=ON (set by the port).
+
+--- a/CMakeLists.txt	2025-02-02 00:56:51.000000000 +0100
++++ b/CMakeLists.txt	2026-08-04 22:48:09.144475192 +0200
+@@ -1452,6 +1452,28 @@
+   CheckPTHREAD()
+   CheckLibUnwind()
+ 
++elseif(PHOENIX)
++  # Phoenix-RTOS is a POSIX-ish RTOS. libphoenix supplies the libc, libc-
++  # integrated pthreads and clock_gettime(). We deliberately do NOT run the
++  # generic UNIX/Linux host detection below (X11/Wayland/KMSDRM/udev/dbus/GL/
++  # ALSA/...): those probe the *host* toolchain and leak host include paths
++  # (e.g. -I/usr/include) into every subsequent try_compile, which breaks the
++  # cross build. Phase 1 wires only the portable subsystems that libphoenix
++  # already backs: pthread threads and the unix (CLOCK_MONOTONIC) timer. Every
++  # other subsystem (video, audio, joystick, filesystem, loadso, ...) falls
++  # back to SDL's dummy driver automatically further down. The phoenix video/
++  # input/audio drivers are wired in by later patches (phase 2+).
++  if(SDL_TIMERS)
++    set(SDL_TIMER_UNIX 1)
++    file(GLOB TIMER_SOURCES ${SDL2_SOURCE_DIR}/src/timer/unix/*.c)
++    list(APPEND SOURCE_FILES ${TIMER_SOURCES})
++    set(HAVE_SDL_TIMERS TRUE)
++    if(SDL_CLOCK_GETTIME)
++      set(HAVE_CLOCK_GETTIME 1)
++    endif()
++  endif()
++  CheckPTHREAD()
++
+ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+   if(SDL_AUDIO)
+     if(SYSV5 OR SOLARIS OR HPUX)

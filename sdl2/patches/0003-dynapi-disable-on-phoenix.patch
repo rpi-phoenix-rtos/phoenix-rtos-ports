@@ -1,0 +1,20 @@
+Phoenix-RTOS: disable SDL's dynamic-API redirection layer.
+
+src/dynapi/SDL_dynapi.c #includes <dlfcn.h> and calls dlopen()/dlsym() to
+implement the runtime SDL-override feature. Phoenix / libphoenix has no
+dynamic loader (no dlfcn.h), so the TU fails to compile. SDL_dynapi.h forbids
+forcing SDL_DYNAMIC_API from the command line, so the supported way to turn it
+off is a per-platform case here. Static linking is the only mode on Phoenix,
+so the override feature is meaningless anyway.
+
+--- a/src/dynapi/SDL_dynapi.h	2025-01-01 16:48:45.000000000 +0100
++++ b/src/dynapi/SDL_dynapi.h	2026-08-04 22:50:10.171743578 +0200
+@@ -65,6 +65,8 @@
+ #define SDL_DYNAMIC_API 0 /* vitasdk doesn't support dynamic linking */
+ #elif defined(__NGAGE__)
+ #define SDL_DYNAMIC_API 0 /* The N-Gage doesn't support dynamic linking either */
++#elif defined(__phoenix__)
++#define SDL_DYNAMIC_API 0 /* Phoenix-RTOS has no dlopen()/dlfcn.h (libphoenix); static linking only */
+ #elif defined(__3DS__)
+ #define SDL_DYNAMIC_API 0 /* devkitARM doesn't support dynamic linking */
+ #elif defined(DYNAPI_NEEDS_DLOPEN) && !defined(HAVE_DLOPEN)
