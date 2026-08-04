@@ -1,0 +1,73 @@
+Phoenix-RTOS: wire the phoenix audio driver into the build.
+
+Adds the phoenix audio driver (src/audio/phoenix/, copied into the tree by the
+port's p_prepare overlay step) to the PHOENIX cmake branch. It is a pull-model
+SDL audio backend over the rpi4-audio device node /dev/audio0: SDL's audio thread
+fills the mixing buffer via the app callback, then PlayDevice write()s it to
+/dev/audio0. That device is PIO with a fixed native format (44100 Hz, stereo,
+signed 16-bit LE); its blocking write drains the PWM FIFO at the playback rate,
+so it supplies the backpressure and WaitDevice is a no-op. OpenDevice forces the
+device spec to that native format and lets SDL build a conversion stream from the
+app's requested spec.
+
+SDL_AUDIO_DRIVER_PHOENIX gates the driver sources + the SDL_config.h define + the
+bootstrap-table entry (placed first, so it is auto-selected ahead of the dummy
+driver; every host audio backend is compiled out on Phoenix). Unlike the video
+driver this driver is fully self-contained: it needs no out-of-tree glue and
+pulls no non-zlib dependency into libSDL2.a.
+
+--- a/CMakeLists.txt	2026-08-05 00:26:59.879996589 +0200
++++ b/CMakeLists.txt	2026-08-05 00:35:33.049006273 +0200
+@@ -1491,6 +1491,20 @@
+     set(HAVE_SDL_VIDEO TRUE)
+   endif()
+ 
++  # Phoenix-RTOS audio driver (SDL2 port plan phase 1, step 5). A pull-model
++  # backend over the rpi4-audio device node /dev/audio0: SDL's audio thread fills
++  # the mixing buffer via the app callback, then PlayDevice write()s it to
++  # /dev/audio0. That device is PIO with a fixed native format (44100 Hz, stereo,
++  # signed 16-bit LE); its blocking write drains the PWM FIFO at the playback rate
++  # and provides the backpressure, so WaitDevice is a no-op. Pure zlib, no external
++  # link dependency (unlike the video driver it needs no out-of-tree glue).
++  if(SDL_AUDIO)
++    set(SDL_AUDIO_DRIVER_PHOENIX 1)
++    file(GLOB AUDIO_PHOENIX_SOURCES ${SDL2_SOURCE_DIR}/src/audio/phoenix/*.c)
++    list(APPEND SOURCE_FILES ${AUDIO_PHOENIX_SOURCES})
++    set(HAVE_SDL_AUDIO TRUE)
++  endif()
++
+ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+   if(SDL_AUDIO)
+     if(SYSV5 OR SOLARIS OR HPUX)
+--- a/include/SDL_config.h.cmake	2026-08-05 00:26:59.880175444 +0200
++++ b/include/SDL_config.h.cmake	2026-08-05 00:35:36.828014446 +0200
+@@ -301,6 +301,7 @@
+ #cmakedefine SDL_AUDIO_DRIVER_DISK @SDL_AUDIO_DRIVER_DISK@
+ #cmakedefine SDL_AUDIO_DRIVER_DSOUND @SDL_AUDIO_DRIVER_DSOUND@
+ #cmakedefine SDL_AUDIO_DRIVER_DUMMY @SDL_AUDIO_DRIVER_DUMMY@
++#cmakedefine SDL_AUDIO_DRIVER_PHOENIX @SDL_AUDIO_DRIVER_PHOENIX@
+ #cmakedefine SDL_AUDIO_DRIVER_EMSCRIPTEN @SDL_AUDIO_DRIVER_EMSCRIPTEN@
+ #cmakedefine SDL_AUDIO_DRIVER_ESD @SDL_AUDIO_DRIVER_ESD@
+ #cmakedefine SDL_AUDIO_DRIVER_ESD_DYNAMIC @SDL_AUDIO_DRIVER_ESD_DYNAMIC@
+--- a/src/audio/SDL_audio.c	2025-01-01 16:48:45.000000000 +0100
++++ b/src/audio/SDL_audio.c	2026-08-05 00:35:40.970023404 +0200
+@@ -42,6 +42,9 @@
+ 
+ /* Available audio drivers */
+ static const AudioBootStrap *const bootstrap[] = {
++#ifdef SDL_AUDIO_DRIVER_PHOENIX
++    &PHOENIXAUDIO_bootstrap,
++#endif
+ #ifdef SDL_AUDIO_DRIVER_PULSEAUDIO
+     &PULSEAUDIO_bootstrap,
+ #endif
+--- a/src/audio/SDL_sysaudio.h	2025-01-01 16:48:45.000000000 +0100
++++ b/src/audio/SDL_sysaudio.h	2026-08-05 00:35:44.462030955 +0200
+@@ -199,6 +199,7 @@
+ extern AudioBootStrap COREAUDIO_bootstrap;
+ extern AudioBootStrap DISKAUDIO_bootstrap;
+ extern AudioBootStrap DUMMYAUDIO_bootstrap;
++extern AudioBootStrap PHOENIXAUDIO_bootstrap;
+ extern AudioBootStrap FUSIONSOUND_bootstrap;
+ extern AudioBootStrap aaudio_bootstrap;
+ extern AudioBootStrap openslES_bootstrap;
