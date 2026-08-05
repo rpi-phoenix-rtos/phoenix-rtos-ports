@@ -183,6 +183,27 @@ static const PHOENIX_GLProc phoenix_gl_procs[] = {
     { "glCheckFramebufferStatus", (void *)glCheckFramebufferStatus },
     { "glBlitFramebuffer", (void *)glBlitFramebuffer },
     { "glGenerateMipmap", (void *)glGenerateMipmap },
+    { "glGetFramebufferAttachmentParameteriv", (void *)glGetFramebufferAttachmentParameteriv },
+    { "glGetRenderbufferParameteriv", (void *)glGetRenderbufferParameteriv },
+    { "glIsFramebuffer", (void *)glIsFramebuffer },
+    { "glRenderbufferStorageMultisample", (void *)glRenderbufferStorageMultisample },
+    /* --- ARB-suffixed entrypoints resolved by quake3e's opengl1 renderer (QGL_Ext/ARB/VBO_PROCS).
+     * The engine looks up the ARB/EXT names explicitly (not the core aliases), so provide them. --- */
+    { "glActiveTextureARB", (void *)glActiveTextureARB },
+    { "glClientActiveTextureARB", (void *)glClientActiveTextureARB },
+    { "glMultiTexCoord2fARB", (void *)glMultiTexCoord2fARB },
+    { "glLockArraysEXT", (void *)glLockArraysEXT },
+    { "glUnlockArraysEXT", (void *)glUnlockArraysEXT },
+    { "glBindBufferARB", (void *)glBindBufferARB },
+    { "glBufferDataARB", (void *)glBufferDataARB },
+    { "glDeleteBuffersARB", (void *)glDeleteBuffersARB },
+    { "glGenBuffersARB", (void *)glGenBuffersARB },
+    { "glBindProgramARB", (void *)glBindProgramARB },
+    { "glDeleteProgramsARB", (void *)glDeleteProgramsARB },
+    { "glGenProgramsARB", (void *)glGenProgramsARB },
+    { "glProgramStringARB", (void *)glProgramStringARB },
+    { "glProgramLocalParameter4fARB", (void *)glProgramLocalParameter4fARB },
+    { "glProgramLocalParameter4fvARB", (void *)glProgramLocalParameter4fvARB },
 };
 
 void *PHOENIX_GL_GetProcAddress(_THIS, const char *proc)
