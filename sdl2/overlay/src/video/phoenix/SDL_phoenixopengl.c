@@ -66,6 +66,23 @@ typedef struct
     void *addr;
 } PHOENIX_GLProc;
 
+/* Winsys: bind the current scanout-FB-backed FBO (defined in the GL-context glue). */
+extern void qsv3d_bind_fbo(void);
+
+/* The surfaceless V3D context has no usable default framebuffer (FB 0) — the winsys scanout FBO is
+ * the screen. Engines like quake3e's opengl1 renderer bind FB 0 to "return to the backbuffer",
+ * which would dereference a NULL default framebuffer in Mesa (_mesa_bind_framebuffers). Redirect a
+ * bind of 0 to the scanout FBO via the winsys; pass real (nonzero) FBO ids through unchanged. */
+static void PHOENIX_glBindFramebuffer(GLenum target, GLuint framebuffer)
+{
+    if (framebuffer == 0) {
+        qsv3d_bind_fbo();
+    }
+    else {
+        glBindFramebuffer(target, framebuffer);
+    }
+}
+
 static const PHOENIX_GLProc phoenix_gl_procs[] = {
     /* --- GL 1.1 core --- */
     { "glClear", (void *)glClear },
@@ -172,7 +189,7 @@ static const PHOENIX_GLProc phoenix_gl_procs[] = {
     { "glUniformMatrix4fv", (void *)glUniformMatrix4fv },
     /* --- ARB framebuffer object (FBO) --- */
     { "glGenFramebuffers", (void *)glGenFramebuffers },
-    { "glBindFramebuffer", (void *)glBindFramebuffer },
+    { "glBindFramebuffer", (void *)PHOENIX_glBindFramebuffer }, /* maps FB 0 -> scanout FBO */
     { "glDeleteFramebuffers", (void *)glDeleteFramebuffers },
     { "glGenRenderbuffers", (void *)glGenRenderbuffers },
     { "glBindRenderbuffer", (void *)glBindRenderbuffer },
