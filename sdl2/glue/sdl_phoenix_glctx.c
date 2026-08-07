@@ -1,19 +1,19 @@
-/* SPDX-License-Identifier: GPL-2.0-or-later
+/* SPDX-License-Identifier: Zlib
  *
  * Copyright (C) 2026 Phoenix Systems
  * Author: Witold Bołt
  *
- * Phoenix-RTOS platform backend for QuakeSpasm (QuakeSpasm is Copyright (C) id
- * Software, Inc. and the QuakeSpasm developers, GPL-2.0-or-later). It implements
- * the QuakeSpasm platform interface and is distributed under the same license as
- * the program it is built into; see COPYING in this directory.
+ * V3D/Mesa GL-context bring-up + scanout FBO(s) + page-flip present for the
+ * Phoenix-RTOS SDL2 video driver. Mesa-header-only (pipe/st); compiled by the
+ * client build (not into libSDL2.a) because it needs Mesa-internal headers and
+ * flags the SDL cross build does not provide. The SDL video driver references
+ * its phxgl_* entry points as externs.
  */
 /*
- * pl_phoenix_glctx.c — V3D/Mesa GL context + offscreen FBO for the Quakespasm
- * Phoenix port. Mesa-header-only (pipe/st), deliberately kept separate from Quake's
- * headers (pl_phoenix_vid.c) to avoid type collisions. Same recipe as rpi4-glcube:
- * surfaceless st_create_context + a renderbuffer-backed RGBA8 + DEPTH24 FBO that
- * Quake renders into; pl_phoenix_vid.c presents it to /dev/fb0.
+ * Deliberately kept separate from the client's headers to avoid type collisions.
+ * Same recipe as rpi4-glcube: surfaceless st_create_context + a renderbuffer-
+ * backed RGBA8 + DEPTH24 FBO that the client renders into; the video driver
+ * presents it to /dev/fb0.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,7 +66,7 @@ static struct st_context *g_st = NULL;
  * so the world rendered blue. Rendering straight into the scanout BO is exactly ONE swap (the proven-
  * correct direct path: brown), with no blit and no second swap. Each back buffer shares one depth BO
  * (cleared per frame, never scanned out). */
-static GLuint g_scanout_fbo[3] = {0, 0, 0}; /* scanout-fb-backed color+depth FBO(s) — Quake renders here */
+static GLuint g_scanout_fbo[3] = {0, 0, 0}; /* scanout-fb-backed color+depth FBO(s) — the client renders here */
 static GLuint g_render_fbo  = 0;     /* DRAM color+depth FBO — ONLY for the no-scanout CPU-present fallback */
 static GLuint g_capture_fbo = 0;     /* normal (non-aliased) RGBA8 FBO: scanout is blitted here so glReadPixels
                                       * reads a real CPU-backed BO (screenshot capture; the scanout FBO's own
@@ -77,11 +77,11 @@ static int    g_nbuf        = 1;     /* page-flip buffer count (1/2/3) — tripl
 static int    g_back        = 0;     /* which scanout buffer we render into this frame (round-robin) */
 static int    g_w = 0, g_h = 0;
 
-/* Bind the framebuffer Quake renders this frame into. Quake targets the "default" framebuffer (0),
+/* Bind the framebuffer the client renders this frame into. The client targets the "default" framebuffer (0),
  * incomplete on a surfaceless context; redirect it. In the scanout path that is the current BACK
- * buffer (g_back), which the page-flip in qsv3d_resolve() then puts on screen; otherwise the DRAM
+ * buffer (g_back), which the page-flip in phxgl_resolve() then puts on screen; otherwise the DRAM
  * fallback FBO that GL_EndRendering reads back and CPU-presents. */
-void qsv3d_bind_fbo(void)
+void phxgl_bind_fbo(void)
 {
 	if (g_resolve)
 		glBindFramebuffer(GL_FRAMEBUFFER, g_scanout_fbo[g_double ? g_back : 0]);
@@ -95,7 +95,7 @@ void qsv3d_bind_fbo(void)
  * fully rendered before the flip latches at vsync. With 3 buffers the next render target is >=2
  * flips from being scanned out -> the GPU never writes the displayed buffer (no contention, no
  * wedge). Single-buffer scanout (g_double==0) renders in place and is already on screen. */
-int qsv3d_resolve(void)
+int phxgl_resolve(void)
 {
 	if (!g_resolve)
 		return 0;
@@ -114,13 +114,13 @@ int qsv3d_resolve(void)
  * w*h*3 RGB bytes, bottom-to-top (GL convention, matches the TGA writer -> no Y-flip). Returns
  * 1 on success, 0 if unavailable (caller falls back to a plain glReadPixels). Called from
  * SCR_CaptureTick, pre-flip, with the render-target FBO still bound. */
-int qsv3d_capture_gl(void *pix, int w, int h);
-int qsv3d_capture_gl(void *pix, int w, int h)
+int phxgl_capture_gl(void *pix, int w, int h);
+int phxgl_capture_gl(void *pix, int w, int h)
 {
 	GLint prev = 0;
 	GLuint src;
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
-	/* Use the EXPLICIT render FBO Quake drew this frame into — NOT the currently-bound one.
+	/* Use the EXPLICIT render FBO the client drew this frame into — NOT the currently-bound one.
 	 * By capture time the render target is often unbound back to FB0 (GL_EndRendering re-binds
 	 * it for the same reason); reading FB0 was noise. */
 	if (g_resolve)
@@ -165,7 +165,7 @@ int qsv3d_capture_gl(void *pix, int w, int h)
 	return 1;
 }
 
-int qsv3d_init(int w, int h)
+int phxgl_init(int w, int h)
 {
 	struct pipe_screen_config cfg;
 	struct pipe_screen *pscreen;
@@ -178,24 +178,24 @@ int qsv3d_init(int w, int h)
 
 	memset(&cfg, 0, sizeof(cfg));
 	pscreen = v3d_screen_create(0, &cfg, NULL);
-	if (!pscreen) { printf("qsv3d: pipe_screen NULL\n"); return 1; }
+	if (!pscreen) { printf("phxgl: pipe_screen NULL\n"); return 1; }
 	pipe = pscreen->context_create(pscreen, NULL, 0);
-	if (!pipe) { printf("qsv3d: pipe_context NULL\n"); return 1; }
+	if (!pipe) { printf("phxgl: pipe_context NULL\n"); return 1; }
 
 	memset(&visual, 0, sizeof(visual));
 	memset(&opts, 0, sizeof(opts));
 	st = st_create_context(API_OPENGL_COMPAT, pipe, &visual, NULL, &opts, 0, 0);
-	if (!st) { printf("qsv3d: st_create_context NULL\n"); return 1; }
+	if (!st) { printf("phxgl: st_create_context NULL\n"); return 1; }
 	_mesa_make_current(st->ctx, NULL, NULL);
 	g_st = st;
 
-	printf("qsv3d: GL up; %s / %s\n",
+	printf("phxgl: GL up; %s / %s\n",
 	       (const char *)glGetString(GL_VERSION),
 	       (const char *)glGetString(GL_RENDERER));
 
 	g_w = w; g_h = h;
 
-	/* SCANOUT FBO(s): Quake renders DIRECTLY into these — each color renderbuffer claims a scanout
+	/* SCANOUT FBO(s): the client renders DIRECTLY into these — each color renderbuffer claims a scanout
 	 * buffer (set_next_scanout() -> the winsys hands buffer 0, 1, 2) and now also carries a DEPTH
 	 * attachment so depth-tested 3D renders straight to the back buffer. One depth renderbuffer is
 	 * SHARED across all buffers (rendering is serialized and depth is cleared each frame; never
@@ -221,14 +221,14 @@ int qsv3d_init(int w, int h)
 		}
 		g_resolve = v3d_phoenix_scanout_active();   /* did the fb get claimed? */
 		fbs = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-		printf("qsv3d: scanout FBO(s) %dx%d n=%d resolve=%d double=%d status=0x%x (%s)\n",
+		printf("phxgl: scanout FBO(s) %dx%d n=%d resolve=%d double=%d status=0x%x (%s)\n",
 		       w, h, n, g_resolve, g_double, fbs,
 		       g_resolve ? (g_double ? "direct-render+page-flip" : "single direct-render")
 		                 : "unavailable -> CPU-present fallback");
 	}
 
 	/* DRAM FALLBACK render FBO (color + depth): used ONLY when the scanout fb couldn't be claimed,
-	 * so GL_EndRendering glReadPixels()es it and CPU-presents. In the normal scanout path Quake
+	 * so GL_EndRendering glReadPixels()es it and CPU-presents. In the normal scanout path the client
 	 * renders straight to the back buffers above and this is never bound. */
 	if (!g_resolve) {
 		glGenFramebuffers(1, &fbo);
@@ -243,7 +243,7 @@ int qsv3d_init(int w, int h)
 		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
 		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rbDepth);
 		fbs = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-		printf("qsv3d: DRAM fallback render FBO %dx%d status=0x%x (complete=0x%x)\n",
+		printf("phxgl: DRAM fallback render FBO %dx%d status=0x%x (complete=0x%x)\n",
 		       w, h, fbs, GL_FRAMEBUFFER_COMPLETE);
 	}
 
@@ -259,7 +259,7 @@ int qsv3d_init(int w, int h)
 		glBindRenderbuffer(GL_RENDERBUFFER, rbCap);
 		glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
 		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbCap);
-		printf("qsv3d: capture FBO %dx%d status=0x%x\n", w, h, glCheckFramebufferStatus(GL_FRAMEBUFFER));
+		printf("phxgl: capture FBO %dx%d status=0x%x\n", w, h, glCheckFramebufferStatus(GL_FRAMEBUFFER));
 	}
 
 	glViewport(0, 0, w, h);
@@ -281,7 +281,7 @@ int qsv3d_init(int w, int h)
 	return 0;
 }
 
-void qsv3d_make_current(void)
+void phxgl_make_current(void)
 {
 	if (g_st)
 		_mesa_make_current(g_st->ctx, NULL, NULL);

@@ -33,10 +33,9 @@
  * playback rate, so the write itself provides natural backpressure and paces the
  * audio thread. WaitDevice is therefore a no-op.
  *
- * This is the pull-model counterpart of the QuakeSpasm push feeder in
- * tools/quakespasm-port/platform/pl_phoenix_snd.c: same open()/format/write() on
- * /dev/audio0, opposite control flow (there a feeder thread drained a mixer ring;
- * here SDL's own audio thread drives us).
+ * This is a pull-model backend: same open()/format/write() on /dev/audio0 as a
+ * push feeder would use, but with the opposite control flow (rather than a feeder
+ * thread draining a mixer ring, SDL's own audio thread drives us).
  *
  * The device format is fixed, so OpenDevice forces _this->spec to the native
  * format and lets SDL build a conversion stream from the app's requested spec.

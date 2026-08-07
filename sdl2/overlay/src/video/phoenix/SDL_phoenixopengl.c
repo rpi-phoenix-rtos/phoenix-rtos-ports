@@ -56,9 +56,9 @@ void PHOENIX_GL_UnloadLibrary(_THIS)
 /*
  * Static name -> function-pointer table. Phoenix has no dlopen/dlsym, so
  * SDL_GL_GetProcAddress is served from this hand-maintained table of the Mesa
- * GL entry points the SDL renderer and the ported games use. It mirrors the set
- * the QuakeSpasm/vkQuake ports proved present in libGL-phoenix.a; extend it as
- * new games need more of the GL surface.
+ * GL entry points the SDL renderer and the ported applications use. It mirrors
+ * the set the in-scope GL applications proved present in libGL-phoenix.a; extend
+ * it as new applications need more of the GL surface.
  */
 typedef struct
 {
@@ -67,16 +67,16 @@ typedef struct
 } PHOENIX_GLProc;
 
 /* Winsys: bind the current scanout-FB-backed FBO (defined in the GL-context glue). */
-extern void qsv3d_bind_fbo(void);
+extern void phxgl_bind_fbo(void);
 
 /* The surfaceless V3D context has no usable default framebuffer (FB 0) — the winsys scanout FBO is
- * the screen. Engines like quake3e's opengl1 renderer bind FB 0 to "return to the backbuffer",
+ * the screen. GL1-class renderers bind FB 0 to "return to the backbuffer",
  * which would dereference a NULL default framebuffer in Mesa (_mesa_bind_framebuffers). Redirect a
  * bind of 0 to the scanout FBO via the winsys; pass real (nonzero) FBO ids through unchanged. */
 static void PHOENIX_glBindFramebuffer(GLenum target, GLuint framebuffer)
 {
     if (framebuffer == 0) {
-        qsv3d_bind_fbo();
+        phxgl_bind_fbo();
     }
     else {
         glBindFramebuffer(target, framebuffer);
@@ -116,7 +116,7 @@ static const PHOENIX_GLProc phoenix_gl_procs[] = {
     { "glDepthMask", (void *)glDepthMask },
     { "glDepthRange", (void *)glDepthRange },
     { "glBlendFunc", (void *)glBlendFunc },
-    /* core GL 1.x entrypoints required by quake3e's opengl1 renderer (QGL_Core_PROCS) */
+    /* core GL 1.x entrypoints required by GL1-class renderers (QGL_Core_PROCS) */
     { "glDrawBuffer", (void *)glDrawBuffer },
     { "glGetBooleanv", (void *)glGetBooleanv },
     { "glLineWidth", (void *)glLineWidth },
@@ -204,8 +204,8 @@ static const PHOENIX_GLProc phoenix_gl_procs[] = {
     { "glGetRenderbufferParameteriv", (void *)glGetRenderbufferParameteriv },
     { "glIsFramebuffer", (void *)glIsFramebuffer },
     { "glRenderbufferStorageMultisample", (void *)glRenderbufferStorageMultisample },
-    /* --- ARB-suffixed entrypoints resolved by quake3e's opengl1 renderer (QGL_Ext/ARB/VBO_PROCS).
-     * The engine looks up the ARB/EXT names explicitly (not the core aliases), so provide them. --- */
+    /* --- ARB-suffixed entrypoints resolved by GL1-class renderers (QGL_Ext/ARB/VBO_PROCS).
+     * These engines look up the ARB/EXT names explicitly (not the core aliases), so provide them. --- */
     { "glActiveTextureARB", (void *)glActiveTextureARB },
     { "glClientActiveTextureARB", (void *)glClientActiveTextureARB },
     { "glMultiTexCoord2fARB", (void *)glMultiTexCoord2fARB },
@@ -251,12 +251,12 @@ SDL_GLContext PHOENIX_GL_CreateContext(_THIS, SDL_Window *window)
 
     /* Create the V3D screen + Mesa state-tracker context + scanout FBO(s) at the
      * window's (native) size. Provided by the separately-linked GL glue TU. */
-    if (qsv3d_init(window->w, window->h) != 0) {
-        SDL_SetError("PHOENIX: qsv3d_init (V3D GL context create) failed");
+    if (phxgl_init(window->w, window->h) != 0) {
+        SDL_SetError("PHOENIX: phxgl_init (V3D GL context create) failed");
         return NULL;
     }
-    qsv3d_make_current();
-    qsv3d_bind_fbo(); /* the surfaceless context has no usable default FB 0 */
+    phxgl_make_current();
+    phxgl_bind_fbo(); /* the surfaceless context has no usable default FB 0 */
 
     data->gl_created = 1;
     data->scanout = v3d_phoenix_scanout_active();
@@ -276,8 +276,8 @@ int PHOENIX_GL_MakeCurrent(_THIS, SDL_Window *window, SDL_GLContext context)
     (void)_this;
     (void)window;
     if (context) {
-        qsv3d_make_current();
-        qsv3d_bind_fbo();
+        phxgl_make_current();
+        phxgl_bind_fbo();
     }
     return 0;
 }
@@ -303,10 +303,10 @@ int PHOENIX_GL_SwapWindow(_THIS, SDL_Window *window)
 
     glFinish(); /* submit + synchronously finish the frame before the flip */
 
-    if (qsv3d_resolve()) {
+    if (phxgl_resolve()) {
         /* Scanout path: the just-rendered back buffer was page-flipped to the
          * display; bind the next back buffer for the following frame. */
-        qsv3d_bind_fbo();
+        phxgl_bind_fbo();
         return 0;
     }
 

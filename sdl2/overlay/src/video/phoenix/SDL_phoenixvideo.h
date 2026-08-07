@@ -56,23 +56,23 @@ typedef struct
  * build never provides. They are supplied by a small glue translation unit that
  * the *game* (or the SDL2 GL test) compiles with the Mesa flags and links
  * alongside libSDL2.a + libv3d-phoenix.a + libGL-phoenix.a. See the port's
- * glue/ directory. (Licensing: that glue TU carries the QuakeSpasm port's
- * GPL-2.0-or-later header — it is kept OUTSIDE libSDL2.a, which stays zlib. A
- * symbol reference from the zlib driver is not a derivative work.)
+ * glue/ directory. (Licensing: that glue TU is zlib-licensed and self-
+ * contained; it is kept OUTSIDE libSDL2.a, which also stays zlib. A symbol
+ * reference from the driver to the glue is not a derivative work.)
  *
- * qsv3d_init         create the V3D screen + GL state-tracker context and the
+ * phxgl_init         create the V3D screen + GL state-tracker context and the
  *                    scanout-backed FBO(s); makes the context current. Returns 0
  *                    on success.
- * qsv3d_make_current re-bind the context to the calling thread.
- * qsv3d_resolve      present the just-rendered back buffer (page-flip); returns
+ * phxgl_make_current re-bind the context to the calling thread.
+ * phxgl_resolve      present the just-rendered back buffer (page-flip); returns
  *                    1 if it presented (scanout path), 0 if not active.
- * qsv3d_bind_fbo     bind the framebuffer the next frame renders into (the
+ * phxgl_bind_fbo     bind the framebuffer the next frame renders into (the
  *                    surfaceless context has no usable default framebuffer 0).
  */
-extern int qsv3d_init(int w, int h);
-extern void qsv3d_make_current(void);
-extern int qsv3d_resolve(void);
-extern void qsv3d_bind_fbo(void);
+extern int phxgl_init(int w, int h);
+extern void phxgl_make_current(void);
+extern int phxgl_resolve(void);
+extern void phxgl_bind_fbo(void);
 
 /*
  * V3D framebuffer winsys hooks. These live in libv3d-phoenix.a (not GPL); the

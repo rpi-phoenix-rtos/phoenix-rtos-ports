@@ -25,7 +25,7 @@
 /*
  * Software (non-GL) framebuffer path. Games that create a plain SDL_Surface
  * window (no SDL_WINDOW_OPENGL) render into a CPU shadow buffer that
- * UpdateWindowFramebuffer copies to /dev/fb0. The in-scope games (Quake2/3/STK)
+ * UpdateWindowFramebuffer copies to /dev/fb0. The in-scope GL applications
  * all use the GL path above; this exists so SDL_GetWindowSurface-style clients
  * are not left without a driver.
  */
