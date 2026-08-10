@@ -253,8 +253,17 @@ static int PHOENIX_CreateWindow(_THIS, SDL_Window *window)
     window->h = (int)data->height;
     window->flags |= SDL_WINDOW_FULLSCREEN;
     window->flags &= ~(SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED);
-    window->flags |= SDL_WINDOW_SHOWN | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS;
 
+    /* Emit the visible + focused window events rather than pre-setting the flags.
+     * SDL_SendWindowEvent (and SDL_Set*Focus) suppress a state-change event when
+     * the matching flag is ALREADY set, so manually OR-ing SDL_WINDOW_SHOWN /
+     * _INPUT_FOCUS / _MOUSE_FOCUS here swallows the SHOWN / FOCUS_GAINED / ENTER
+     * events. Apps that gate rendering on those events then break: e.g. quake3e
+     * starts with gw_minimized = qtrue and clears it only on SHOWN / RESTORED /
+     * FOCUS_GAINED; without the event, R_IssueRenderCommands skips the backend
+     * ("skip backend when minimized") every frame and it renders black. Let SDL
+     * set the flags AND deliver the events. */
+    SDL_SendWindowEvent(window, SDL_WINDOWEVENT_SHOWN, 0, 0);
     SDL_SetMouseFocus(window);
     SDL_SetKeyboardFocus(window);
 
