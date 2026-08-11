@@ -62,7 +62,8 @@ static int phoenix_mouse_fd = -1;
 static int phoenix_kbd_raw = 0;    /* 1 = usbkbd raw 8-byte HID reports active */
 static uint8_t phoenix_kbd_prev[8];
 static int phoenix_mouse_btn_prev;
-static int phoenix_input_tries = 0; /* bounded lazy-open attempts */
+static int phoenix_input_tries = 0; /* bounded lazy-open attempts (keyboard) */
+static int phoenix_mouse_tries = 0; /* bounded lazy-open attempts (mouse) */
 
 #define PHOENIX_INPUT_MAX_OPEN_TRIES 200 /* ~a few seconds of frames */
 
@@ -77,7 +78,8 @@ static void PHOENIX_InputOpen(void)
             memset(phoenix_kbd_prev, 0, sizeof(phoenix_kbd_prev));
         }
     }
-    if (phoenix_mouse_fd < 0) {
+    if (phoenix_mouse_fd < 0 && phoenix_mouse_tries < PHOENIX_INPUT_MAX_OPEN_TRIES) {
+        phoenix_mouse_tries++;
         phoenix_mouse_fd = open("/dev/mouse0", O_RDONLY | O_NONBLOCK);
     }
 }

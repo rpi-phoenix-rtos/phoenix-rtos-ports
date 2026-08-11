@@ -173,15 +173,26 @@ static int PHOENIX_VideoInit(_THIS)
          * link/smoke tested. Rendering will fall back to offscreen FBOs. */
         SDL_SetError("PHOENIX: /dev/fb0 open failed (continuing headless)");
     } else if (ioctl(data->fb_fd, RPI4FB_GETMODE, &fbmode) == 0 && fbmode.framebuffer != 0) {
-        data->width = fbmode.width;
-        data->height = fbmode.height;
-        data->pitch = fbmode.pitch;
-        data->fb_pa = (uint32_t)fbmode.framebuffer;
-        data->fb_len = fbmode.smemlen;
-        /* Hand the scanout framebuffer to the V3D winsys BEFORE the GL context is
-         * created (the fullscreen render target is allocated during context
-         * create, so the winsys must already know the scanout PA to back it). */
-        data->scanout = v3d_phoenix_scanout_init(data->fb_pa, data->width, data->height, data->pitch);
+        /* The V3D scanout winsys takes a 32-bit scanout PA. On the Pi 4 the fb0
+         * scanout buffer always lives in low (<4 GiB) physical memory, so the
+         * cast below never loses bits — but guard it explicitly rather than
+         * truncate silently, so a future >4 GiB scanout PA can't corrupt the
+         * value handed to the winsys (falls back to headless, like fb0 open). */
+        if (fbmode.framebuffer > 0xffffffffULL) {
+            SDL_SetError("PHOENIX: fb0 scanout PA %llu exceeds the 32-bit winsys limit (continuing headless)",
+                (unsigned long long)fbmode.framebuffer);
+        }
+        else {
+            data->width = fbmode.width;
+            data->height = fbmode.height;
+            data->pitch = fbmode.pitch;
+            data->fb_pa = (uint32_t)fbmode.framebuffer;
+            data->fb_len = fbmode.smemlen;
+            /* Hand the scanout framebuffer to the V3D winsys BEFORE the GL context is
+             * created (the fullscreen render target is allocated during context
+             * create, so the winsys must already know the scanout PA to back it). */
+            data->scanout = v3d_phoenix_scanout_init(data->fb_pa, data->width, data->height, data->pitch);
+        }
     }
 
     SDL_zero(mode);

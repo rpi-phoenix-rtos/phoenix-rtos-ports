@@ -249,9 +249,21 @@ SDL_GLContext PHOENIX_GL_CreateContext(_THIS, SDL_Window *window)
         return NULL;
     }
 
+    /* SDL only needs an opaque non-NULL handle; store a token we can free.
+     * Allocate it BEFORE bringing up the V3D/Mesa context so a token-alloc
+     * failure can't leave gl_created set with an initialized-but-orphaned
+     * context — that would wedge every later CreateContext with the
+     * "a GL context already exists" error and leak the Mesa context. */
+    ctx = (int *)SDL_malloc(sizeof(int));
+    if (!ctx) {
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
     /* Create the V3D screen + Mesa state-tracker context + scanout FBO(s) at the
      * window's (native) size. Provided by the separately-linked GL glue TU. */
     if (phxgl_init(window->w, window->h) != 0) {
+        SDL_free(ctx);
         SDL_SetError("PHOENIX: phxgl_init (V3D GL context create) failed");
         return NULL;
     }
@@ -261,12 +273,6 @@ SDL_GLContext PHOENIX_GL_CreateContext(_THIS, SDL_Window *window)
     data->gl_created = 1;
     data->scanout = v3d_phoenix_scanout_active();
 
-    /* SDL only needs an opaque non-NULL handle; store a token we can free. */
-    ctx = (int *)SDL_malloc(sizeof(int));
-    if (!ctx) {
-        SDL_OutOfMemory();
-        return NULL;
-    }
     *ctx = 1;
     return (SDL_GLContext)ctx;
 }
