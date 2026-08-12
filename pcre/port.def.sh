@@ -7,6 +7,7 @@
 	name="pcre"
 	version="8.42"
 	desc="Perl Compatible Regular Expressions library"
+	cpe23="cpe:2.3:a:pcre:pcre:${version}:*:*:*:*:*:*:*"
 
 	source="http://ftp.exim.org/pub/pcre/"
 	archive_filename="${name}-${version}.tar.bz2"
@@ -15,7 +16,7 @@
 	size="1570171"
 	sha256="2cd04b7c887808be030254e8d77de11d3fe9d4505c39d4b15d2664ffe8bf9301"
 
-	license="BSD"
+	license="BSD-3-Clause"
 	license_file="LICENCE"
 
 	conflicts=""
