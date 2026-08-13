@@ -1,0 +1,147 @@
+--- acu/lib/timespec.h	2024-01-01 14:21:47.000000000 +0100
++++ bcu/lib/timespec.h	2026-08-13 14:20:07.820384044 +0200
+@@ -90,8 +90,8 @@
+ 
+ long int gettime_res (void);
+ struct timespec current_timespec (void);
+-void gettime (struct timespec *) _GL_ARG_NONNULL ((1));
+-int settime (struct timespec const *) _GL_ARG_NONNULL ((1));
++void gl_gettime (struct timespec *) _GL_ARG_NONNULL ((1));
++int gl_settime (struct timespec const *) _GL_ARG_NONNULL ((1));
+ 
+ #ifdef __cplusplus
+ }
+--- acu/lib/gettime.c	2024-01-01 14:21:47.000000000 +0100
++++ bcu/lib/gettime.c	2026-08-13 14:20:07.821860320 +0200
+@@ -1,4 +1,4 @@
+-/* gettime -- get the system clock
++/* gl_gettime -- get the system clock
+ 
+    Copyright (C) 2002, 2004-2007, 2009-2024 Free Software Foundation, Inc.
+ 
+@@ -26,7 +26,7 @@
+ /* Get the system time into *TS.  */
+ 
+ void
+-gettime (struct timespec *ts)
++gl_gettime (struct timespec *ts)
+ {
+ #if defined CLOCK_REALTIME && HAVE_CLOCK_GETTIME
+   clock_gettime (CLOCK_REALTIME, ts);
+@@ -46,6 +46,6 @@
+ current_timespec (void)
+ {
+   struct timespec ts;
+-  gettime (&ts);
++  gl_gettime (&ts);
+   return ts;
+ }
+--- acu/lib/settime.c	2024-01-01 14:21:47.000000000 +0100
++++ bcu/lib/settime.c	2026-08-13 14:20:07.822689806 +0200
+@@ -1,4 +1,4 @@
+-/* settime -- set the system clock
++/* gl_settime -- set the system clock
+ 
+    Copyright (C) 2002, 2004-2007, 2009-2024 Free Software Foundation, Inc.
+ 
+@@ -29,7 +29,7 @@
+ /* Set the system time.  */
+ 
+ int
+-settime (struct timespec const *ts)
++gl_settime (struct timespec const *ts)
+ {
+ #if defined CLOCK_REALTIME && HAVE_CLOCK_SETTIME
+   {
+--- acu/lib/parse-datetime.y	2024-03-18 19:39:34.000000000 +0100
++++ bcu/lib/parse-datetime.y	2026-08-13 14:20:07.825304273 +0200
+@@ -1723,7 +1723,7 @@
+   struct timespec gettime_buffer;
+   if (! now)
+     {
+-      gettime (&gettime_buffer);
++      gl_gettime (&gettime_buffer);
+       now = &gettime_buffer;
+     }
+ 
+--- acu/lib/parse-datetime.c	2024-03-28 14:55:03.000000000 +0100
++++ bcu/lib/parse-datetime.c	2026-08-13 14:20:07.826689815 +0200
+@@ -3345,7 +3345,7 @@
+   struct timespec gettime_buffer;
+   if (! now)
+     {
+-      gettime (&gettime_buffer);
++      gl_gettime (&gettime_buffer);
+       now = &gettime_buffer;
+     }
+ 
+--- acu/lib/utimens.c	2024-01-01 14:21:47.000000000 +0100
++++ bcu/lib/utimens.c	2026-08-13 14:20:07.830029055 +0200
+@@ -148,12 +148,12 @@
+   if (timespec[0].tv_nsec == UTIME_OMIT)
+     timespec[0] = get_stat_atime (statbuf);
+   else if (timespec[0].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[0]);
++    gl_gettime (&timespec[0]);
+ 
+   if (timespec[1].tv_nsec == UTIME_OMIT)
+     timespec[1] = get_stat_mtime (statbuf);
+   else if (timespec[1].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[1]);
++    gl_gettime (&timespec[1]);
+ 
+   return false;
+ }
+--- acu/lib/gethrxtime.c	2024-01-01 14:21:47.000000000 +0100
++++ bcu/lib/gethrxtime.c	2026-08-13 14:20:07.831952829 +0200
+@@ -63,7 +63,7 @@
+      clock that might jump backwards, since it's the best we can do.  */
+   {
+     struct timespec ts;
+-    gettime (&ts);
++    gl_gettime (&ts);
+     return xtime_make (ts.tv_sec, ts.tv_nsec);
+   }
+ #  endif
+--- acu/src/date.c	2024-01-06 16:36:07.000000000 +0100
++++ bcu/src/date.c	2026-08-13 14:20:07.832874075 +0200
+@@ -601,7 +601,7 @@
+           else
+             {
+               /* Prepare to print the current date/time.  */
+-              gettime (&when);
++              gl_gettime (&when);
+             }
+         }
+       else
+@@ -636,7 +636,7 @@
+         {
+           /* Set the system clock to the specified date, then regardless of
+              the success of that operation, format and print that date.  */
+-          if (settime (&when) != 0)
++          if (gl_settime (&when) != 0)
+             {
+               error (0, errno, _("cannot set date"));
+               ok = false;
+--- acu/src/ls.c	2024-03-26 19:57:27.000000000 +0100
++++ bcu/src/ls.c	2026-08-13 14:20:07.852108583 +0200
+@@ -4461,7 +4461,7 @@
+          time, in case the file happens to have been modified since
+          the last time we checked the clock.  */
+       if (timespec_cmp (current_time, when_timespec) < 0)
+-        gettime (&current_time);
++        gl_gettime (&current_time);
+ 
+       /* Consider a time to be recent if it is within the past six months.
+          A Gregorian year has 365.2425 * 24 * 60 * 60 == 31556952 seconds
+--- acu/src/pr.c	2024-01-01 14:27:23.000000000 +0100
++++ bcu/src/pr.c	2026-08-13 14:20:07.854603117 +0200
+@@ -1659,7 +1659,7 @@
+     {
+       static struct timespec timespec;
+       if (! timespec.tv_sec)
+-        gettime (&timespec);
++        gl_gettime (&timespec);
+       t = timespec;
+     }
+ 
