@@ -1,0 +1,11 @@
+--- a/lib/sh/tmpfile.c	2020-06-05 19:46:55.000000000 +0200
++++ b/lib/sh/tmpfile.c	2026-08-13 08:24:58.492439854 +0200
+@@ -152,7 +152,7 @@
+   if ((flags & MT_TEMPLATE) && strlen (nameroot) > PATH_MAX)
+     flags &= ~MT_TEMPLATE;
+ 
+-#ifdef USE_MKTEMP
++#if 0 /* USE_MKTEMP: Phoenix uses the mkstemp/random path */
+   if (flags & MT_TEMPLATE)
+     strcpy (filename, nameroot);
+   else

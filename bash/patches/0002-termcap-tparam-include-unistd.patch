@@ -1,0 +1,10 @@
+--- a/lib/termcap/tparam.c	2009-01-04 20:40:09.000000000 +0100
++++ b/lib/termcap/tparam.c	2026-08-13 07:21:42.557598984 +0200
+@@ -20,6 +20,7 @@
+ 
+ /* Emacs config.h may rename various library functions such as malloc.  */
+ #ifdef HAVE_CONFIG_H
++#include <unistd.h>
+ #include <config.h>
+ 
+ #ifdef HAVE_STDLIB_H 
