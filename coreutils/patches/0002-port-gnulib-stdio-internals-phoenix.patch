@@ -1,0 +1,85 @@
+--- a/lib/freadahead.c	2024-01-01 14:21:47.000000000 +0100
++++ b/lib/freadahead.c	2026-08-17 14:41:59.261688257 +0200
+@@ -33,7 +33,12 @@
+ size_t
+ freadahead (FILE *fp)
+ {
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__               /* Phoenix-RTOS libphoenix */
++  /* FILE: {fd,flags,mode,bufeof,bufpos,bufsz,buffer,lock}; F_WRITING = 1<<1. */
++  if ((fp->flags & (1u << 1)) != 0)
++    return 0;
++  return fp->bufeof - fp->bufpos;
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   if (fp->_IO_write_ptr > fp->_IO_write_base)
+     return 0;
+--- a/lib/freading.c	2024-01-01 14:21:47.000000000 +0100
++++ b/lib/freading.c	2026-08-17 14:42:04.204701669 +0200
+@@ -31,7 +31,9 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-# if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++# if defined __phoenix__              /* Phoenix-RTOS libphoenix */
++  return (fp->flags & (1u << 1) /*F_WRITING*/) == 0;
++# elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   return ((fp->_flags & _IO_NO_WRITES) != 0
+           || ((fp->_flags & (_IO_NO_READS | _IO_CURRENTLY_PUTTING)) == 0
+--- a/lib/freadptr.c	2024-01-01 14:21:47.000000000 +0100
++++ b/lib/freadptr.c	2026-08-17 14:42:10.159717824 +0200
+@@ -32,7 +32,15 @@
+   size_t size;
+ 
+   /* Keep this code in sync with freadahead!  */
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__               /* Phoenix-RTOS libphoenix */
++  if ((fp->flags & (1u << 1) /*F_WRITING*/) != 0)
++    return NULL;
++  size = fp->bufeof - fp->bufpos;
++  if (size == 0)
++    return NULL;
++  *sizep = size;
++  return (const char *) (fp->buffer + fp->bufpos);
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   if (fp->_IO_write_ptr > fp->_IO_write_base)
+     return NULL;
+--- a/lib/fpending.c	2024-01-01 14:21:47.000000000 +0100
++++ b/lib/fpending.c	2026-08-17 14:42:15.592732524 +0200
+@@ -36,7 +36,9 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__               /* Phoenix-RTOS libphoenix */
++  return (fp->flags & (1u << 1) /*F_WRITING*/) ? fp->bufpos : 0;
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   return fp->_IO_write_ptr - fp->_IO_write_base;
+ #elif defined __sferror || defined __DragonFly__ || defined __ANDROID__
+--- a/lib/fseterr.c	2024-01-01 14:21:47.000000000 +0100
++++ b/lib/fseterr.c	2026-08-17 14:42:20.717746257 +0200
+@@ -32,7 +32,9 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__               /* Phoenix-RTOS libphoenix */
++  fp->flags |= (1u << 3) /*F_ERROR*/;
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   fp->_flags |= _IO_ERR_SEEN;
+ #elif defined __sferror || defined __DragonFly__ || defined __ANDROID__
+--- a/lib/freadseek.c	2024-01-01 14:21:47.000000000 +0100
++++ b/lib/freadseek.c	2026-08-17 14:42:25.582759294 +0200
+@@ -39,6 +39,8 @@
+ #elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   fp->_IO_read_ptr += increment;
++#elif defined __phoenix__           /* Phoenix-RTOS libphoenix */
++  fp->bufpos += increment;
+ #elif defined __sferror || defined __DragonFly__ || defined __ANDROID__
+   /* FreeBSD, NetBSD, OpenBSD, DragonFly, Mac OS X, Cygwin, Minix 3, Android */
+   fp_->_p += increment;
