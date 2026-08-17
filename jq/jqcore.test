@@ -1,0 +1,59 @@
+# core jq: identity, field, pipe
+.a
+{"a":42}
+42
+
+# array construct + map + add
+[.[]|.*2]
+[1,2,3]
+[2,4,6]
+
+# object construction
+{n:(.|length), s:add}
+[10,20,30]
+{"n":3,"s":60}
+
+# select + comparison
+[.[]|select(.>2)]
+[1,2,3,4]
+[3,4]
+
+# string interpolation + ascii_upcase
+"\(.name) is \(.age)"|ascii_upcase
+{"name":"bob","age":9}
+"BOB IS 9"
+
+# sort_by / group_by
+group_by(.k)|map({k:.[0].k,n:length})
+[{"k":"a"},{"k":"b"},{"k":"a"}]
+[{"k":"a","n":2},{"k":"b","n":1}]
+
+# reduce
+reduce .[] as $x (0; .+$x)
+[1,2,3,4,5]
+15
+
+# recursive descent + numbers
+[..|numbers]
+{"a":1,"b":{"c":2,"d":[3,4]}}
+[1,2,3,4]
+
+# to_entries / from_entries roundtrip
+to_entries|from_entries
+{"x":1,"y":2}
+{"x":1,"y":2}
+
+# sqrt/floor (kept math)
+[.[]|sqrt|floor]
+[4,9,16]
+[2,3,4]
+
+# has / keys
+[keys[], (.|has("a"))]
+{"a":1,"c":3}
+["a","c",true]
+
+# tostring / tonumber / ltrimstr
+(.n|tostring) + ("00"+(.m|tostring))|ltrimstr("x")
+{"n":5,"m":7}
+"5007"
