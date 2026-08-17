@@ -1,0 +1,13 @@
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -205,8 +205,8 @@
+ 	FINAL_LIBS+= -lpthread
+ else
+ 	# All the other OSes (notably Linux)
+-	FINAL_LDFLAGS+= -rdynamic
+-	FINAL_LIBS+=-ldl -pthread -lrt
++	# Phoenix-RTOS: pthread/dl/rt live in libphoenix; -rdynamic unsupported (static link)
++	FINAL_LIBS+=
+ endif
+ endif
+ endif
