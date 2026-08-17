@@ -38,10 +38,14 @@ p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/Makefile" ]; then
+		# -O2 is load-bearing: at -O0, GCC defines __NO_INLINE__, so gnulib's
+		# gl_cv_c_inline_effective test fails, HAVE_INLINE stays undefined, and the
+		# gnulib extern-inline helpers (mbszero &c.) are neither inlined at call
+		# sites nor emitted out-of-line -> undefined references at link.
 		(cd "${PREFIX_PORT_WORKDIR}" && CONFIG_SITE="${PREFIX_PORT}/config.site" ./configure \
 			--host="${HOST}" --build=x86_64-pc-linux-gnu --prefix="${PREFIX_PORT_INSTALL}" \
 			CC="${HOST}-gcc" AR="${HOST}-ar" RANLIB="${HOST}-ranlib" \
-			CFLAGS="${CFLAGS}" LDFLAGS="${CFLAGS} ${LDFLAGS} -static" \
+			CFLAGS="${CFLAGS} -O2" LDFLAGS="${CFLAGS} ${LDFLAGS} -static" \
 			--disable-nls --disable-acl --disable-xattr --without-selinux --disable-libcap)
 	fi
 }
@@ -50,13 +54,17 @@ p_build() {
 	local n=0 f name
 
 	# -k: 5 tools (see header) fail to compile on header/macro gaps or need GMP;
-	# keep going and build+install the other 99.
+	# keep going and build the other 99 into src/. (We can't use `make install`:
+	# its `all` prerequisite fails on the 5, so -k skips install-am.)
 	make -k -C "${PREFIX_PORT_WORKDIR}" || true
-	make -k -C "${PREFIX_PORT_WORKDIR}" install || true
 
+	# Install the built tools straight from src/. Filter to aarch64 ELF executables:
+	# that skips the .o/.a/scripts and the host-arch build helpers (make-prime-list).
 	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
-	for f in "${PREFIX_PORT_INSTALL}/bin/"*; do
+	for f in "${PREFIX_PORT_WORKDIR}/src/"*; do
 		[ -f "${f}" ] || continue
+		case "${f}" in *.o | *.a | *.so | *.c | *.h | *.py | *.sh | *.x) continue ;; esac
+		"${CROSS}readelf" -h "${f}" 2>/dev/null | grep -q 'AArch64' || continue
 		name="$(basename "${f}")"
 		cp -a "${f}" "${PREFIX_PROG}/${name}"
 		${STRIP} -o "${PREFIX_PROG_STRIPPED}/${name}" "${PREFIX_PROG}/${name}"
