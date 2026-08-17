@@ -26,13 +26,13 @@
 # pulls in gnulib replacements that then fail to build (the load-bearing one is
 # ac_cv_func_chown_works=yes, which stops gnulib compiling rpl_chown).
 #
-# 99 of 104 tools build + link cleanly against libphoenix (zero missing symbols).
-# 5 are skipped pending header/macro work or an external lib, so `make -k` builds
-# the rest and we install whatever built:
+# 100 of 104 tools build + link cleanly against libphoenix (zero missing symbols),
+# so `make -k` builds the rest and we install whatever built. 4 are skipped pending
+# header work or an external lib:
 #   stat  - no <sys/vfs.h>/struct statfs in Phoenix
-#   sort  - RLIMIT_* macros absent from <sys/resource.h>
 #   stty  - missing termios flag macros
 #   factor, expr - need GMP (external library, not ported)
+# (sort now builds: libphoenix gained the RLIMIT_* ids it keys on.)
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
@@ -72,6 +72,6 @@ p_build() {
 		n=$((n + 1))
 	done
 
-	echo "coreutils: installed ${n} tools (stat/sort/stty/factor/expr skipped - see port.def.sh)"
+	echo "coreutils: installed ${n} tools (stat/stty/factor/expr skipped - see port.def.sh)"
 	[ "${n}" -ge 80 ] || b_die "coreutils: only ${n} tools built (expected ~99) - build broke"
 }
