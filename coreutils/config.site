@@ -119,3 +119,10 @@ ac_cv_func_setrlimit=yes
 # AC_FUNC_CHOWN cross-guess is "broken"; Phoenix chown honors -1 and works
 ac_cv_func_chown_works=yes
 gl_cv_func_chown_follows_symlink=yes
+# statfs()/fstatfs() + <sys/statfs.h>/<sys/vfs.h> added to libphoenix (session 47);
+# cross func-checks can't run, so assert them here. struct-member detection is
+# compile-time and works cross, so leave those to configure.
+ac_cv_func_statfs=yes
+ac_cv_func_fstatfs=yes
+ac_cv_header_sys_statfs_h=yes
+ac_cv_header_sys_vfs_h=yes
