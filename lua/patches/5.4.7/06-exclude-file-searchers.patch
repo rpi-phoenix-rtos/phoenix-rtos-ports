@@ -1,0 +1,31 @@
+--- a/src/luaconf.h
++++ b/src/luaconf.h
+@@ -54,6 +54,14 @@
+ #endif
+ 
+ 
++/*
++@@ LUA_EXCLUDE_FILE_SEARCHERS excludes the filesystem searchers from the
++** module searchers table: package.preload becomes the only module source,
++** so Lua cannot reach into the filesystem to load modules.
++*/
++/* #define LUA_EXCLUDE_FILE_SEARCHERS */
++
++
+ #if defined(LUA_USE_WINDOWS)
+ #define LUA_DL_DLL	/* enable support for DLL */
+ #define LUA_USE_C89	/* broadly, Windows is C89 */
+--- a/src/loadlib.c
++++ b/src/loadlib.c
+@@ -701,9 +701,11 @@
+ static void createsearcherstable (lua_State *L) {
+   static const lua_CFunction searchers[] = {
+     searcher_preload,
++#if !defined(LUA_EXCLUDE_FILE_SEARCHERS)
+     searcher_Lua,
+     searcher_C,
+     searcher_Croot,
++#endif
+     NULL
+   };
+   int i;

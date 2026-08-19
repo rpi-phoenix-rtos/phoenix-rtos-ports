@@ -1,8 +1,6 @@
-diff --git a/src/linit.c b/src/linit.c
-index 480da52..ce37175 100644
 --- a/src/linit.c
 +++ b/src/linit.c
-@@ -44,12 +44,10 @@ static const luaL_Reg loadedlibs[] = {
+@@ -44,12 +44,10 @@
    {LUA_LOADLIBNAME, luaopen_package},
    {LUA_COLIBNAME, luaopen_coroutine},
    {LUA_TABLIBNAME, luaopen_table},
@@ -12,6 +10,6 @@ index 480da52..ce37175 100644
    {LUA_MATHLIBNAME, luaopen_math},
    {LUA_UTF8LIBNAME, luaopen_utf8},
 -  {LUA_DBLIBNAME, luaopen_debug},
- #if defined(LUA_COMPAT_BITLIB)
-   {LUA_BITLIBNAME, luaopen_bit32},
- #endif
+   {NULL, NULL}
+ };
+ 

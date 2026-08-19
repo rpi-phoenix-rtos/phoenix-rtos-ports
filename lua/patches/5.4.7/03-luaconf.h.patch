@@ -1,0 +1,24 @@
+--- a/src/luaconf.h
++++ b/src/luaconf.h
+@@ -11,6 +11,8 @@
+ #include <limits.h>
+ #include <stddef.h>
+ 
++#include <luaconf_local.h>
++
+ 
+ /*
+ ** ===================================================================
+@@ -158,8 +160,12 @@
+ #else		/* }{ */
+ /* use defaults */
+ 
++#if !defined(LUA_INT_TYPE)
+ #define LUA_INT_TYPE	LUA_INT_DEFAULT
++#endif
++#if !defined(LUA_FLOAT_TYPE)
+ #define LUA_FLOAT_TYPE	LUA_FLOAT_DEFAULT
++#endif
+ 
+ #endif				/* } */
+ 

@@ -1,16 +1,14 @@
-diff --git a/src/Makefile b/src/Makefile
-index a13afb9..8e178c7 100644
 --- a/src/Makefile
 +++ b/src/Makefile
-@@ -4,26 +4,24 @@
+@@ -4,15 +4,18 @@
  # == CHANGE THE SETTINGS BELOW TO SUIT YOUR ENVIRONMENT =======================
  
  # Your platform. See PLATS for possible values.
--PLAT= none
+-PLAT= guess
 +PLAT= posix
  
 -CC= gcc -std=gnu99
--CFLAGS= -O2 -Wall -Wextra -DLUA_COMPAT_5_2 $(SYSCFLAGS) $(MYCFLAGS)
+-CFLAGS= -O2 -Wall -Wextra -DLUA_COMPAT_5_3 $(SYSCFLAGS) $(MYCFLAGS)
 -LDFLAGS= $(SYSLDFLAGS) $(MYLDFLAGS)
 +CC= $(CROSS)gcc
 +# MYCFLAGS and MYLDFLAGS are provided by the caller
@@ -25,8 +23,9 @@ index a13afb9..8e178c7 100644
 +AR= $(CROSS)ar rcs
 +RANLIB= $(CROSS)ranlib
  RM= rm -f
+ UNAME= uname
  
- SYSCFLAGS=
+@@ -20,13 +23,8 @@
  SYSLDFLAGS=
  SYSLIBS=
  
@@ -35,10 +34,13 @@ index a13afb9..8e178c7 100644
 -MYLIBS=
 -MYOBJS=
 -
+ # Special flags for compiler modules; -Os reduces code size.
+-CMCFLAGS= 
++CMCFLAGS=
+ 
  # == END OF USER SETTINGS -- NO NEED TO CHANGE ANYTHING BELOW THIS LINE =======
  
- PLATS= aix bsd c89 freebsd generic linux macosx mingw posix solaris
-@@ -57,7 +55,6 @@ a:	$(ALL_A)
+@@ -58,7 +56,6 @@
  
  $(LUA_A): $(BASE_O)
  	$(AR) $@ $(BASE_O)

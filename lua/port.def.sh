@@ -5,7 +5,7 @@
 	ports_api=1
 
 	name="lua"
-	version="5.3.6"
+	version="5.4.7"
 	desc="Small, compilable scripting language providing easy access to C code"
 	cpe23="cpe:2.3:a:lua:lua:${version}:*:*:*:*:*:*:*"
 
@@ -13,8 +13,8 @@
 	archive_filename="${name}-${version}.tar.gz"
 	src_path="${name}-${version}/"
 
-	size="303770"
-	sha256="fc5fd69bb8736323f026672b1b7235da613d7177e72558893a0bdcd320466d60"
+	size="374097"
+	sha256="9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30"
 
 	license="MIT"
 	license_file="src/lua.h"
@@ -62,7 +62,7 @@ p_build() {
 }
 
 p_build_test() {
-	tests_version="${PORTS_LUA_TESTS_VERSION:-5.3.4}" # There is no 5.3.6 tag for tests
+	tests_version="${PORTS_LUA_TESTS_VERSION:-5.4.7}"
 	tests_filename="lua-${tests_version}-tests.tar.gz"
 
 	b_port_download "https://www.lua.org/tests/" "${tests_filename}"

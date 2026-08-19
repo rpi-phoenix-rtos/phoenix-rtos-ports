@@ -1,0 +1,71 @@
+--- a/src/lua.c
++++ b/src/lua.c
+@@ -12,6 +12,8 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/time.h>
++#include <sys/resource.h>
+ 
+ #include <signal.h>
+ 
+@@ -82,13 +84,14 @@
+ 
+ static void print_usage (const char *badoption) {
+   lua_writestringerror("%s: ", progname);
+-  if (badoption[1] == 'e' || badoption[1] == 'l')
++  if (badoption[1] == 'p' || badoption[1] == 'e' || badoption[1] == 'l')
+     lua_writestringerror("'%s' needs argument\n", badoption);
+   else
+     lua_writestringerror("unrecognized option '%s'\n", badoption);
+   lua_writestringerror(
+   "usage: %s [options] [script [args]]\n"
+   "Available options are:\n"
++  "  -p prio   set priority 'prio'\n"
+   "  -e stat   execute string 'stat'\n"
+   "  -i        enter interactive mode after executing 'script'\n"
+   "  -l mod    require library 'mod' into global 'mod'\n"
+@@ -274,6 +277,7 @@
+ #define has_v		4	/* -v */
+ #define has_e		8	/* -e */
+ #define has_E		16	/* -E */
++#define has_p		32	/* -p */
+ 
+ 
+ /*
+@@ -322,9 +326,11 @@
+           return has_error;  /* invalid option */
+         args |= has_v;
+         break;
++      case 'p':
++        args |= has_p;  /* FALLTHROUGH */
+       case 'e':
+         args |= has_e;  /* FALLTHROUGH */
+-      case 'l':  /* both options need an argument */
++      case 'l':  /* these options need an argument */
+         if (argv[i][2] == '\0') {  /* no concatenated argument? */
+           i++;  /* try next 'argv' */
+           if (argv[i] == NULL || argv[i][0] == '-')
+@@ -341,7 +347,7 @@
+ 
+ 
+ /*
+-** Processes options 'e' and 'l', which involve running Lua code, and
++** Processes options 'p', 'e' and 'l', which involve running Lua code, and
+ ** 'W', which also affects the state.
+ ** Returns 0 if some code raises an error.
+ */
+@@ -351,6 +357,13 @@
+     int option = argv[i][1];
+     lua_assert(argv[i][0] == '-');  /* already checked */
+     switch (option) {
++      case 'p': {
++        const char *extra = argv[i] + 2;  /* option needs an argument */
++        if (*extra == '\0') extra = argv[++i];
++        lua_assert(extra != NULL);
++        setpriority(PRIO_PROCESS, 0, atoi(extra));
++        break;
++      }
+       case 'e':  case 'l': {
+         int status;
+         char *extra = argv[i] + 2;  /* both options need an argument */
