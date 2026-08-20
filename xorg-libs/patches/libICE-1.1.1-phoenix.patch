@@ -1,0 +1,14 @@
+--- a/src/iceauth.c
++++ b/src/iceauth.c
+@@ -65,8 +65,9 @@
+     }
+ #else /* ITIMER_REAL */
+     {
+-	long    time ();
+-	ldata[0] = time ((long *) 0);
++	/* Phoenix: drop the old-K&R "long time();" — it conflicts with <time.h>'s
++	 * time(time_t*). Use the real declaration (time.h is already included). */
++	ldata[0] = (long)time ((time_t *) 0);
+ 	ldata[1] = getpid ();
+     }
+ #endif /* ITIMER_REAL */
