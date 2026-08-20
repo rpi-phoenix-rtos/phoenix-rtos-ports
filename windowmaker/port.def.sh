@@ -37,10 +37,10 @@
 	supports="phoenix>=3.3"
 }
 
-# Phoenix-RTOS source/libc adaptations (the canonical copies are in the
-# coordination repo):
+# Phoenix-RTOS source/libc adaptations:
 #
-#   libphoenix gap-fills carried in a tiny static lib (tools/x11-port/ftw-phoenix/):
+#   libphoenix gap-fills carried in a tiny static lib (files/ftw-phoenix/,
+#   compiled into libftw.a by p_build):
 #     - nftw()/ftw()         : libphoenix has no <ftw.h> (WINGs/proplist.c)
 #     - scandir()/alphasort(): absent from libphoenix <dirent.h> (util helpers)
 #     - nice()               : no-op stub; no process-priority API (wmsetbg)
@@ -49,19 +49,16 @@
 #   build-time defines against the current sysroot:
 #     - -Drint=round         : libphoenix libm has no rint(); round() suffices
 #       for wmaker's UI coordinate/colour rounding (wcolorpanel.c, wbrowser.c)
-#   source patch:
-#     - src/main.c ExecuteShellCommand() hardcodes shell="/bin/sh"; guard with
-#       #ifndef WMAKER_SHELL and override via -DWMAKER_SHELL (the Pi's shell is
-#       /bin/sh on the NFS root) — same trap as the xterm/JWM ports.
+#     - -DWMAKER_SHELL="/bin/sh": retained compile-time hook for wmaker's shell.
+#       No source patch is carried: WindowMaker's src/main.c hardcodes "/bin/sh"
+#       which is exactly the Pi's shell path, so stock wmaker is correct as-is.
+#       The define is harmless (unused unless a future #ifndef WMAKER_SHELL guard
+#       is patched into main.c to relocate the shell) and kept for that hook.
 #
-# fontconfig (a wmaker build dependency) also needed two Phoenix source fixes:
-#   - fccache.c: libphoenix <sys/time.h> ships a non-standard value-based
-#     timercmp(); fontconfig passes struct-timeval pointers — redefine it with
-#     the standard pointer-based form after the include.
-#   - fccompat.c: FcRandom()'s rand_r() path had a non-constant static
-#     initializer; seed lazily. Forced onto rand_r() (libphoenix has no
-#     random()/initstate()/setstate()) via configure cache vars.
-# HOST build dep: gperf (fontconfig codegen).
+# NOTE: the font/2D stack (freetype, fontconfig incl. its two Phoenix source
+# fixes, libXft, expat, libpng, cairo) is NOT built here — it is the xorg_fonts
+# aggregate port (a dependency). gperf (fontconfig codegen) is a host dep of
+# xorg_fonts, not of this port.
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
