@@ -1,0 +1,18 @@
+Teach coreutils' bundled mini-gmp.h that Phoenix's <stdio.h> provides FILE.
+The guard that exposes mpz_out_str() checks each libc's stdio include-guard;
+Phoenix's (_LIBPHOENIX_STDIO_H_) was missing, so factor/expr failed to compile
+with an implicit-declaration error. mini-gmp.c defines the symbol unconditionally,
+so only the header declaration needed teaching.
+
+--- acu/lib/mini-gmp.h
++++ bcu/lib/mini-gmp.h
+@@ -297,7 +297,8 @@
+   || defined (_ISO_STDIO_ISO_H)       /* Sun C++ */		\
+   || defined (__STDIO_LOADED)         /* VMS */			\
+   || defined (_STDIO)                 /* HPE NonStop */         \
+-  || defined (__DEFINED_FILE)         /* musl */
++  || defined (__DEFINED_FILE)         /* musl */               \
++  || defined (_LIBPHOENIX_STDIO_H_)   /* Phoenix */
+ size_t mpz_out_str (FILE *, int, const mpz_t);
+ #endif
+ 

@@ -26,12 +26,13 @@
 # pulls in gnulib replacements that then fail to build (the load-bearing one is
 # ac_cv_func_chown_works=yes, which stops gnulib compiling rpl_chown).
 #
-# 102 of 104 tools build + link cleanly against libphoenix (zero missing symbols),
-# so `make -k` builds the rest and we install whatever built. 3 are skipped:
+# 103 of 104 tools build + link cleanly against libphoenix (zero missing symbols),
+# so `make -k` builds the rest and we install whatever built. 1 is skipped:
 #   stty  - missing termios flag macros
-#   factor, expr - need GMP (external library, not ported)
 # (sort + stat now build: libphoenix gained the RLIMIT_* ids sort keys on and a
-#  statfs()/<sys/statfs.h> implementation stat needs.)
+#  statfs()/<sys/statfs.h> implementation stat needs. factor + expr now build too:
+#  patches/0003 teaches coreutils' bundled mini-gmp.h that Phoenix's <stdio.h>
+#  provides FILE, so mpz_out_str() is declared — no external GMP needed.)
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
@@ -52,9 +53,9 @@ p_prepare() {
 p_build() {
 	local n=0 f name
 
-	# -k: 5 tools (see header) fail to compile on header/macro gaps or need GMP;
-	# keep going and build the other 99 into src/. (We can't use `make install`:
-	# its `all` prerequisite fails on the 5, so -k skips install-am.)
+	# -k: stty (see header) fails to compile on missing termios macros; keep going
+	# and build the other 103 into src/. (We can't use `make install`: its `all`
+	# prerequisite fails on stty, so -k skips install-am.)
 	make -k -C "${PREFIX_PORT_WORKDIR}" || true
 
 	# Install the built tools straight from src/. Filter to aarch64 ELF executables:
@@ -71,6 +72,6 @@ p_build() {
 		n=$((n + 1))
 	done
 
-	echo "coreutils: installed ${n} tools (stty/factor/expr skipped - see port.def.sh)"
-	[ "${n}" -ge 80 ] || b_die "coreutils: only ${n} tools built (expected ~99) - build broke"
+	echo "coreutils: installed ${n} tools (only stty skipped - see port.def.sh)"
+	[ "${n}" -ge 100 ] || b_die "coreutils: only ${n} tools built (expected ~103) - build broke"
 }
