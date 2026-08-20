@@ -4,7 +4,7 @@
 {
 	ports_api=1
 
-	name="xorg-fonts"
+	name="xorg_fonts"
 	version="2.13.2"
 	desc="Font + 2D graphics stack for X11 on Phoenix-RTOS (freetype/fontconfig/cairo/libXft)"
 
@@ -15,7 +15,11 @@
 	# WindowMaker + Xft stack needs: libpng, jpeg, freetype, expat, fontconfig,
 	# libXft, cairo. Anchor source = freetype (the tier leaf); the rest are fetched
 	# in p_build. See docs/inprogress/x11-ports-migration-spec.md.
-	source="https://download.savannah.gnu.org/releases/freetype/"
+	# Anchor = freetype (the tier leaf). Served from the SourceForge CDN mirror:
+	# the upstream savannah.gnu.org host is frequently unreachable/slow and the
+	# phoesys ports mirror does not cache freetype, so both b_port_download hops
+	# would fail. SourceForge ships the byte-identical release (sha256 verified).
+	source="https://downloads.sourceforge.net/freetype/"
 	archive_filename="freetype-${version}.tar.gz"
 	src_path="freetype-${version}/"
 	size="3875020"
@@ -25,7 +29,7 @@
 	license_file="LICENSE.TXT"
 
 	conflicts=""
-	depends="xorg-libs zlib"   # X libs (libXrender/libX11/pixman) + zlib
+	depends="xorg_libs zlib"   # X libs (libXrender/libX11/pixman) + zlib
 
 	supports="phoenix>=3.3"
 }
@@ -83,7 +87,7 @@ p_build() {
 
 	# --- freetype (minimal: break the freetype<->harfbuzz cycle) ---
 	if [ ! -f "$PREFIX/lib/libfreetype.a" ]; then
-		_fetch_extract freetype-2.13.2 "https://download.savannah.gnu.org/releases/freetype/freetype-2.13.2.tar.gz"
+		_fetch_extract freetype-2.13.2 "https://downloads.sourceforge.net/freetype/freetype-2.13.2.tar.gz"
 		( cd "$SRC/freetype-2.13.2" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \

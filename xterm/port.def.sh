@@ -15,22 +15,19 @@
 	archive_filename="xterm-${version}.tar.gz"
 	src_path="xterm-snapshots-xterm-${version}/"
 
-	# size/sha256 of the github archive (fill in via b_port for reproducibility).
-	size=""
-	sha256=""
+	# size/sha256 of the github tag archive (xterm-snapshots mirror).
+	size="1567721"
+	sha256="f440dea104c81c6888aca8cc0855bb07070353bd2776d7f1d518c8d59a244874"
 
 	license="MIT"
 	license_file="COPYING"
 
 	conflicts=""
-	# NOTE: xterm depends on the full X11 client/toolkit lib stack
-	# (libXaw libXmu libXt libSM libICE libXext libXpm libXrender libX11
-	# libxcb libXau libXdmcp). On the RPi4 port these are NOT yet phoenix-rtos
-	# ports — they are cross-built into /tmp/x11-phoenix by
-	# tools/x11-port/build-x11-phoenix.sh in the coordination repo. Until that
-	# stack lands as ports, this recipe CANNOT be driven end-to-end by the ports
-	# build. See README.md in this directory (feeds task #12).
-	depends="libXaw libXmu libXt libXext libXpm libXrender libX11 libxcb"
+	# xterm needs the full X11 client/toolkit lib stack (libXaw libXmu libXt libSM
+	# libICE libXext libXpm libXrender libX11 libxcb libXau libXdmcp). Those are no
+	# longer separate ports: they are all bundled in the aggregate xorg_libs
+	# (Layer 1), which stages them into $PREFIX_BUILD/{lib,include}.
+	depends="xorg_libs"
 
 	supports="phoenix>=3.3"
 }
@@ -64,16 +61,22 @@ p_build() {
 	local fdset_shim="${PREFIX_PORT}/files/xterm-phoenix-fdset-shim.h"
 	local wctype_inc="${PREFIX_PORT}/files/include"
 
+	# Framework-provided env: HOST is the autotools triplet (aarch64-phoenix);
+	# TARGET (aarch64a72-generic-rpi4b) is NOT a valid config.sub machine. SYSROOT
+	# is the project sysroot the layer ports also use. The X11 client/toolkit stack
+	# was staged by xorg_libs into $PREFIX_BUILD/{lib,include}, so point the X lib
+	# prefix there (was /tmp/x11-phoenix under the old coordination-repo build).
+	local SYSROOT="${PREFIX_BUILD%/}/sysroot"
+
 	# CORE X bitmap fonts only (no Xft/fontconfig); curses/termcap features off
-	# (covered by the stub). --x-includes/--x-libraries must point at wherever
-	# the X11 lib stack was installed (see README — currently /tmp/x11-phoenix).
-	: "${XLIB_PREFIX:=/tmp/x11-phoenix}"
+	# (covered by the stub).
+	: "${XLIB_PREFIX:=${PREFIX_BUILD%/}}"
 
 	(cd "${PREFIX_PORT_WORKDIR}" && \
 		PKG_CONFIG="pkg-config --static" \
 		PKG_CONFIG_PATH="${XLIB_PREFIX}/lib/pkgconfig:${XLIB_PREFIX}/share/pkgconfig" \
 		PKG_CONFIG_LIBDIR="${XLIB_PREFIX}/lib/pkgconfig:${XLIB_PREFIX}/share/pkgconfig" \
-		./configure --host="${TARGET}" --prefix="${PREFIX}" \
+		./configure --host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" \
 			--x-includes="${XLIB_PREFIX}/include" --x-libraries="${XLIB_PREFIX}/lib" \
 			--disable-freetype --disable-luit --disable-imake --without-utempter \
 			--disable-toolbar --disable-double-buffer --disable-session-mgt \
@@ -89,8 +92,14 @@ p_build() {
 
 	local xclosure="${PREFIX_PORT_WORKDIR}/phoenix_termcap.o -lXaw7 -lXmu -lXt -lSM -lICE -lXpm -lXrender -lXext -lX11 -lxcb -lXau -lXdmcp -lphoenix -lc"
 
+	# NOTE the triple-backslash quoting on the string-valued -D macros: this CFLAGS
+	# value is handed to `make CFLAGS=...`, which re-expands it in the recipe's
+	# /bin/sh before invoking gcc. A single \" would be stripped by that shell, so
+	# gcc would see -DDEFSHELL_NAME=/bin/sh (the '/' then parses as division:
+	# "expected expression before '/' token"). \\\" survives one extra shell hop
+	# so gcc receives -DDEFSHELL_NAME="/bin/sh" (a real string literal).
 	make -C "${PREFIX_PORT_WORKDIR}" xterm \
-		CFLAGS="--sysroot=${SYSROOT} -include ${fdset_shim} -I${wctype_inc} -I${XLIB_PREFIX}/include -DDEFSHELL_NAME=\"${defshell}\" -DP_tmpdir=\"/tmp\"" \
+		CFLAGS="--sysroot=${SYSROOT} -include ${fdset_shim} -I${wctype_inc} -I${XLIB_PREFIX}/include -DDEFSHELL_NAME=\\\"${defshell}\\\" -DP_tmpdir=\\\"/tmp\\\"" \
 		LDFLAGS="--sysroot=${SYSROOT} -static -L${XLIB_PREFIX}/lib -L${SYSROOT}/lib" \
 		EXTRA_LOADFLAGS="${xclosure}"
 

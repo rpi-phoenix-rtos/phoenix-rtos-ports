@@ -4,7 +4,7 @@
 {
 	ports_api=1
 
-	name="xorg-libs"
+	name="xorg_libs"
 	version="2023.2"
 	desc="X11 client library stack (Xlib/XCB + toolkit libs) for Phoenix-RTOS"
 
@@ -23,7 +23,9 @@
 	sha256="c791aad9b5847781175388ebe2de85cb5f024f8dabf526d5d699c4f942660cc3"
 
 	license="MIT"          # X11/MIT across the stack
-	license_file="COPYING"
+	# xorgproto ships per-protocol COPYING-* files (no single COPYING); the core
+	# X11 protocol license is representative of the MIT-licensed stack.
+	license_file="COPYING-x11proto"
 
 	conflicts=""
 	depends=""             # Layer 1 has no external port deps
@@ -70,9 +72,17 @@ p_build() {
 	_apply_patches() {
 		local nv=$1 p
 		for p in "${PREFIX_PORT}/patches/$nv"*.patch; do
-			[ -f "$p" ] && (cd "$SRC/$nv" && patch -p1 -N <"$p" >/dev/null 2>&1)
+			[ -f "$p" ] || continue
+			# Idempotent: skip if already applied. The framework runs p_build under
+			# `set -ex`, and `patch -N` exits non-zero when it refuses a re-apply, so a
+			# second pass (e.g. this port built again as a dependency of xorg_fonts/
+			# xorg_server/xterm, or a developer rebuild) would otherwise abort here. A
+			# reverse dry-run succeeds only when the change is already present.
+			if patch -p1 -R --dry-run -d "$SRC/$nv" <"$p" >/dev/null 2>&1; then
+				continue
+			fi
+			patch -p1 -N -d "$SRC/$nv" <"$p" >/dev/null 2>&1 || b_die "xorg-libs: $nv patch $(basename "$p") failed"
 		done
-		return 0
 	}
 	# _xbuild <name-version> <url> [extra-configure-args]  (autotools, static, into $PREFIX)
 	_xbuild() {

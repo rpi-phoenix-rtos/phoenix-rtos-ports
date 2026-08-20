@@ -4,7 +4,7 @@
 {
 	ports_api=1
 
-	name="xorg-server"
+	name="xorg_server"
 	version="1.20.14"
 	desc="X.Org kdrive fbdev server (Xphoenix) for Phoenix-RTOS"
 
@@ -27,13 +27,17 @@
 	license_file="COPYING"
 
 	conflicts=""
-	depends="xorg-libs xorg-fonts zlib"
+	depends="xorg_libs xorg_fonts zlib"
 
 	supports="phoenix>=3.3"
 }
 
-# Apply the RECORD malloc(0)->NULL assert-guard patch to the xorg-server tree
-# (record/ early-return when numContexts==0; WindowMaker client disconnect trips it).
+# No patches: the xorg-server kdrive tree compiles unmodified on Phoenix. (The
+# former record/record.c malloc(0)->NULL assert-guard patch is gone: libphoenix
+# now returns a valid non-NULL pointer for malloc(0) (stdlib/malloc_dl.c), so
+# RECORD's xallocarray(0,...) no longer trips assert(ppAllContextsCopy) on a
+# WindowMaker client disconnect.) b_port_apply_patches stays as a harmless no-op
+# hook (patches/ absent) so a future patch drops in without touching p_prepare.
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 }

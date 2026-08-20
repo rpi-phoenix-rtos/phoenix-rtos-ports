@@ -19,20 +19,20 @@
 	archive_filename="WindowMaker-${version}.tar.gz"
 	src_path="WindowMaker-${version}/"
 
-	# fill in via b_port for reproducibility
-	size=""
-	sha256=""
+	size="3397167"
+	sha256="f22358ff60301670e1e2b502faad0f2da7ff8976632d538f95fe4638e9c6b714"
 
 	license="GPL-2.0-or-later"
 	license_file="COPYING"
 
 	conflicts=""
-	# NOTE: depends on the FULL X11 client/toolkit lib stack PLUS the
-	# antialiased-font stack (expat, fontconfig, libXft) — none of which are
-	# phoenix-rtos ports yet. On the RPi4 port they are cross-built into
-	# /tmp/x11-phoenix (build-x11-phoenix.sh) and /tmp/wmaker-deps
-	# (build-wmaker.sh) in the coordination repo. See README.md (feeds task #12).
-	depends="libXft fontconfig expat libXpm libXmu libXt libXext libXrender libX11 libxcb"
+	# Window Maker needs the FULL X11 client/toolkit lib stack (libXpm libXmu libXt
+	# libXext libXrender libX11 libxcb ...) PLUS the antialiased-font stack (libXft
+	# fontconfig expat freetype). Those are no longer separate ports: the toolkit
+	# libs are bundled in xorg_libs (Layer 1) and the font stack in xorg_fonts
+	# (Layer 2); both stage into $PREFIX_BUILD/{lib,include}. zlib comes in
+	# transitively via xorg_fonts.
+	depends="xorg_libs xorg_fonts"
 
 	supports="phoenix>=3.3"
 }
@@ -68,23 +68,50 @@ p_prepare() {
 }
 
 p_build() {
-	# Where the X11 lib stack + font stack were installed. On the RPi4 port this
-	# is the coordination repo's combined dependency prefix (see README).
-	: "${WMAKER_DEPS:=/tmp/wmaker-deps}"
-	# Compile-time fallback shell; the NFS root provides /bin/sh.
+	# Framework-provided env: HOST is the autotools triplet (aarch64-phoenix);
+	# TARGET (aarch64a72-generic-rpi4b) is NOT a valid config.sub machine. SYSROOT
+	# is the project sysroot the layer ports also use. The X11 client/toolkit stack
+	# (xorg_libs) and the font stack (xorg_fonts) both staged into
+	# $PREFIX_BUILD/{lib,include}, so the combined dependency prefix IS $PREFIX_BUILD
+	# (was /tmp/wmaker-deps under the old coordination-repo build).
+	local SYSROOT="${PREFIX_BUILD%/}/sysroot"
+	: "${WMAKER_DEPS:=${PREFIX_BUILD%/}}"
+	# Compile-time fallback shell; the NFS/SD root provides /bin/sh.
 	local wmshell="${WMAKER_SHELL:-/bin/sh}"
+	local TCGCC="${CROSS}gcc" TCAR="${CROSS}ar" TCRANLIB="${CROSS}ranlib"
 
-	# libphoenix gap-fill lib (nftw/scandir/nice) + its -include'd prototypes.
+	# libphoenix gap-fill lib: libphoenix ships no <ftw.h>/nftw() (WINGs/proplist.c),
+	# no scandir()/alphasort() (util helpers) and no nice() (wmsetbg). The sources
+	# live in files/ftw-phoenix/; build libftw.a and stage it + its headers into the
+	# dependency prefix so the -include'd prototype header resolves and -lftw links.
+	if [ ! -f "${WMAKER_DEPS}/lib/libftw.a" ]; then
+		local ftwsrc="${PREFIX_PORT}/files/ftw-phoenix"
+		"${TCGCC}" --sysroot="${SYSROOT}" -I"${ftwsrc}" -O2 -Wall \
+			-c "${ftwsrc}/ftw.c" -o "${PREFIX_PORT_BUILD}/ftw.o" || b_die "windowmaker: libftw compile failed"
+		"${TCAR}" rcs "${PREFIX_PORT_BUILD}/libftw.a" "${PREFIX_PORT_BUILD}/ftw.o"
+		"${TCRANLIB}" "${PREFIX_PORT_BUILD}/libftw.a"
+		mkdir -p "${WMAKER_DEPS}/lib" "${WMAKER_DEPS}/include"
+		cp "${PREFIX_PORT_BUILD}/libftw.a" "${WMAKER_DEPS}/lib/"
+		cp "${ftwsrc}/ftw.h" "${ftwsrc}/wmaker-phoenix-compat.h" "${WMAKER_DEPS}/include/"
+		echo "windowmaker: libftw.a + ftw.h + wmaker-phoenix-compat.h staged into ${WMAKER_DEPS}"
+	fi
+
+	# -Drint=round: libphoenix libm has no rint(); round() suffices for wmaker's UI
+	#   coordinate/colour rounding. -include wmaker-phoenix-compat.h: declares
+	#   nice/scandir/alphasort (defined in libftw.a) at every call site.
 	local gapdefs="-Drint=round -include wmaker-phoenix-compat.h"
 	local pwddefs="-DMAXHOSTNAMELEN=256 -DO_NOFOLLOW=0 -DXOS_USE_MTSAFE_PWDAPI -D_POSIX_THREAD_SAFE_FUNCTIONS=200809L"
-	local cf="--sysroot=${SYSROOT} -I${WMAKER_DEPS}/include ${pwddefs} ${gapdefs} -DWMAKER_SHELL=\"${wmshell}\""
+	# The \\\" quoting on -DWMAKER_SHELL survives the extra /bin/sh hop that
+	# `make CFLAGS=...` performs before invoking gcc (a bare \" would be stripped,
+	# leaving the '/' of /bin/sh to parse as division). Same fix as the xterm port.
+	local cf="--sysroot=${SYSROOT} -I${WMAKER_DEPS}/include ${pwddefs} ${gapdefs} -DWMAKER_SHELL=\\\"${wmshell}\\\""
 	local xclosure="-lXft -lfontconfig -lexpat -lfreetype -lXrender -lXpm -lXext -lXmu -lXt -lSM -lICE -lX11 -lxcb -lXau -lXdmcp -lz -lftw -lm"
 
 	(cd "${PREFIX_PORT_WORKDIR}" && \
 		PKG_CONFIG="pkg-config --static" \
 		PKG_CONFIG_PATH="${WMAKER_DEPS}/lib/pkgconfig:${WMAKER_DEPS}/share/pkgconfig" \
 		PKG_CONFIG_LIBDIR="${WMAKER_DEPS}/lib/pkgconfig:${WMAKER_DEPS}/share/pkgconfig" \
-		./configure --host="${TARGET}" --prefix="${PREFIX}" --sysconfdir="${PREFIX}/etc" \
+		./configure --host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" --sysconfdir="${PREFIX_PORT_INSTALL}/etc" \
 			--disable-shared \
 			--disable-png --disable-jpeg --disable-tiff --disable-gif --disable-webp \
 			--disable-magick --disable-shm --disable-xinerama --disable-nls --disable-xlocale \
@@ -93,9 +120,9 @@ p_build() {
 			CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
 			CFLAGS="${cf}" \
 			LDFLAGS="--sysroot=${SYSROOT} -static -L${WMAKER_DEPS}/lib -L${SYSROOT}/lib" \
-			LIBS="${xclosure}")
+			LIBS="${xclosure}") || b_die "windowmaker: configure failed"
 
-	make -C "${PREFIX_PORT_WORKDIR}" CFLAGS="${cf}"
+	make -C "${PREFIX_PORT_WORKDIR}" CFLAGS="${cf}" || b_die "windowmaker: build failed"
 
 	mkdir -p "${PREFIX_FS}/root/bin"
 	cp -v "${PREFIX_PORT_WORKDIR}/src/wmaker" "${PREFIX_FS}/root/bin/wmaker"
