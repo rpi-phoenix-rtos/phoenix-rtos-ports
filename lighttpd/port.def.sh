@@ -30,7 +30,14 @@ p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 
 	if [ ! -f "$PREFIX_PORT_WORKDIR/config.h" ]; then
-		CONFIGFILE=$(find "${PREFIX_ROOTFS:?PREFIX_ROOTFS not set!}/etc" -name "lighttpd.conf")
+		# lighttpd.conf lists the enabled mod_* plugins, which drive the static
+		# plugin table (plugin-static.h). Prefer the staged rootfs copy, but fall
+		# back to the root-skel SOURCE: ports may run before the fs stage has
+		# populated $PREFIX_ROOTFS/etc (e.g. an incremental --with-ports), and the
+		# original hard find then aborted the whole ports build.
+		CONFIGFILE=$(find "${PREFIX_ROOTFS:-}/etc" -name "lighttpd.conf" 2>/dev/null | head -1)
+		[ -n "$CONFIGFILE" ] || CONFIGFILE=$(find "${PREFIX_PROJECT:?PREFIX_PROJECT not set!}/_fs/root-skel/etc" -name "lighttpd.conf" 2>/dev/null | head -1)
+		[ -n "$CONFIGFILE" ] || b_die "lighttpd: lighttpd.conf not found in rootfs or root-skel"
 		grep mod_ "$CONFIGFILE" | cut -d'"' -f2 | xargs -L1 -I{} echo "PLUGIN_INIT({})" >"$PREFIX_PORT_WORKDIR"/src/plugin-static.h
 
 		LIGHTTPD_CFLAGS="-DLIGHTTPD_STATIC -DPHOENIX"
