@@ -93,6 +93,35 @@ p_build() {
 		echo "xorg-fonts: freetype-2.13.2 OK"
 	fi
 
+	# --- libfontenc (server-side font-encoding lib; needs zlib + xorgproto from L1) ---
+	if [ ! -f "$PREFIX/lib/libfontenc.a" ]; then
+		_fetch_extract libfontenc-1.1.8 "https://www.x.org/releases/individual/lib/libfontenc-1.1.8.tar.gz"
+		( cd "$SRC/libfontenc-1.1.8" \
+		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
+		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		  && make -j4 && make install ) || b_die "xorg-fonts: libfontenc failed"
+		echo "xorg-fonts: libfontenc-1.1.8 OK"
+	fi
+
+	# --- libXfont2 (server-side font lib; needed by xorg-server). Lib-only: its
+	#     in-tree font tools fail to link (deferred libc syms), so install .a + headers.
+	#     -DO_NOFOLLOW=0 -DNOFILES_MAX=256 + the cross malloc0/hypot run-test cache. ---
+	if [ ! -f "$PREFIX/lib/libXfont2.a" ]; then
+		_fetch_extract libXfont2-2.0.6 "https://www.x.org/releases/individual/lib/libXfont2-2.0.6.tar.gz"
+		( cd "$SRC/libXfont2-2.0.6" \
+		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
+		       ac_cv_lib_m_hypot=yes xorg_cv_malloc0_returns_null=no \
+		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -DO_NOFOLLOW=0 -DNOFILES_MAX=256" \
+		       LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		  && make ) || true   # tools may fail to link; the .a is what we need
+		[ -f "$SRC/libXfont2-2.0.6/.libs/libXfont2.a" ] || b_die "xorg-fonts: libXfont2.a not produced"
+		cp "$SRC/libXfont2-2.0.6/.libs/libXfont2.a" "$PREFIX/lib/"
+		( cd "$SRC/libXfont2-2.0.6" && make install-data >/dev/null 2>&1 ) || true
+		echo "xorg-fonts: libXfont2-2.0.6 OK (lib only)"
+	fi
+
 	# --- expat (fontconfig's XML parser) ---
 	if [ ! -f "$PREFIX/lib/libexpat.a" ]; then
 		_fetch_extract expat-2.5.0 "https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.bz2"
