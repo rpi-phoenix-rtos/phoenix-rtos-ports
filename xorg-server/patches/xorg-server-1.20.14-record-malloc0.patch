@@ -1,0 +1,34 @@
+RECORD: don't assert when there are no record contexts (malloc(0) -> NULL on Phoenix)
+
+RecordAClientStateChange() handles a client disconnecting (ClientStateGone /
+ClientStateRetained) by snapshotting the global ppAllContexts array so it can
+walk it while RecordDisableContext() mutates the original. It allocates that
+copy unconditionally and asserts the result is non-NULL:
+
+    numContextsCopy = numContexts;
+    ppAllContextsCopy = xallocarray(numContextsCopy, sizeof(RecordContextPtr));
+    assert(ppAllContextsCopy);
+
+When no record context is active numContexts == 0, so xallocarray(0, ...) calls
+malloc(0). On Phoenix-RTOS (and any conforming C library that may return NULL
+for a zero-size request) that yields NULL, the assert fires and the server
+aborts with SIGABRT. This is exactly what happens under Window Maker: it is the
+first client whose disconnect/state-change drives the RECORD ClientStateCallback
+while no recording client is attached (xtrace etc. never run), so twm/jwm/xeyes
+/xterm never hit it.
+
+There is nothing to snapshot or notify when there are no contexts, so return
+early. The assert is kept for the real allocation-failure case (numContexts > 0).
+This is a genuine malloc(0)-returns-NULL portability fix, upstreamable as-is.
+
+--- a/record/record.c
++++ b/record/record.c
+@@ -2728,6 +2728,8 @@ RecordAClientStateChange(CallbackListPtr *pcbl, void *nulldata,
+
+         /* RecordDisableContext modifies contents of ppAllContexts. */
+         numContextsCopy = numContexts;
++        if (numContextsCopy == 0)
++            break;
+         ppAllContextsCopy = xallocarray(numContextsCopy,
+                                         sizeof(RecordContextPtr));
+         assert(ppAllContextsCopy);
