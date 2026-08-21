@@ -1,0 +1,11 @@
+--- a/dw/selection.cc
++++ b/dw/selection.cc
+@@ -29,7 +29,7 @@
+ /*
+  * strndup() is a GNU extension.
+  */
+-extern "C" char *strndup(const char *s, size_t size)
++extern "C" char *dillo_unused_strndup(const char *s, size_t size)
+ {
+    char *r = (char *) malloc (size + 1);
+ 

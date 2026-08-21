@@ -1,0 +1,11 @@
+--- a/src/IO/http.c
++++ b/src/IO/http.c
+@@ -533,7 +533,7 @@
+ 
+    if (S) {
+       int ret, connect_ret;
+-      uint_t connect_ret_size = sizeof(connect_ret);
++      socklen_t connect_ret_size = sizeof(connect_ret);
+ 
+       a_IOwatch_remove_fd(fd, -1); 
+       S->flags &= ~HTTP_SOCKET_IOWATCH_ACTIVE;
