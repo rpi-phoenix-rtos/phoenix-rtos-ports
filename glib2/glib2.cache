@@ -1,0 +1,72 @@
+# Pre-seeded autoconf cache for cross-compiling glib-2.56 to aarch64-phoenix.
+#
+# glib's configure runs AC_TRY_RUN probes that cannot execute on the cross target
+# (stack-growth direction, va_copy semantics, posix_memalign compliance, ...).
+# Without cached answers they error or hang. These values are the canonical
+# aarch64/glibc-like answers (ARM aarch64 is little-endian, stack grows DOWN,
+# modern POSIX semantics), matching what Buildroot/OpenWrt seed for ARM glib2.
+#
+# Loaded via configure --cache-file=glib2.cache.
+#
+# Copyright 2026 Phoenix Systems
+# Author: Witold Bołt
+
+# --- glib runtime-probe answers (cross target) ---
+glib_cv_stack_grows=${glib_cv_stack_grows=no}
+glib_cv_uscore=${glib_cv_uscore=no}
+glib_cv_va_copy=${glib_cv_va_copy=yes}
+glib_cv_va_val_copy=${glib_cv_va_val_copy=yes}
+glib_cv_rtldglobal_broken=${glib_cv_rtldglobal_broken=no}
+glib_cv_have_strlcpy=${glib_cv_have_strlcpy=no}
+glib_cv_have_qsort_r=${glib_cv_have_qsort_r=no}
+glib_cv_long_long_format=${glib_cv_long_long_format=ll}
+glib_cv_compliant_posix_memalign=${glib_cv_compliant_posix_memalign=1}
+glib_cv_eventfd=${glib_cv_eventfd=no}
+glib_cv_g_atomic_lock_free=${glib_cv_g_atomic_lock_free=yes}
+glib_cv_gcc_has_builtin_atomic_operations=${glib_cv_gcc_has_builtin_atomic_operations=yes}
+glib_cv_have_libc_enable_secure=${glib_cv_have_libc_enable_secure=no}
+glib_cv_langinfo_codeset=${glib_cv_langinfo_codeset=no}
+glib_cv_langinfo_time=${glib_cv_langinfo_time=no}
+glib_cv_langinfo_altmon=${glib_cv_langinfo_altmon=no}
+glib_cv_langinfo_abaltmon=${glib_cv_langinfo_abaltmon=no}
+glib_cv_langinfo_outdigit=${glib_cv_langinfo_outdigit=no}
+
+# --- generic autoconf runtime probes that need cross answers ---
+ac_cv_func_posix_getpwuid_r=${ac_cv_func_posix_getpwuid_r=yes}
+ac_cv_func_posix_getgrgid_r=${ac_cv_func_posix_getgrgid_r=yes}
+ac_cv_func_printf_unix98=${ac_cv_func_printf_unix98=yes}
+ac_cv_func_vsnprintf_c99=${ac_cv_func_vsnprintf_c99=yes}
+
+# --- iconv lives in our stub -liconv (exports iconv_open, not libiconv_open) ---
+ac_cv_lib_iconv_iconv_open=${ac_cv_lib_iconv_iconv_open=yes}
+am_cv_func_iconv=${am_cv_func_iconv=yes}
+am_cv_lib_iconv=${am_cv_lib_iconv=yes}
+am_cv_proto_iconv_arg1=${am_cv_proto_iconv_arg1=}
+
+# --- gettext: we ship a stub <libintl.h> with identity gettext() macros (no
+#     runtime symbols). Seed the detection so glib's AM_GLIB_GNU_GETTEXT treats
+#     gettext as present-in-libc; --disable-nls means no catalogs are built. ---
+ac_cv_header_libintl_h=${ac_cv_header_libintl_h=yes}
+gt_cv_have_gettext=${gt_cv_have_gettext=yes}
+gt_cv_func_dgettext_libc=${gt_cv_func_dgettext_libc=yes}
+gt_cv_func_ngettext_libc=${gt_cv_func_ngettext_libc=yes}
+gt_cv_func_dgettext_libintl=${gt_cv_func_dgettext_libintl=no}
+ac_cv_func_bind_textdomain_codeset=${ac_cv_func_bind_textdomain_codeset=yes}
+ac_cv_func_dcgettext=${ac_cv_func_dcgettext=yes}
+ac_cv_func_ngettext=${ac_cv_func_ngettext=yes}
+ac_cv_func_dgettext=${ac_cv_func_dgettext=yes}
+
+# The host has no gettext tools (msgfmt/xgettext). With --disable-nls no message
+# catalogs are built, so these are never invoked for real; point them at no-op
+# /bin/true so the AM_GLIB_GNU_GETTEXT msgfmt presence+'-c' probe succeeds and
+# gt_cv_have_gettext stays "yes".
+ac_cv_path_MSGFMT=${ac_cv_path_MSGFMT=/bin/true}
+ac_cv_path_GMSGFMT=${ac_cv_path_GMSGFMT=/bin/true}
+ac_cv_path_XGETTEXT=${ac_cv_path_XGETTEXT=/bin/true}
+ac_cv_path_MSGMERGE=${ac_cv_path_MSGMERGE=/bin/true}
+
+# Phoenix <sys/socket.h> defines MSG_PEEK/MSG_OOB but not MSG_DONTROUTE; glib's
+# AC_COMPUTE_INT probe then yields an empty value and errors out. MSG_DONTROUTE
+# is only consulted by gio's gsocket (not built for the mc-critical libglib);
+# seed it to 0 (no-op flag) so configure completes.
+glib_cv_value_MSG_DONTROUTE=${glib_cv_value_MSG_DONTROUTE=0}
