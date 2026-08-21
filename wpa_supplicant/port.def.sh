@@ -5,7 +5,7 @@
 	ports_api=1
 
 	name="wpa_supplicant"
-	version="2.9"
+	version="2.11"
 	desc="Supplicant (client) for WPA/802.1x protocols"
 	cpe23="cpe:2.3:a:w1.fi:wpa_supplicant:${version}:*:*:*:*:*:*:*"
 
@@ -13,8 +13,8 @@
 	archive_filename="${name}-${version}.tar.gz"
 	src_path="${name}-${version}/"
 
-	size="3231785"
-	sha256="fcbdee7b4a64bea8177973299c8c824419c413ec2e3a95db63dd6a5dc3541f17"
+	size="3841433"
+	sha256="912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a"
 
 	license="BSD-3-Clause"
 	license_file="COPYING"
