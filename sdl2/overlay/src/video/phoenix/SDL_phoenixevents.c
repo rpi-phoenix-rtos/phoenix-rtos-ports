@@ -105,6 +105,45 @@ static SDL_Scancode phoenix_hid_scancode(uint8_t u)
     return SDL_SCANCODE_UNKNOWN;
 }
 
+/* HID usage + modifier byte -> printable US-QWERTY character for SDL_TEXTINPUT,
+ * or 0 if the key produces no text. SDL_SendKeyboardKey only delivers scancodes
+ * (SDL_KEYDOWN); text fields / the Quake console read SDL_TEXTINPUT, which the
+ * platform driver must generate. HID mod bits: 0=LCTRL 1=LSHIFT 2=LALT 3=LGUI
+ * 4=RCTRL 5=RSHIFT 6=RALT 7=RGUI. Skip text when CTRL/ALT/GUI is held (those are
+ * shortcuts, not typed characters); SHIFT selects the shifted glyph. */
+static char phoenix_hid_to_char(uint8_t u, uint8_t mod)
+{
+    int shift = (mod & 0x22u) != 0; /* LSHIFT | RSHIFT */
+
+    if ((mod & (0x11u | 0x44u | 0x88u)) != 0) { /* CTRL | ALT | GUI held */
+        return 0;
+    }
+    if (u >= 0x04u && u <= 0x1du) { /* a..z */
+        char c = (char)('a' + (int)(u - 0x04u));
+        return shift ? (char)(c - 32) : c;
+    }
+    if (u >= 0x1eu && u <= 0x26u) { /* 1..9 */
+        static const char sym[] = "!@#$%^&*(";
+        return shift ? sym[u - 0x1eu] : (char)('1' + (int)(u - 0x1eu));
+    }
+    switch (u) {
+        case 0x27u: return shift ? ')' : '0';
+        case 0x2cu: return ' ';
+        case 0x2du: return shift ? '_' : '-';
+        case 0x2eu: return shift ? '+' : '=';
+        case 0x2fu: return shift ? '{' : '[';
+        case 0x30u: return shift ? '}' : ']';
+        case 0x31u: return shift ? '|' : '\\';
+        case 0x33u: return shift ? ':' : ';';
+        case 0x34u: return shift ? '"' : '\'';
+        case 0x35u: return shift ? '~' : '`';
+        case 0x36u: return shift ? '<' : ',';
+        case 0x37u: return shift ? '>' : '.';
+        case 0x38u: return shift ? '?' : '/';
+        default:    return 0;
+    }
+}
+
 /* Diff one raw 8-byte HID report against the previous one -> SDL key events. */
 static void phoenix_kbd_process(const uint8_t *rep)
 {
@@ -140,6 +179,18 @@ static void phoenix_kbd_process(const uint8_t *rep)
             SDL_Scancode sc = phoenix_hid_scancode(u);
             if (sc != SDL_SCANCODE_UNKNOWN) {
                 SDL_SendKeyboardKey(SDL_PRESSED, sc);
+            }
+            /* Also emit SDL_TEXTINPUT for printable keys so text fields / the
+             * Quake console receive typed characters (SDL gates delivery on
+             * whether text input is active). */
+            {
+                char c = phoenix_hid_to_char(u, rep[0]);
+                if (c != 0) {
+                    char text[2];
+                    text[0] = c;
+                    text[1] = '\0';
+                    SDL_SendKeyboardText(text);
+                }
             }
         }
     }
