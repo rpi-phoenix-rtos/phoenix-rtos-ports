@@ -19,7 +19,9 @@
 	# xbill (the one non-autoconf X demo, a bespoke hand-written-config.h build)
 	# is a SEPARATE port (../xbill) so its higher breakage risk cannot block
 	# staging of these four clean autoconf apps.
-	source="http://www.x.org/archive/individual/app"
+	# HTTPS (the http:// /archive/ endpoint is unreliable). xcalc-1.1.2 lives only in
+	# the /archive/ tree (not /releases/); same sha256 file, HTTPS is just reliable.
+	source="https://www.x.org/archive/individual/app"
 	archive_filename="xcalc-1.1.2.tar.gz"
 	src_path="xcalc-1.1.2/"
 	size="189989"
@@ -58,7 +60,11 @@ p_build() {
 	local SYSROOT="${PREFIX_BUILD%/}/sysroot"
 	local SRC="${PREFIX_PORT_BUILD}/appsrc"
 	local TCGCC="${CROSS}gcc" TCAR="${CROSS}ar" TCRANLIB="${CROSS}ranlib" TCNM="${CROSS}nm"
-	local XBASE="http://www.x.org/archive/individual/app"
+	# The app tarballs are SPLIT across x.org trees (xlogo only in /releases/, xedit
+	# only in /archive/, xclock in both), and http:// is unreliable — so _fetch_extract
+	# tries both HTTPS bases per app. XORG_APPS_BASE overrides the primary (mirror).
+	local XBASE_RELEASES="${XORG_APPS_BASE:-https://www.x.org/releases/individual/app}"
+	local XBASE_ARCHIVE="https://www.x.org/archive/individual/app"
 
 	# Rootfs staging targets.
 	local BINDST="${PREFIX_FS}/root/bin"
@@ -86,14 +92,16 @@ p_build() {
 	# --- helpers ---------------------------------------------------------------
 	# Fetch+extract an x.org app release tarball (stable artifact) into $SRC.
 	_fetch_extract() {
-		local nv=$1 attempt
+		local nv=$1 base attempt
 		cd "$SRC" || return 1
 		[ -d "$nv" ] && return 0
-		for attempt in 1 2 3; do
-			timeout 120 curl -fsSL -o "$nv.tar.gz" "$XBASE/$nv.tar.gz" && break
-			echo "xorg_apps: $nv fetch attempt $attempt/3 failed; retrying" >&2; sleep 5
+		for base in "$XBASE_RELEASES" "$XBASE_ARCHIVE"; do
+			for attempt in 1 2 3; do
+				timeout 120 curl -fsSL -o "$nv.tar.gz" "$base/$nv.tar.gz" && [ -s "$nv.tar.gz" ] && break 2
+				echo "xorg_apps: $nv fetch attempt $attempt/3 from $base failed; retrying" >&2; sleep 5
+			done
 		done
-		[ -s "$nv.tar.gz" ] || b_die "xorg_apps: $nv download failed from $XBASE/$nv.tar.gz"
+		[ -s "$nv.tar.gz" ] || b_die "xorg_apps: $nv download failed from all bases ($XBASE_RELEASES, $XBASE_ARCHIVE)"
 		tar xf "$nv.tar.gz" || b_die "xorg_apps: $nv extract failed"
 	}
 
