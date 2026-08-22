@@ -17,7 +17,9 @@
 	# path is the future goal G-XORG-MODERN. Recipe validated end-to-end
 	# (XPHOENIX-LINK-OK). See docs/inprogress/x11-ports-migration-spec.md + MASTER
 	# plan §J.
-	source="https://www.x.org/releases/individual/xserver/"
+	# artfiles.org mirror (x.org's own CDN xorg.freedesktop.org is frequently
+	# slow/unreachable); the byte-identical release, sha256-verified below.
+	source="https://artfiles.org/x.org/pub/xorg/individual/xserver/"
 	archive_filename="xorg-server-${version}.tar.gz"
 	src_path="xorg-server-${version}/"
 	size="9416754"

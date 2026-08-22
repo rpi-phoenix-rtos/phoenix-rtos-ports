@@ -51,16 +51,33 @@ p_build() {
 	export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig"
 	local PKGC="pkg-config --static"
 
+	# x.org tarballs come from the artfiles.org mirror by default — x.org's own CDN
+	# (xorg.freedesktop.org) is frequently slow or unreachable. Override with
+	# XORG_XBASE (e.g. XORG_XBASE=https://www.x.org/releases/individual).
+	local XMIRROR="https://artfiles.org/x.org/pub/xorg/individual"
+	local XBASE="${XORG_XBASE:-$XMIRROR}"
+	# Persistent shared tarball cache (owner-requested), keyed by real tarball name so
+	# it is SHARED with xorg_libs/xorg_server (same $DISTFILES). A cached tarball is
+	# reused with no network (offline-reproducible, survives buildroot wipes); a cache
+	# miss downloads then populates. Override the dir with PHOENIX_DISTFILES.
+	local DISTFILES="${PHOENIX_DISTFILES:-$HOME/.phoenix-distfiles}/xorg"
 	_fetch_extract() {
-		local nv=$1 url=$2 attempt
+		local nv=$1 url=$2 attempt fname="${2##*/}"
 		cd "$SRC" || return 1
 		[ -d "$nv" ] && return 0
-		for attempt in 1 2 3; do
-			timeout 180 curl -fsSL -o "$nv.tar.gz" "$url" && break
-			echo "xorg-fonts: $nv fetch $attempt/3 failed; retry" >&2; sleep 5
-		done
-		[ -s "$nv.tar.gz" ] || b_die "xorg-fonts: $nv download failed from $url"
-		tar xf "$nv.tar.gz" || b_die "xorg-fonts: $nv extract failed"
+		mkdir -p "$DISTFILES"
+		if [ -s "$DISTFILES/$fname" ]; then
+			echo "xorg-fonts: $nv from distfiles cache ($DISTFILES)" >&2
+			cp "$DISTFILES/$fname" "$SRC/$fname"
+		else
+			for attempt in 1 2 3; do
+				timeout 180 curl -fsSL -o "$SRC/$fname" "$url" && break
+				echo "xorg-fonts: $nv fetch $attempt/3 failed; retry" >&2; sleep 5
+			done
+			[ -s "$SRC/$fname" ] || b_die "xorg-fonts: $nv download failed from $url"
+			cp "$SRC/$fname" "$DISTFILES/$fname"
+		fi
+		tar xf "$SRC/$fname" || b_die "xorg-fonts: $nv extract failed"
 	}
 
 	# --- libpng (needs zlib, already staged) ---
@@ -99,7 +116,7 @@ p_build() {
 
 	# --- libfontenc (server-side font-encoding lib; needs zlib + xorgproto from L1) ---
 	if [ ! -f "$PREFIX/lib/libfontenc.a" ]; then
-		_fetch_extract libfontenc-1.1.8 "https://www.x.org/releases/individual/lib/libfontenc-1.1.8.tar.gz"
+		_fetch_extract libfontenc-1.1.8 "$XBASE/lib/libfontenc-1.1.8.tar.gz"
 		( cd "$SRC/libfontenc-1.1.8" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
@@ -112,7 +129,7 @@ p_build() {
 	#     in-tree font tools fail to link (deferred libc syms), so install .a + headers.
 	#     -DO_NOFOLLOW=0 -DNOFILES_MAX=256 + the cross malloc0/hypot run-test cache. ---
 	if [ ! -f "$PREFIX/lib/libXfont2.a" ]; then
-		_fetch_extract libXfont2-2.0.6 "https://www.x.org/releases/individual/lib/libXfont2-2.0.6.tar.gz"
+		_fetch_extract libXfont2-2.0.6 "$XBASE/lib/libXfont2-2.0.6.tar.gz"
 		( cd "$SRC/libXfont2-2.0.6" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       ac_cv_lib_m_hypot=yes xorg_cv_malloc0_returns_null=no \
@@ -176,7 +193,7 @@ p_build() {
 
 	# --- libXft (freetype + fontconfig + libXrender + libX11, all staged) ---
 	if [ ! -f "$PREFIX/lib/libXft.a" ]; then
-		_fetch_extract libXft-2.3.8 "https://www.x.org/releases/individual/lib/libXft-2.3.8.tar.gz"
+		_fetch_extract libXft-2.3.8 "$XBASE/lib/libXft-2.3.8.tar.gz"
 		( cd "$SRC/libXft-2.3.8" \
 		  && PKG_CONFIG="$PKGC" ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
