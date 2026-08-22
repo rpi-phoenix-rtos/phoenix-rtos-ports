@@ -15,6 +15,14 @@ fu_cv_sys_mounted_getmntent1=${fu_cv_sys_mounted_getmntent1=yes}
 ac_cv_func_getmntent=${ac_cv_func_getmntent=yes}
 ac_cv_search_getmntent=${ac_cv_search_getmntent=no}
 
+# hasmntopt is NOT provided by the mc-support stub. The cross link probe
+# false-positives it (reporting "yes"), which #defines HAVE_HASMNTOPT and makes
+# mountlist.c call an undeclared hasmntopt (a hard error under GCC 14). Force it
+# to "no": mountlist.c then supplies its own no-op `hasmntopt(mnt,opt)->NULL`
+# macro, which matches the stub's "report no mounts" behavior (bind-mount
+# detection is moot when there are no mounts).
+ac_cv_func_hasmntopt=${ac_cv_func_hasmntopt=no}
+
 # Cross-compile run-probe answers (canonical aarch64).
 ac_cv_func_realpath_works=${ac_cv_func_realpath_works=yes}
 ac_cv_func_working_mktime=${ac_cv_func_working_mktime=yes}
