@@ -1,0 +1,19 @@
+--- a/lisp/lisp.c
++++ b/lisp/lisp.c
+@@ -696,8 +696,14 @@
+     }
+     lisp__data.mem.index = 0;
+ 
+-    /* If the package was changed and an error happened */
+-    PACKAGE = lisp__data.savepackage;
++    /* If the package was changed and an error happened.
++     * Phoenix: guard against an error raised before any top level was ever
++     * entered (e.g. a failed (require "lisp") during LispBegin when the module
++     * .lsp files are not yet resolvable): in that case savepackage is still
++     * NULL, and assigning it would null the *PACKAGE* symbol's value, crashing
++     * the next ATOM2()/LispProclaimSpecial with a NULL package deref. */
++    if (lisp__data.savepackage)
++	PACKAGE = lisp__data.savepackage;
+     lisp__data.pack = lisp__data.savepack;
+ 
+     LispTopLevel();
