@@ -49,9 +49,16 @@ p_build() {
 	local SYSROOT="${PREFIX_BUILD%/}/sysroot"
 	local SRC="${PREFIX_PORT_BUILD}/x11src"
 	local TCGCC="${CROSS}gcc" TCAR="${CROSS}ar" TCRANLIB="${CROSS}ranlib"
-	local XBASE="https://www.x.org/releases/individual"
-	local XARCHIVE="https://xorg.freedesktop.org/archive/individual"
-	local XCBB="https://xcb.freedesktop.org/dist"
+	# Upstream tarball bases. Default to the canonical x.org / freedesktop hosts, but
+	# allow an env override so a mirror can be used when those are down/flaky (observed
+	# 2026-08-22: the x.org + freedesktop tarball CDNs served broken stubs for hours,
+	# blocking a clean build). A full x.org "individual" mirror (e.g.
+	# https://mirror.csclub.uwaterloo.ca/x.org/individual) carries lib/*.tar.{gz,xz},
+	# proto/*, and the xcb-util-*.tar.gz under lib/, so set:
+	#   XORG_XBASE=<mirror>/individual  XORG_XARCHIVE=<mirror>/individual  XORG_XCBB=<mirror>/individual/lib
+	local XBASE="${XORG_XBASE:-https://www.x.org/releases/individual}"
+	local XARCHIVE="${XORG_XARCHIVE:-https://xorg.freedesktop.org/archive/individual}"
+	local XCBB="${XORG_XCBB:-https://xcb.freedesktop.org/dist}"
 
 	mkdir -p "$SRC" "$PREFIX/lib/pkgconfig" "$PREFIX/share/pkgconfig" "$PREFIX/include"
 	# xorgproto/xcb-proto .pc land in share/pkgconfig; everything else in lib/pkgconfig.
