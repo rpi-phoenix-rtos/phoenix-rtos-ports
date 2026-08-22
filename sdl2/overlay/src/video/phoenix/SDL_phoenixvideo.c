@@ -39,6 +39,7 @@
 #include "../SDL_sysvideo.h"
 #include "../SDL_pixels_c.h"
 #include "../../events/SDL_events_c.h"
+#include "../../events/SDL_mouse_c.h"   /* SDL_GetMouse() to advertise native relative-mouse */
 
 #include "SDL_phoenixvideo.h"
 #include "SDL_phoenixevents.h"
@@ -93,6 +94,29 @@ static void PHOENIX_ConsoleSetMode(PHOENIX_VideoData *data, int mode)
     }
 }
 
+/*
+ * No-op relative-mouse + gamma hooks. The fb console has no hardware gamma table,
+ * and the phoenix input driver already delivers RELATIVE mouse motion natively
+ * (SDL_SendMouseMotion with relative=1, see SDL_phoenixevents.c). SDL only warned
+ * ("No relative mode implementation available ... update to SDL 2.0.3" and
+ * "Setting gamma failed: That operation is not supported") because the driver left
+ * these hooks NULL. Providing no-op hooks that report success silences both:
+ * relative mouse keeps working via the native motion events; gamma is a no-op.
+ */
+static int PHOENIX_SetRelativeMouseMode(SDL_bool enabled)
+{
+    (void)enabled;
+    return 0;
+}
+
+static int PHOENIX_SetWindowGammaRamp(_THIS, SDL_Window *window, const Uint16 *ramp)
+{
+    (void)_this;
+    (void)window;
+    (void)ramp;
+    return 0;
+}
+
 static void PHOENIX_DeleteDevice(SDL_VideoDevice *device)
 {
     SDL_free(device->driverdata);
@@ -133,6 +157,8 @@ static SDL_VideoDevice *PHOENIX_CreateDevice(void)
     device->CreateWindowFramebuffer = PHOENIX_CreateWindowFramebuffer;
     device->UpdateWindowFramebuffer = PHOENIX_UpdateWindowFramebuffer;
     device->DestroyWindowFramebuffer = PHOENIX_DestroyWindowFramebuffer;
+
+    device->SetWindowGammaRamp = PHOENIX_SetWindowGammaRamp; /* no-op: fb has no gamma table (silences SDL warning) */
 
     /* OpenGL over the in-process Mesa V3D stack (see SDL_phoenixopengl.c) */
     device->GL_LoadLibrary = PHOENIX_GL_LoadLibrary;
@@ -209,6 +235,11 @@ static int PHOENIX_VideoInit(_THIS)
     /* Claim the framebuffer: switch the HDMI text console to graphics mode. This
      * also prompts pl011-tty to release /dev/kbd0 for the input driver. */
     PHOENIX_ConsoleSetMode(data, FBCON_DISABLED);
+
+    /* Advertise native relative-mouse support: the input driver already emits
+     * relative SDL_MOUSEMOTION, so a no-op hook stops SDL's "No relative mode
+     * implementation available" warning without changing behaviour. */
+    SDL_GetMouse()->SetRelativeMouseMode = PHOENIX_SetRelativeMouseMode;
 
     return 0;
 }
