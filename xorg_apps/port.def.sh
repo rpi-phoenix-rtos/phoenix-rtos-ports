@@ -29,12 +29,15 @@
 	license_file="COPYING"
 
 	conflicts=""
-	# depends on xorg_libs ONLY: all four are core-X Xaw clients built
-	# --without-xft / --without-render, so they need no font/2D stack
-	# (xorg_fonts). xorg_libs stages the full client/toolkit closure
-	# (libXaw7/Xmu/Xt/SM/ICE/Xpm/Xext/xkbfile/X11/xcb/... + libiconv) into
-	# $PREFIX_BUILD/{lib,include}.
-	depends="xorg_libs"
+	# depends on xorg_libs (the core-X Xaw client/toolkit closure: libXaw7/Xmu/Xt/
+	# SM/ICE/Xpm/Xext/xkbfile/X11/xcb/...) built --without-xft / --without-render, so
+	# no font/2D stack (xorg_fonts) is needed. ALSO depends on libiconv: the apps link
+	# -liconv (satisfying libX11's Xlocale iconv refs, see _make_app XSYS below), and
+	# libiconv is a SEPARATE framework port (xorg_libs does NOT stage it) that is
+	# otherwise only pulled transitively by dillo, which is ordered AFTER xorg_apps —
+	# so without this explicit dep a clean build reaches xorg_apps before libiconv
+	# exists and xcalc fails to link (`cannot find -liconv`). Fixed 2026-08-22.
+	depends="xorg_libs libiconv"
 
 	supports="phoenix>=3.3"
 }
