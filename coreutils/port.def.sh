@@ -17,22 +17,24 @@
 	supports="phoenix>=3.3"
 }
 
-# GNU coreutils via its own autoconf + gnulib. Two Phoenix patches (patches/):
+# GNU coreutils via its own autoconf + gnulib. Phoenix patches (patches/):
 #   0001 renames gnulib gettime/settime (they clash with libphoenix symbols)
 #   0002 teaches gnulib's stdio internals (freadahead/freading/freadptr/fpending/
 #        fseterr/freadseek) about Phoenix's FILE struct
+#   0003 teaches the bundled mini-gmp.h that Phoenix's <stdio.h> provides FILE
+#   0004 gives stty's raw/-raw help printf an empty-string base arg so it does not
+#        collapse to a trailing comma when IUCLC/IXANY/IMAXBEL/XCASE are all absent
 # config.site supplies the cross ac_cv_* answers: configure otherwise mis-guesses
 # many present Phoenix libc functions as "missing/broken" when cross-compiling and
 # pulls in gnulib replacements that then fail to build (the load-bearing one is
 # ac_cv_func_chown_works=yes, which stops gnulib compiling rpl_chown).
 #
-# 103 of 104 tools build + link cleanly against libphoenix (zero missing symbols),
-# so `make -k` builds the rest and we install whatever built. 1 is skipped:
-#   stty  - missing termios flag macros
-# (sort + stat now build: libphoenix gained the RLIMIT_* ids sort keys on and a
-#  statfs()/<sys/statfs.h> implementation stat needs. factor + expr now build too:
-#  patches/0003 teaches coreutils' bundled mini-gmp.h that Phoenix's <stdio.h>
-#  provides FILE, so mpz_out_str() is declared — no external GMP needed.)
+# All 104 tools build + link cleanly against libphoenix (zero missing symbols).
+# (sort + stat build: libphoenix gained the RLIMIT_* ids sort keys on and a
+#  statfs()/<sys/statfs.h> implementation stat needs. factor + expr build via the
+#  0003 mini-gmp FILE fix — no external GMP needed. stty builds via 0004, which
+#  fixes a coreutils upstream trailing-comma when all four optional termios input
+#  flags are absent — Phoenix's termios omits IUCLC/IXANY/IMAXBEL/XCASE.)
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"

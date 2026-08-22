@@ -1,0 +1,12 @@
+--- a/src/stty.c
++++ b/src/stty.c
+@@ -979,6 +979,9 @@
+                  -isig%s min 1 time 0\n\
+    -raw          same as cooked\n\
+ "),
++   /* Phoenix: guarantee a base argument for the %s above so the printf does not
++      collapse to a trailing comma (all four flags below are absent here). */
++   ""
+ #ifdef IUCLC
+    " -iuclc"
+ #endif
