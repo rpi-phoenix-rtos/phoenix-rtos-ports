@@ -72,10 +72,21 @@ p_build() {
 	# (covered by the stub).
 	: "${XLIB_PREFIX:=${PREFIX_BUILD%/}}"
 
+	# PIN xterm's termcap/terminfo link-test OFF (cf_cv_lib_tgetent / _part_tgetent):
+	# xtermcap.c is redirected to the no-curses phoenix_termcap stub (plain-tgetent
+	# #else path). If configure is left to auto-detect tgetent it defines USE_TERMINFO
+	# (finding a tgetent-providing lib in the sysroot) -> xtermcap.c then #includes
+	# curses/term terminfo headers we don't ship -> "setupterm/tigetstr/cur_term
+	# undeclared" build failure. This bit us in a CLEAN --with-showcase --with-ports
+	# build (2026-08-22): the earlier build-verify ran against a dirty sysroot where
+	# the auto-detect happened to fail. Forcing both cache vars to "no" makes configure
+	# define NEITHER USE_TERMCAP nor USE_TERMINFO -> the plain-tgetent path the stub
+	# satisfies. (Mirrors tools/x11-port/build-xterm.sh, which documented this.)
 	(cd "${PREFIX_PORT_WORKDIR}" && \
 		PKG_CONFIG="pkg-config --static" \
 		PKG_CONFIG_PATH="${XLIB_PREFIX}/lib/pkgconfig:${XLIB_PREFIX}/share/pkgconfig" \
 		PKG_CONFIG_LIBDIR="${XLIB_PREFIX}/lib/pkgconfig:${XLIB_PREFIX}/share/pkgconfig" \
+		cf_cv_lib_tgetent=no cf_cv_lib_part_tgetent=no \
 		./configure --host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" \
 			--x-includes="${XLIB_PREFIX}/include" --x-libraries="${XLIB_PREFIX}/lib" \
 			--disable-freetype --disable-luit --disable-imake --without-utempter \
