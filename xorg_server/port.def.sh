@@ -73,7 +73,7 @@ p_build() {
 		       --disable-xinerama --without-dtrace --disable-systemd-logind --disable-secure-rpc \
 		       --disable-config-udev --disable-config-hal --without-systemd-daemon --disable-unit-tests \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -DMAXHOSTNAMELEN=256 -DXOS_USE_MTSAFE_PWDAPI -D_POSIX_THREAD_SAFE_FUNCTIONS=200809L -DO_NOFOLLOW=0 -DSI_USER=0 -DHAVE_CBRT=1" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 -DMAXHOSTNAMELEN=256 -DXOS_USE_MTSAFE_PWDAPI -D_POSIX_THREAD_SAFE_FUNCTIONS=200809L -DO_NOFOLLOW=0 -DSI_USER=0 -DHAVE_CBRT=1" \
 		       LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib -L$SYSROOT/lib" ) \
 		  || b_die "xorg-server: configure failed"
 		# --disable-xephyr = no server binary linked here; make only builds the libs.

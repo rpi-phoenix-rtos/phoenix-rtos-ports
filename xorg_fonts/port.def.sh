@@ -69,7 +69,7 @@ p_build() {
 		( cd "$SRC/libpng-1.6.40" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CPPFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" \
+		       CPPFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" \
 		       LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" --with-zlib-prefix="$PREFIX" \
 		  && make -j4 && make install ) || b_die "xorg-fonts: libpng failed"
 		echo "xorg-fonts: libpng-1.6.40 OK"
@@ -91,7 +91,7 @@ p_build() {
 		( cd "$SRC/freetype-2.13.2" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		       --without-zlib --without-png --without-harfbuzz --without-bzip2 --without-brotli \
 		  && make -j4 && make install ) || b_die "xorg-fonts: freetype failed"
 		echo "xorg-fonts: freetype-2.13.2 OK"
@@ -103,7 +103,7 @@ p_build() {
 		( cd "$SRC/libfontenc-1.1.8" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make -j4 && make install ) || b_die "xorg-fonts: libfontenc failed"
 		echo "xorg-fonts: libfontenc-1.1.8 OK"
 	fi
@@ -117,7 +117,7 @@ p_build() {
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       ac_cv_lib_m_hypot=yes xorg_cv_malloc0_returns_null=no \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -DO_NOFOLLOW=0 -DNOFILES_MAX=256" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 -DO_NOFOLLOW=0 -DNOFILES_MAX=256" \
 		       LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make ) || true   # tools may fail to link; the .a is what we need
 		[ -f "$SRC/libXfont2-2.0.6/.libs/libXfont2.a" ] || b_die "xorg-fonts: libXfont2.a not produced"
@@ -163,7 +163,7 @@ p_build() {
        ac_cv_member_struct_statvfs_f_basetype=no ac_cv_member_struct_statvfs_f_fstypename=no \
 		       FREETYPE_CFLAGS="-I$PREFIX/include/freetype2" FREETYPE_LIBS="-L$PREFIX/lib -lfreetype" \
 		       EXPAT_CFLAGS="-I$PREFIX/include" EXPAT_LIBS="-L$PREFIX/lib -lexpat" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make \
 		  && make DESTDIR="$fcstage" install ) || b_die "xorg-fonts: fontconfig failed"
 		# Land lib + headers + .pc into $PREFIX (DESTDIR install avoids the on-host
@@ -183,7 +183,7 @@ p_build() {
 		       FREETYPE_CFLAGS="-I$PREFIX/include/freetype2" FREETYPE_LIBS="-L$PREFIX/lib -lfreetype" \
 		       FONTCONFIG_CFLAGS="-I$PREFIX/include" FONTCONFIG_LIBS="-L$PREFIX/lib -lfontconfig -lexpat -lfreetype" \
 		       XRENDER_CFLAGS="-I$PREFIX/include" XRENDER_LIBS="-L$PREFIX/lib -lXrender -lX11" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make install ) || b_die "xorg-fonts: libXft failed"
 		echo "xorg-fonts: libXft-2.3.8 OK"
 	fi
@@ -197,7 +197,7 @@ p_build() {
 		     FREETYPE_CFLAGS="-I$PREFIX/include/freetype2" FREETYPE_LIBS="-L$PREFIX/lib -lfreetype" \
 		     png_CFLAGS="-I$PREFIX/include" png_LIBS="-L$PREFIX/lib -lpng16 -lz" \
 		     CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		     CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -O2" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		     CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 -O2" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		     ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       --enable-ft --enable-fc --enable-png \
 		       --disable-xlib --disable-xcb --disable-gl \

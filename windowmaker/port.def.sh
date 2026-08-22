@@ -101,7 +101,7 @@ p_build() {
 	# The \\\" quoting on -DWMAKER_SHELL survives the extra /bin/sh hop that
 	# `make CFLAGS=...` performs before invoking gcc (a bare \" would be stripped,
 	# leaving the '/' of /bin/sh to parse as division). Same fix as the xterm port.
-	local cf="--sysroot=${SYSROOT} -I${WMAKER_DEPS}/include ${pwddefs} ${gapdefs} -DWMAKER_SHELL=\\\"${wmshell}\\\""
+	local cf="--sysroot=${SYSROOT} -std=gnu17 -I${WMAKER_DEPS}/include ${pwddefs} ${gapdefs} -DWMAKER_SHELL=\\\"${wmshell}\\\""
 	local xclosure="-lXft -lfontconfig -lexpat -lfreetype -lXrender -lXpm -lXext -lXmu -lXt -lSM -lICE -lX11 -lxcb -lXau -lXdmcp -lz -lftw -lm"
 
 	(cd "${PREFIX_PORT_WORKDIR}" && \
