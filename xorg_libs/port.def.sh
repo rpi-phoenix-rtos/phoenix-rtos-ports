@@ -49,16 +49,21 @@ p_build() {
 	local SYSROOT="${PREFIX_BUILD%/}/sysroot"
 	local SRC="${PREFIX_PORT_BUILD}/x11src"
 	local TCGCC="${CROSS}gcc" TCAR="${CROSS}ar" TCRANLIB="${CROSS}ranlib"
-	# Upstream tarball bases. Default to the canonical x.org / freedesktop hosts, but
-	# allow an env override so a mirror can be used when those are down/flaky (observed
-	# 2026-08-22: the x.org + freedesktop tarball CDNs served broken stubs for hours,
-	# blocking a clean build). A full x.org "individual" mirror (e.g.
-	# https://mirror.csclub.uwaterloo.ca/x.org/individual) carries lib/*.tar.{gz,xz},
-	# proto/*, and the xcb-util-*.tar.gz under lib/, so set:
-	#   XORG_XBASE=<mirror>/individual  XORG_XARCHIVE=<mirror>/individual  XORG_XCBB=<mirror>/individual/lib
-	local XBASE="${XORG_XBASE:-https://www.x.org/releases/individual}"
-	local XARCHIVE="${XORG_XARCHIVE:-https://xorg.freedesktop.org/archive/individual}"
-	local XCBB="${XORG_XCBB:-https://xcb.freedesktop.org/dist}"
+	# Upstream tarball bases. The canonical x.org / freedesktop CDNs are flaky (observed
+	# 2026-08-22: served broken stubs for hours, blocking clean builds), so default to a
+	# reliable full mirror: artfiles.org carries the whole x.org "individual" tree —
+	# lib/*.tar.{gz,xz}, proto/*, and the xcb-util-*.tar.gz under lib/ (owner-suggested,
+	# HTTP-200 verified 2026-08-23). Override with XORG_XBASE / XORG_XARCHIVE / XORG_XCBB
+	# to use a different mirror; e.g. XORG_XBASE=https://www.x.org/releases/individual.
+	local XMIRROR="https://artfiles.org/x.org/pub/xorg/individual"
+	local XBASE="${XORG_XBASE:-$XMIRROR}"
+	local XARCHIVE="${XORG_XARCHIVE:-$XMIRROR}"
+	local XCBB="${XORG_XCBB:-$XMIRROR/lib}"
+	# Persistent tarball cache (owner-requested): downloaded tarballs are kept here so a
+	# clean rebuild reuses them instead of re-downloading. Populated on first miss; survives
+	# buildroot wipes (it lives outside the buildroot). Override the dir with PHOENIX_DISTFILES.
+	local DISTFILES="${PHOENIX_DISTFILES:-$HOME/.phoenix-distfiles}/xorg"
+	mkdir -p "$DISTFILES" 2>/dev/null || true
 
 	mkdir -p "$SRC" "$PREFIX/lib/pkgconfig" "$PREFIX/share/pkgconfig" "$PREFIX/include"
 	# xorgproto/xcb-proto .pc land in share/pkgconfig; everything else in lib/pkgconfig.
@@ -69,11 +74,19 @@ p_build() {
 		local nv=$1 url=$2 attempt
 		cd "$SRC" || return 1
 		[ -d "$nv" ] && return 0
-		for attempt in 1 2 3; do
-			timeout 120 curl -fsSL -o "$nv.tar.gz" "$url" && break
-			echo "xorg-libs: $nv fetch attempt $attempt/3 failed; retrying" >&2; sleep 5
-		done
-		[ -s "$nv.tar.gz" ] || b_die "xorg-libs: $nv download failed from $url"
+		# 1) Reuse the cached tarball if we have one (no network on a clean rebuild).
+		if [ -s "$DISTFILES/$nv.tar.gz" ]; then
+			cp "$DISTFILES/$nv.tar.gz" "$nv.tar.gz"
+			echo "xorg-libs: $nv from distfiles cache ($DISTFILES)" >&2
+		else
+			# 2) Cache miss: download (retry), then populate the cache for next time.
+			for attempt in 1 2 3; do
+				timeout 120 curl -fsSL -o "$nv.tar.gz" "$url" && break
+				echo "xorg-libs: $nv fetch attempt $attempt/3 failed; retrying" >&2; sleep 5
+			done
+			[ -s "$nv.tar.gz" ] || b_die "xorg-libs: $nv download failed from $url"
+			cp "$nv.tar.gz" "$DISTFILES/$nv.tar.gz" 2>/dev/null || true
+		fi
 		tar xf "$nv.tar.gz" || b_die "xorg-libs: $nv extract failed"
 	}
 	_apply_patches() {
