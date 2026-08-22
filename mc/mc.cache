@@ -1,0 +1,20 @@
+# Pre-seeded autoconf cache for cross-compiling mc-4.8.31 to aarch64-phoenix.
+# Loaded via configure --cache-file=mc.cache.
+#
+# Copyright 2026 Phoenix Systems
+# Author: Witold Bołt
+
+# mc's mountlist detection runs AC_TRY_RUN-ish probes + requires a getmntent-style
+# API. Phoenix has none; we seed the glibc getmntent1 method and supply a
+# getmntent stub (mc-support stub lib) that reports no mounts. The mc filesystem
+# free-space panel then shows an empty mount list, which is acceptable for a
+# first console MC.
+fu_cv_sys_mounted_getmntent1=${fu_cv_sys_mounted_getmntent1=yes}
+
+# getmntent/setmntent/endmntent come from the mc-support stub.
+ac_cv_func_getmntent=${ac_cv_func_getmntent=yes}
+ac_cv_search_getmntent=${ac_cv_search_getmntent=no}
+
+# Cross-compile run-probe answers (canonical aarch64).
+ac_cv_func_realpath_works=${ac_cv_func_realpath_works=yes}
+ac_cv_func_working_mktime=${ac_cv_func_working_mktime=yes}
