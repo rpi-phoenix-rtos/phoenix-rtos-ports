@@ -61,8 +61,14 @@ p_build() {
 	# reused with no network (offline-reproducible, survives buildroot wipes); a cache
 	# miss downloads then populates. Override the dir with PHOENIX_DISTFILES.
 	local DISTFILES="${PHOENIX_DISTFILES:-$HOME/.phoenix-distfiles}/xorg"
+	# Args after $nv are URLs tried in order (primary then fallback mirrors) so a
+	# flaky/down CDN falls back to a mirror — a fresh build (empty cache, e.g. the
+	# Docker release container) survives one CDN outage. Cache-first: a cached
+	# tarball (keyed by basename) skips the network entirely. curl -o writes to the
+	# primary's basename regardless of a mirror's remote name.
 	_fetch_extract() {
-		local nv=$1 url=$2 attempt fname="${2##*/}"
+		local nv=$1; shift
+		local fname="${1##*/}" u attempt
 		cd "$SRC" || return 1
 		[ -d "$nv" ] && return 0
 		mkdir -p "$DISTFILES"
@@ -70,11 +76,13 @@ p_build() {
 			echo "xorg-fonts: $nv from distfiles cache ($DISTFILES)" >&2
 			cp "$DISTFILES/$fname" "$SRC/$fname"
 		else
-			for attempt in 1 2 3; do
-				timeout 180 curl -fsSL -o "$SRC/$fname" "$url" && break
-				echo "xorg-fonts: $nv fetch $attempt/3 failed; retry" >&2; sleep 5
+			for u in "$@"; do
+				for attempt in 1 2 3; do
+					timeout 180 curl -fsSL -o "$SRC/$fname" "$u" && break 2
+					echo "xorg-fonts: $nv fetch $attempt/3 from $u failed; retry" >&2; sleep 5
+				done
 			done
-			[ -s "$SRC/$fname" ] || b_die "xorg-fonts: $nv download failed from $url"
+			[ -s "$SRC/$fname" ] || b_die "xorg-fonts: $nv download failed (tried: $*)"
 			cp "$SRC/$fname" "$DISTFILES/$fname"
 		fi
 		tar xf "$SRC/$fname" || b_die "xorg-fonts: $nv extract failed"
@@ -156,7 +164,7 @@ p_build() {
 
 	# --- fontconfig (needs freetype + expat; two Phoenix inline patches; needs gperf) ---
 	if [ ! -f "$PREFIX/lib/libfontconfig.a" ]; then
-		_fetch_extract fontconfig-2.14.2 "https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.14.2.tar.xz"
+		_fetch_extract fontconfig-2.14.2 "https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.14.2.tar.xz" "https://mirrors.mit.edu/macports/distfiles/fontconfig/fontconfig-2.14.2.tar.xz"
 		local fc="$SRC/fontconfig-2.14.2"
 		# (a) fccache.c: libphoenix <sys/time.h> defines a non-standard VALUE-based
 		#     timercmp(); fontconfig passes struct-timeval POINTERS — redefine standard.
@@ -207,7 +215,7 @@ p_build() {
 
 	# --- cairo (core lib only: skip the -pthread util) ---
 	if [ ! -f "$PREFIX/lib/libcairo.a" ]; then
-		_fetch_extract cairo-1.16.0 "https://cairographics.org/releases/cairo-1.16.0.tar.xz"
+		_fetch_extract cairo-1.16.0 "https://cairographics.org/releases/cairo-1.16.0.tar.xz" "https://mirrors.mit.edu/macports/distfiles/cairo/cairo-1.16.0.tar.xz"
 		( cd "$SRC/cairo-1.16.0" \
 		  && ax_cv_c_float_words_bigendian=no \
 		     FONTCONFIG_CFLAGS="-I$PREFIX/include" FONTCONFIG_LIBS="-L$PREFIX/lib -lfontconfig" \
