@@ -117,7 +117,7 @@ p_build() {
 			# shellcheck disable=2086
 			./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 				CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-				CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include ${XCFLAGS_EXTRA:-}" \
+				CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 ${XCFLAGS_EXTRA:-}" \
 				LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" $extra \
 				|| b_die "xorg-libs: $nv configure failed"
 		fi
@@ -173,7 +173,7 @@ p_build() {
 		( cd "$SRC/pixman-0.42.2" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static --disable-gtk \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make -C pixman install ) || b_die "xorg-libs: pixman build failed"
 		_copy_pc pixman-0.42.2 pixman-1.pc
 		echo "xorg-libs: pixman-0.42.2 OK (lib only)"
@@ -187,7 +187,7 @@ p_build() {
 	XCFLAGS_EXTRA="-DMAXHOSTNAMELEN=256 -DO_NOFOLLOW=0" \
 		_xbuild libSM-1.2.4  "$XBASE/lib/libSM-1.2.4.tar.gz"  "xorg_cv_malloc0_returns_null=no --without-libuuid"
 	XCFLAGS_EXTRA="$PWD_DEFS" \
-		_xbuild libXt-1.3.0  "$XBASE/lib/libXt-1.3.0.tar.gz"  "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes"
+		_xbuild libXt-1.3.1  "$XBASE/lib/libXt-1.3.1.tar.gz"  "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes"
 	XCFLAGS_EXTRA="$PWD_DEFS" \
 		_xbuild libXmu-1.2.1 "$XBASE/lib/libXmu-1.2.1.tar.gz" "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes"
 
@@ -197,7 +197,7 @@ p_build() {
 		( cd "$SRC/libXpm-3.5.17" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       xorg_cv_malloc0_returns_null=no CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include $PWD_DEFS" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 $PWD_DEFS" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make -C src install && make install-data ) || b_die "xorg-libs: libXpm build failed"
 		_copy_pc libXpm-3.5.17 xpm.pc
 		echo "xorg-libs: libXpm-3.5.17 OK (lib only)"
@@ -209,7 +209,7 @@ p_build() {
 		( cd "$SRC/libXaw-1.0.16" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       xorg_cv_malloc0_returns_null=no ac_cv_lib_m_hypot=yes CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include $PWD_DEFS" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 $PWD_DEFS" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make install ) || b_die "xorg-libs: libXaw build failed"
 		[ -f "$PREFIX/lib/libXaw7.a" ] && echo "xorg-libs: libXaw-1.0.16 OK" || b_die "xorg-libs: libXaw did not install"
 	fi
