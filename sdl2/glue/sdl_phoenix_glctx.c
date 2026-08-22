@@ -176,6 +176,21 @@ int phxgl_init(int w, int h)
 	GLuint fbo = 0, rbColor = 0, rbDepth = 0, rbScanDepth = 0;
 	GLenum fbs;
 
+	/* Re-init on the same process — e.g. yquake2's vid_restart when the user changes a VIDEO
+	 * menu setting: SDL DeleteContext keeps the Mesa context alive for the process (destroying it
+	 * wedges), then CreateContext calls us again. The Phoenix /dev/fb0 is fixed-size, so REUSE the
+	 * existing V3D/Mesa context + the already-claimed scanout FBOs instead of building a second
+	 * context. A second context would leak the first AND — because the winsys scanout is still
+	 * claimed by the first context's BOs (never freed) — the new scanout FBOs could not alias the
+	 * fb, so rendering went to off-screen memory and the display froze on the last frame (owner HW
+	 * report: Q2 video-setting change freezes the screen; a fresh process recovers it). The video
+	 * driver re-makes-current + re-binds the FBO after we return, so reuse is transparent. */
+	if (g_st != NULL && w == g_w && h == g_h) {
+		printf("phxgl: re-init (vid_restart) — reusing existing context + scanout FBOs %dx%d\n", w, h);
+		_mesa_make_current(g_st->ctx, NULL, NULL);
+		return 0;
+	}
+
 	memset(&cfg, 0, sizeof(cfg));
 	pscreen = v3d_screen_create(0, &cfg, NULL);
 	if (!pscreen) { printf("phxgl: pipe_screen NULL\n"); return 1; }
