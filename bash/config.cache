@@ -26,22 +26,10 @@ ac_cv_env_CC_FOR_BUILD_set=
 ac_cv_env_CC_FOR_BUILD_value=
 ac_cv_env_CC_set=set
 ac_cv_env_CC_value=aarch64-phoenix-gcc
-ac_cv_env_CFLAGS_FOR_BUILD_set=
-ac_cv_env_CFLAGS_FOR_BUILD_value=
-ac_cv_env_CFLAGS_set=set
-ac_cv_env_CFLAGS_value='-g -O2 -fcommon'
-ac_cv_env_CPPFLAGS_FOR_BUILD_set=
-ac_cv_env_CPPFLAGS_FOR_BUILD_value=
-ac_cv_env_CPPFLAGS_set=
-ac_cv_env_CPPFLAGS_value=
 ac_cv_env_CPP_set=
 ac_cv_env_CPP_value=
 ac_cv_env_DEBUGGER_START_FILE_set=
 ac_cv_env_DEBUGGER_START_FILE_value=
-ac_cv_env_LDFLAGS_FOR_BUILD_set=
-ac_cv_env_LDFLAGS_FOR_BUILD_value=
-ac_cv_env_LDFLAGS_set=set
-ac_cv_env_LDFLAGS_value=-Wl,--allow-multiple-definition
 ac_cv_env_LIBS_set=
 ac_cv_env_LIBS_value=
 ac_cv_env_YACC_set=
@@ -157,7 +145,7 @@ ac_cv_func_setresuid=${ac_cv_func_setresuid=no}
 ac_cv_func_setvbuf=${ac_cv_func_setvbuf=yes}
 ac_cv_func_setvbuf_reversed=${ac_cv_func_setvbuf_reversed=no}
 ac_cv_func_sigemptyset=${ac_cv_func_sigemptyset=yes}
-ac_cv_func_siginterrupt=${ac_cv_func_siginterrupt=no}
+ac_cv_func_siginterrupt=${ac_cv_func_siginterrupt=yes}
 ac_cv_func_sigprocmask=${ac_cv_func_sigprocmask=yes}
 ac_cv_func_snprintf=${ac_cv_func_snprintf=yes}
 ac_cv_func_stpcpy=${ac_cv_func_stpcpy=yes}
@@ -415,7 +403,7 @@ bash_cv_getcwd_malloc=${bash_cv_getcwd_malloc=yes}
 bash_cv_getenv_redef=${bash_cv_getenv_redef=no}
 bash_cv_getpw_declared=${bash_cv_getpw_declared=yes}
 bash_cv_have_strsignal=${bash_cv_have_strsignal=yes}
-bash_cv_job_control_missing=${bash_cv_job_control_missing=present}
+bash_cv_job_control_missing=${bash_cv_job_control_missing=missing}
 bash_cv_mail_dir=${bash_cv_mail_dir=/var/mail}
 bash_cv_must_reinstall_sighandlers=${bash_cv_must_reinstall_sighandlers=no}
 bash_cv_opendir_not_robust=${bash_cv_opendir_not_robust=no}
