@@ -46,7 +46,7 @@ p_prepare() {
 		(cd "${PREFIX_PORT_WORKDIR}" && ./configure \
 			--host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" \
 			--cache-file=config.cache CC="${HOST}-gcc" \
-			CFLAGS="${CFLAGS} -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int" LDFLAGS="${CFLAGS} ${LDFLAGS} -Wl,--allow-multiple-definition" \
+			CFLAGS="${CFLAGS} -std=gnu17 -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int" LDFLAGS="${CFLAGS} ${LDFLAGS} -Wl,--allow-multiple-definition" \
 			--without-bash-malloc --enable-static-link --disable-nls)
 	fi
 }
