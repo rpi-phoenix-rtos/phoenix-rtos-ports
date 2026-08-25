@@ -1,0 +1,7 @@
+# The xorg_server port compiles libmd (SHA1) in-place from sha1.c during its
+# build (see ../../port.def.sh: `cd "$FILES/libmd" && $TCGCC -c sha1.c ...`).
+# The resulting object + archive are build products, not sources — ignore them
+# so a completed xorg build does not leave the ports repo permanently "dirty"
+# (which forces downstream clean rebuilds and can strand other ports' staging).
+sha1.o
+libmd.a
