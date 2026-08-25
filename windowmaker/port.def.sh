@@ -102,15 +102,15 @@ p_build() {
 	# `make CFLAGS=...` performs before invoking gcc (a bare \" would be stripped,
 	# leaving the '/' of /bin/sh to parse as division). Same fix as the xterm port.
 	local cf="--sysroot=${SYSROOT} -std=gnu17 -I${WMAKER_DEPS}/include ${pwddefs} ${gapdefs} -DWMAKER_SHELL=\\\"${wmshell}\\\""
-	local xclosure="-lXft -lfontconfig -lexpat -lfreetype -lXrender -lXpm -lXext -lXmu -lXt -lSM -lICE -lX11 -lxcb -lXau -lXdmcp -lz -lftw -lm"
+	local xclosure="-lXft -lfontconfig -lexpat -lfreetype -lXrender -lXpm -lXext -lXmu -lXt -lSM -lICE -lX11 -lxcb -lXau -lXdmcp -lpng16 -lz -lftw -lm"
 
 	(cd "${PREFIX_PORT_WORKDIR}" && \
 		PKG_CONFIG="pkg-config --static" \
 		PKG_CONFIG_PATH="${WMAKER_DEPS}/lib/pkgconfig:${WMAKER_DEPS}/share/pkgconfig" \
 		PKG_CONFIG_LIBDIR="${WMAKER_DEPS}/lib/pkgconfig:${WMAKER_DEPS}/share/pkgconfig" \
-		./configure --host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" --sysconfdir="${PREFIX_PORT_INSTALL}/etc" \
+		./configure --host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" --datarootdir=/usr/share --sysconfdir=/etc \
 			--disable-shared \
-			--disable-png --disable-jpeg --disable-tiff --disable-gif --disable-webp \
+			--enable-png --disable-jpeg --disable-tiff --disable-gif --disable-webp \
 			--disable-magick --disable-shm --disable-xinerama --disable-nls --disable-xlocale \
 			--x-includes="${WMAKER_DEPS}/include" --x-libraries="${WMAKER_DEPS}/lib" \
 			xorg_cv_malloc0_returns_null=no \
@@ -124,4 +124,18 @@ p_build() {
 	mkdir -p "${PREFIX_FS}/root/bin"
 	cp -v "${PREFIX_PORT_WORKDIR}/src/wmaker" "${PREFIX_FS}/root/bin/wmaker"
 	cp -v "${PREFIX_PORT_WORKDIR}/src/wmaker" "${PREFIX_PROG}"
+
+	# Install + stage WindowMaker's RUNTIME DATA so the on-target wmaker finds its
+	# compiled DATADIR (/usr/share/WindowMaker + /usr/share/WINGs) and SYSCONFDIR
+	# (/etc/WindowMaker) — set via --prefix=/usr --sysconfdir=/etc above. Without
+	# this the port shipped only the binary and wmaker fell back to bare compiled
+	# defaults (no styles/pixmaps/icons, "could not load widget images" warnings).
+	local stage="${PREFIX_PORT_BUILD}/install-stage"
+	rm -rf "$stage"
+	make -C "${PREFIX_PORT_WORKDIR}" install DESTDIR="$stage" >/dev/null 2>&1 || b_die "windowmaker: make install failed"
+	mkdir -p "${PREFIX_FS}/root/usr/share" "${PREFIX_FS}/root/etc"
+	cp -a "$stage/usr/share/WindowMaker" "${PREFIX_FS}/root/usr/share/"
+	cp -a "$stage/usr/share/WINGs"       "${PREFIX_FS}/root/usr/share/"
+	cp -a "$stage/etc/WindowMaker"       "${PREFIX_FS}/root/etc/"
+	echo "windowmaker: staged /usr/share/{WindowMaker,WINGs} + /etc/WindowMaker into the rootfs"
 }
