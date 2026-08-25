@@ -181,7 +181,7 @@ p_build() {
 		( cd "$fc" \
 		  && PKG_CONFIG="$PKGC" ./configure --host="$XHOST" --build=x86_64-pc-linux-gnu \
 		       --prefix="$PREFIX" --disable-shared --enable-static --disable-docs \
-		       --with-cache-dir=/var/cache/fontconfig --with-default-fonts=/usr/share/fonts --sysconfdir=/etc \
+		       --with-cache-dir=/var/cache/fontconfig --with-default-fonts=/usr/share/fonts/truetype --sysconfdir=/etc \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" CC_FOR_BUILD=gcc \
 		       ac_cv_func_random=no ac_cv_func_initstate=no ac_cv_func_setstate=no ac_cv_func_random_r=no \
        ac_cv_member_struct_statfs_f_flags=no ac_cv_member_struct_statfs_f_fstypename=no \
