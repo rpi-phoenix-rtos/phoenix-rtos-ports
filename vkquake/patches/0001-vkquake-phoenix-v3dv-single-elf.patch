@@ -1,0 +1,403 @@
+diff -urN a/Quake/glquake.h b/Quake/glquake.h
+--- a/Quake/glquake.h	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/glquake.h	2026-08-26 15:02:20.929236433 +0200
+@@ -719,6 +719,13 @@
+ void R_CreatePipelineLayouts ();
+ void R_CreatePipelines ();
+ void R_DestroyPipelines ();
++/* Phoenix no-WSI fb0 path (pl_phoenix_vk_vid.c) builds only the UI-variant basic pipelines, so these
++ * four (formerly file-static in gl_rmisc.c) are exposed. R_CreateBasicPipelines skips MAIN/OIT/WBOIT
++ * variants whose render pass is VK_NULL_HANDLE. */
++void R_CreateShaderModules ();
++void R_DestroyShaderModules ();
++void R_InitVertexAttributes ();
++void R_CreateBasicPipelines ();
+ 
+ #define MAX_PUSH_CONSTANT_SIZE 128 // Vulkan guaranteed minimum maxPushConstantsSize
+ 
+diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
+--- a/Quake/gl_rmisc.c	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/gl_rmisc.c	2026-08-26 15:02:36.248174407 +0200
+@@ -27,6 +27,15 @@
+ #include "gl_heap.h"
+ #include <float.h>
+ 
++/* Phoenix no-WSI fb0 path (pl_phoenix_vk_vid.c): an mmap(MAP_ANONYMOUS)-backed
++ * VkAllocationCallbacks used as the pAllocator for shader-module create/destroy. Stock
++ * vkCreateShaderModule routes its (sizeof(module)+codeSize) allocation through libphoenix
++ * malloc when pAllocator==NULL, which faults for any single shader-module > one page (4096 B).
++ * Routing those allocations through mmap (a separate kernel mapping) bypasses the failing
++ * malloc heap. The driver does not record the create-time allocator, so DESTROY must pass the
++ * same callbacks (see DESTROY_SHADER_MODULE below). */
++extern const VkAllocationCallbacks *PL_VkHostAllocator (void);
++
+ cvar_t r_lodbias = {"r_lodbias", "1", CVAR_ARCHIVE};
+ cvar_t gl_lodbias = {"gl_lodbias", "0", CVAR_ARCHIVE};
+ 
+@@ -2144,8 +2153,10 @@
+ 	module_create_info.codeSize = size;
+ 	module_create_info.pCode = (const uint32_t *)code;
+ 
++	/* Phoenix no-WSI fb0 path: pass an mmap-backed pAllocator so the >page (codeSize > 4096 B)
++	 * shader-module allocation bypasses the libphoenix malloc path that faults for such sizes. */
+ 	VkShaderModule module;
+-	VkResult	   err = vkCreateShaderModule (vulkan_globals.device, &module_create_info, NULL, &module);
++	VkResult	   err = vkCreateShaderModule (vulkan_globals.device, &module_create_info, PL_VkHostAllocator (), &module);
+ 	if (err != VK_SUCCESS)
+ 		Sys_Error ("vkCreateShaderModule failed with code %i", (int)err);
+ 
+@@ -2191,12 +2202,15 @@
+ 	{                                                                                                      \
+ 		name##_module = cond ? R_CreateShaderModule (name##_spv, name##_spv_size, #name) : VK_NULL_HANDLE; \
+ 	} while (0)
+-#define DESTROY_SHADER_MODULE(name)                                             \
+-	do                                                                          \
+-	{                                                                           \
+-		if (name##_module != VK_NULL_HANDLE)                                    \
+-			vkDestroyShaderModule (vulkan_globals.device, name##_module, NULL); \
+-		name##_module = VK_NULL_HANDLE;                                         \
++/* Phoenix no-WSI fb0 path: modules were created with PL_VkHostAllocator() as pAllocator; the
++ * driver does not remember the create-time allocator, so DESTROY must pass the SAME callbacks
++ * (passing NULL would free an mmap pointer via libphoenix free() -> crash). */
++#define DESTROY_SHADER_MODULE(name)                                                            \
++	do                                                                                         \
++	{                                                                                          \
++		if (name##_module != VK_NULL_HANDLE)                                                   \
++			vkDestroyShaderModule (vulkan_globals.device, name##_module, PL_VkHostAllocator ()); \
++		name##_module = VK_NULL_HANDLE;                                                        \
+ 	} while (0)
+ 
+ DECLARE_SHADER_MODULE (basic_vert);
+@@ -2281,7 +2295,7 @@
+ R_InitVertexAttributes
+ ===============
+ */
+-static void R_InitVertexAttributes ()
++void R_InitVertexAttributes () /* was static: see R_CreateShaderModules (Phoenix no-WSI UI pipelines) */
+ {
+ 	{
+ 		basic_vertex_input_attribute_descriptions[0].binding = 0;
+@@ -2422,6 +2436,10 @@
+ 
+ 	infos->rasterization_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+ 	infos->rasterization_state.polygonMode = VK_POLYGON_MODE_FILL;
++	/* Back-face culling ON (upstream default). The earlier Phoenix bring-up forced cull=NONE while
++	 * textures/winding were being debugged; with textures clean and the per-pipeline frontFace values
++	 * (world=CLOCKWISE default, alias/viewmodel=COUNTER_CLOCKWISE) correct, BACK culling is the right
++	 * setting — skips back faces (perf) and matches upstream. */
+ 	infos->rasterization_state.cullMode = VK_CULL_MODE_BACK_BIT;
+ 	infos->rasterization_state.frontFace = VK_FRONT_FACE_CLOCKWISE;
+ 	infos->rasterization_state.depthClampEnable = VK_FALSE;
+@@ -2484,12 +2502,23 @@
+ R_CreateBasicPipelines
+ ===============
+ */
+-static void R_CreateBasicPipelines ()
++void R_CreateBasicPipelines () /* was static: Phoenix no-WSI fb0 path builds only the UI-variant basic pipelines (pl_phoenix_vk_vid.c) */
+ {
+ 	VkResult				err;
+ 	pipeline_create_infos_t infos;
+ 	R_InitDefaultStates (&infos);
+ 
++	/* Phoenix no-WSI fb0 path: disable back-face culling for the 2D/UI basic pipelines.
++	 * R_InitDefaultStates sets cullMode=BACK_BIT + frontFace=CLOCKWISE. The fb0 scanout present
++	 * uses a Y-flipped viewport (GL_Viewport: viewport.y = vid.height-(y+height)) on top of the
++	 * Y-negating 2D ortho (GL_OrthoMatrix), and on the V3D this net facing inversion makes the 2D
++	 * quads back-facing -> every 2D triangle is culled -> nothing rasterizes (HW: 2D draws recorded,
++	 * nullLayoutPC=0, but a textureless rect is invisible). 2D quads have no meaningful facing, so
++	 * CULL_MODE_NONE is the correct fix; it is scoped HERE to the basic 2D pipelines only (the
++	 * world/3D pipelines build their own infos and keep BACK-face culling). Same class as the
++	 * GLQuake-on-V3D back-face-cull fix. TODO(vkquake-port): if 3D later needs it, revisit frontFace. */
++	infos.rasterization_state.cullMode = VK_CULL_MODE_NONE;
++
+ 	const VkRenderPass main_render_pass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_STANDARD][MAIN_RENDER_PASS_STENCIL_CLEAR];
+ 	const VkRenderPass main_oit_render_pass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+ 	VkRenderPass	   ui_render_pass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
+@@ -2511,6 +2540,8 @@
+ 	for (int render_pass = 0; render_pass < countof (render_pass_variants); ++render_pass)
+ 	{
+ 		const int index = render_pass_variants[render_pass].index;
++		if (render_pass_variants[render_pass].render_pass == VK_NULL_HANDLE)
++			continue; /* Phoenix no-WSI: only RENDER_PASS_INDEX_UI has a render pass; MAIN/OIT/WBOIT are skipped */
+ 		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
+ 		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
+ 		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
+@@ -2531,6 +2562,8 @@
+ 	for (int render_pass = 0; render_pass < countof (render_pass_variants); ++render_pass)
+ 	{
+ 		const int index = render_pass_variants[render_pass].index;
++		if (render_pass_variants[render_pass].render_pass == VK_NULL_HANDLE)
++			continue; /* Phoenix no-WSI: see above */
+ 		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
+ 		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
+ 		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
+@@ -2555,6 +2588,8 @@
+ 	{
+ 		const int	   index = render_pass_variants[render_pass].index;
+ 		const qboolean wboit_pass = (index == RENDER_PASS_INDEX_WBOIT);
++		if (render_pass_variants[render_pass].render_pass == VK_NULL_HANDLE)
++			continue; /* Phoenix no-WSI: see above */
+ 		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
+ 		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
+ 		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
+@@ -3953,7 +3988,7 @@
+ R_CreateShaderModules
+ ===============
+ */
+-static void R_CreateShaderModules ()
++void R_CreateShaderModules () /* was static: Phoenix no-WSI fb0 path builds the UI pipelines from the shim (pl_phoenix_vk_vid.c) */
+ {
+ 	CREATE_SHADER_MODULE (basic_vert);
+ 	CREATE_SHADER_MODULE (basic_frag);
+@@ -3968,6 +4003,10 @@
+ 	CREATE_SHADER_MODULE (alias_alphatest_frag);
+ 	CREATE_SHADER_MODULE (alias_oit_frag);
+ 	CREATE_SHADER_MODULE (alias_alphatest_oit_frag);
++	/* md5_vert (5228 B, > one page) previously crashed in vkCreateShaderModule under the default
++	 * libphoenix-malloc allocator and was gated off. With the mmap-backed PL_VkHostAllocator()
++	 * now passed as pAllocator (see R_CreateShaderModule), the >page allocation bypasses the
++	 * failing malloc path, so md5_vert is re-enabled — all shader modules are created again. */
+ 	CREATE_SHADER_MODULE (md5_vert);
+ 	CREATE_SHADER_MODULE (sky_layer_vert);
+ 	CREATE_SHADER_MODULE (sky_layer_frag);
+@@ -4005,7 +4044,7 @@
+ R_DestroyShaderModules
+ ===============
+ */
+-static void R_DestroyShaderModules ()
++void R_DestroyShaderModules () /* was static: see R_CreateShaderModules (Phoenix no-WSI UI pipelines) */
+ {
+ 	DESTROY_SHADER_MODULE (basic_vert);
+ 	DESTROY_SHADER_MODULE (basic_frag);
+diff -urN a/Quake/gl_screen.c b/Quake/gl_screen.c
+--- a/Quake/gl_screen.c	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/gl_screen.c	2026-08-26 15:02:40.154184014 +0200
+@@ -1107,9 +1107,6 @@
+ {
+ 	cb_context_t *cbx = vulkan_globals.secondary_cb_contexts[SCBX_GUI];
+ 
+-	GL_SetCanvas (cbx, CANVAS_DEFAULT);
+-	R_BindPipeline (cbx, VK_PIPELINE_BIND_POINT_GRAPHICS, vulkan_globals.basic_blend_pipeline[cbx->render_pass_index]);
+-
+ 	// FIXME: only call this when needed
+ 	R_BeginDebugUtilsLabel (cbx, "2D");
+ 	SCR_TileClear (cbx);
+diff -urN a/Quake/gl_texmgr.c b/Quake/gl_texmgr.c
+--- a/Quake/gl_texmgr.c	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/gl_texmgr.c	2026-08-26 15:02:20.929209642 +0200
+@@ -1229,6 +1229,35 @@
+ 	image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+ 	vkCmdPipelineBarrier (command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
+ 
++#if defined(__phoenix__)
++	/* #29 FIX: on the Phoenix/aarch64 build the region imageExtent reaches the driver as 0x1x1
++	 * regardless of texture size (width never lands as built — observed for every texture, 2x2
++	 * and 64x64 alike, so it is not a mipwidth value). Re-derive each region's extent from the
++	 * authoritative glt dimensions at point-of-use, just before the copy: width/height = the
++	 * texture size shifted down by the region's own mip level (floored at 1), depth = 1. This
++	 * overwrites whatever bad value the build left, so conchars/whitetexture/bluenoise upload
++	 * their real pixels instead of a zero-area no-op. (Non-cube path; cube layers all share the
++	 * base mip extent.) */
++	{
++		uint32_t n_regions = (uint32_t)(num_mips * (is_cube ? 6 : 1));
++		for (uint32_t ri = 0; ri < n_regions; ri++) {
++			/* Derive the mip level from the loop index, NOT regions[ri].imageSubresource.mipLevel:
++			 * the build assigns mipLevel = region index sequentially (mipLevel = num_regions in the
++			 * mipmap loop), so lvl == ri is authoritative — and since the premise is that regions[]
++			 * is being corrupted, we must not read any field back from the array we are repairing
++			 * (a clobbered mipLevel would shift width to 1 and keep single-region textures broken). */
++			uint32_t lvl = is_cube ? 0u : ri;
++			uint32_t w = glt->width >> lvl;
++			uint32_t h = glt->height >> lvl;
++			regions[ri].imageExtent.width  = w ? w : 1u;
++			regions[ri].imageExtent.height = h ? h : 1u;
++			regions[ri].imageExtent.depth  = 1u;
++		}
++		if (getenv ("VKQ_TEXDBG"))
++		fprintf (stderr, "vkq-tex-fix: '%s' region0 extent now %dx%dx%d\n", glt->name,
++			regions[0].imageExtent.width, regions[0].imageExtent.height, regions[0].imageExtent.depth);
++	}
++#endif
+ 	vkCmdCopyBufferToImage (command_buffer, staging_buffer, glt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, num_mips * (is_cube ? 6 : 1), regions);
+ 
+ 	image_memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+diff -urN a/Quake/host_cmd.c b/Quake/host_cmd.c
+--- a/Quake/host_cmd.c	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/host_cmd.c	2026-08-26 15:02:20.929252002 +0200
+@@ -2637,6 +2637,19 @@
+ 	if (!sv.active && cls.demonum != -1 && !cls.demoplayback)
+ 	{
+ 		cls.demonum = 0;
++		/* Phoenix vkQuake bring-up: SKIP the auto-demo world-load. quake.rc's `startdemos`
++		 * runs inside Host_Init's Cbuf_Execute (host.c), so CL_NextDemo->demo1 would load a BSP
++		 * world + drive V_RenderView DURING Host_Init — before the instrumented frame loop, so a
++		 * world-render hang there is invisible/undebuggable. Go straight to the menu so Host_Init
++		 * completes cleanly; the world is then loaded by pl_phoenix_main's post-Host_Init
++		 * `map start`, inside the frame loop where the loop-N enter/exit heartbeat can pinpoint it.
++		 * TODO(vkquake-port): restore the demo loop once the world render path is proven. */
++		if (1)
++		{
++			cls.demonum = -1;
++			Cbuf_InsertText ("menu_main\n");
++			return;
++		}
+ 		if (!fitzmode && !cl_startdemos.value)
+ 		{ /* QuakeSpasm customization: */
+ 			/* go straight to menu, no CL_NextDemo */
+diff -urN a/Quake/r_alias.c b/Quake/r_alias.c
+--- a/Quake/r_alias.c	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/r_alias.c	2026-08-26 15:02:20.929281447 +0200
+@@ -198,6 +198,13 @@
+ 		if (paliashdr->poseverttype == PV_QUAKE3)
+ 			ubo->flags |= 0x4;
+ 
++#if defined(__phoenix__)
++		/* Opaque draw -> present with alpha=1 (the no-WSI fb0 scanout uses color-buffer alpha;
++		 * see alias_common.inc). Opaque = not alpha-blended and not alpha-tested. */
++		if (!has_alpha && !alphatest && showtris == 0)
++			ubo->flags |= 0x10;
++#endif
++
+ 		ubo->entalpha = entity_alpha;
+ 
+ 		VkDescriptorSet descriptor_sets[3] = {tx->descriptor_set, (fb != NULL) ? fb->descriptor_set : tx->descriptor_set, ubo_set};
+diff -urN a/Quake/sv_main.c b/Quake/sv_main.c
+--- a/Quake/sv_main.c	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/sv_main.c	2026-08-26 15:02:20.929295143 +0200
+@@ -1381,6 +1381,16 @@
+ {
+ 	int sound_num, field_mask;
+ 
++	// Phoenix/V3D vkQuake bring-up: on real HW this server-side builtin was reached
++	// at startup with client == NULL (caller PF_sv_localsound resolves
++	// &svs.clients[entnum-1], which is NULL when svs.clients is not yet allocated),
++	// faulting at the &client->message deref (far=0x70). Writing a server datagram to
++	// a non-existent client is invalid regardless, so guard it. The deeper
++	// init-ordering question (why the server localsound path runs before a client
++	// exists) is left for the HW/debug build to reveal.
++	if (client == NULL)
++		return;
++
+ 	for (sound_num = 1; sound_num < MAX_SOUNDS && sv.sound_precache[sound_num]; sound_num++)
+ 	{
+ 		if (!strcmp (sample, sv.sound_precache[sound_num]))
+diff -urN a/Quake/sys_sdl.c b/Quake/sys_sdl.c
+--- a/Quake/sys_sdl.c	2026-05-29 19:34:42.000000000 +0200
++++ b/Quake/sys_sdl.c	2026-08-26 15:02:20.929332433 +0200
+@@ -30,6 +30,7 @@
+ {
+ 	FILE	   *file;
+ 	const byte *memory;
++	int			owns_memory; /* memory[] was malloc'd by a slurping Sys_FileOpenRead -> free() on close */
+ 	int			pos;
+ 	int			size;
+ } file_handle_t;
+@@ -65,24 +66,54 @@
+ qfileofs_t Sys_FileOpenRead (const char *path, int *hndl)
+ {
+ 	FILE *f;
+-	int	  i, retval;
++	int	  i;
++	long  len;
++	byte *buf;
+ 
+ 	i = findhandle ();
+ 	f = fopen (path, "rb");
+-
+ 	if (!f)
+ 	{
+ 		*hndl = -1;
+-		retval = -1;
++		return -1;
+ 	}
+-	else
++
++	/* Slurp the whole file into RAM and CLOSE it immediately, then serve reads/seeks
++	 * from the buffer (via the memory[] handle path below). Two reasons:
++	 *   1. pak0.pak over NFS is otherwise read per-lump (hundreds of slow random reads).
++	 *   2. CRITICAL for demo playback: upstream kept the pak FILE* open for the whole
++	 *      session, so CL_PlayDemo's second fopen() on the SAME pak was a concurrent
++	 *      stream — which libphoenix cannot read (fread returns 0), so demos silently
++	 *      CL_StopPlayback at signon 0. Closing here leaves the demo's fopen the sole
++	 *      OS stream on the file. (Mirrors the working quakespasm-port Sys_FileOpenRead.) */
++	fseek (f, 0, SEEK_END);
++	len = ftell (f);
++	fseek (f, 0, SEEK_SET);
++	if (len < 0)
++		len = 0;
++	buf = (byte *) malloc ((size_t) (len > 0 ? len : 1)); /* >=1 byte so memory[]!=NULL marks the handle used */
++	if (!buf)
+ 	{
+-		sys_handles[i].file = f;
+-		*hndl = i;
+-		retval = Sys_filelength (f);
++		fclose (f);
++		*hndl = -1;
++		return -1;
+ 	}
++	if (len > 0 && fread (buf, 1, (size_t) len, f) != (size_t) len)
++	{
++		free (buf);
++		fclose (f);
++		*hndl = -1;
++		return -1;
++	}
++	fclose (f);
+ 
+-	return retval;
++	sys_handles[i].file = NULL;
++	sys_handles[i].memory = buf;
++	sys_handles[i].owns_memory = 1;
++	sys_handles[i].size = (int) len;
++	sys_handles[i].pos = 0;
++	*hndl = i;
++	return (qfileofs_t) len;
+ }
+ 
+ void Sys_MemFileOpenRead (const byte *memory, int size, int *hndl)
+@@ -117,8 +148,14 @@
+ 		fclose (sys_handles[handle].file);
+ 		sys_handles[handle].file = NULL;
+ 	}
+-	else
+-		sys_handles[handle].memory = NULL;
++	else if (sys_handles[handle].owns_memory && sys_handles[handle].memory)
++	{
++		free ((void *) sys_handles[handle].memory); /* slurped read buffer (NOT the static embedded pak) */
++	}
++	sys_handles[handle].memory = NULL;
++	sys_handles[handle].owns_memory = 0;
++	sys_handles[handle].size = 0;
++	sys_handles[handle].pos = 0;
+ }
+ 
+ void Sys_FileSeek (int handle, int position)
+@@ -135,6 +172,11 @@
+ 		return fread (dest, 1, count, sys_handles[handle].file);
+ 	else
+ 	{
++		int avail = sys_handles[handle].size - sys_handles[handle].pos;
++		if (count > avail)
++			count = avail;
++		if (count <= 0)
++			return 0;
+ 		memcpy (dest, sys_handles[handle].memory + sys_handles[handle].pos, count);
+ 		sys_handles[handle].pos += count;
+ 		return count;
+diff -urN a/Shaders/alias_common.inc b/Shaders/alias_common.inc
+--- a/Shaders/alias_common.inc	2026-05-29 19:34:42.000000000 +0200
++++ b/Shaders/alias_common.inc	2026-08-26 15:02:20.929332433 +0200
+@@ -21,6 +21,13 @@
+ 
+ 	result.a = original_diffuse_tex_a * ubo.entalpha;
+ 
++	// Phoenix no-WSI fb0 scanout uses the color-buffer alpha, so an opaque model must present
++	// with alpha=1; otherwise its low-alpha pixels (e.g. a flame's fullbright texels, where the
++	// nobright diffuse is transparent) are dropped by the scanout and the model vanishes. A
++	// swapchain would ignore this alpha, so it is a no-op elsewhere. flag 0x10 = opaque draw.
++	if ((ubo.flags & 0x10u) != 0u)
++		result.a = 1.0;
++
+ 	float fog = exp (-push_constants.fog_density * push_constants.fog_density * in_fog_frag_coord * in_fog_frag_coord);
+ 	fog = clamp (fog, 0.0, 1.0);
+ 	result.rgb = mix (push_constants.fog_color, result.rgb, fog);
