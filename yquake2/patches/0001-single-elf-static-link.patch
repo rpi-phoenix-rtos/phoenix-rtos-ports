@@ -1,0 +1,147 @@
+diff --git a/src/client/cl_image.c b/src/client/cl_image.c
+index 1de83dc0..f8b1276d 100644
+--- a/src/client/cl_image.c
++++ b/src/client/cl_image.c
+@@ -37,8 +37,10 @@
+ #define STBI_FREE(p)       free(p)
+ // Switch of the thread local stuff. Breaks mingw under Windows.
+ #define STBI_NO_THREAD_LOCALS
+-// include implementation part of stb_image into this file
+-#define STB_IMAGE_IMPLEMENTATION
++// Phoenix single-ELF port: the renderer's files/stb.c already instantiates
++// STB_IMAGE_IMPLEMENTATION, and in one binary a second instantiation here
++// multiple-defines every stbi_* symbol. Include the header for declarations
++// only; the client's stbi_* calls bind to the renderer's single copy.
+ #include "refresh/files/stb_image.h"
+ 
+ static const byte *
+diff --git a/src/client/refresh/files/common.c b/src/client/refresh/files/common.c
+index eba3fd3d..4deac01c 100644
+--- a/src/client/refresh/files/common.c
++++ b/src/client/refresh/files/common.c
+@@ -41,49 +41,15 @@ R_Printf(int level, const char* msg, ...)
+ 	va_end(argptr);
+ }
+ 
+-void
+-Sys_Error(const char *error, ...)
+-{
+-	va_list argptr;
+-	char text[MAXPRINTMSG];
+-
+-	va_start(argptr, error);
+-	vsnprintf(text, sizeof(text), error, argptr);
+-	va_end(argptr);
+-
+-	ri.Sys_Error(ERR_FATAL, "%s", text);
+-}
+-
+-void
+-Com_Printf(const char *msg, ...)
+-{
+-	va_list argptr;
+-	va_start(argptr, msg);
+-	ri.Com_VPrintf(PRINT_ALL, msg, argptr);
+-	va_end(argptr);
+-}
+-
+-void
+-Com_DPrintf(const char *msg, ...)
+-{
+-	va_list argptr;
+-	va_start(argptr, msg);
+-	ri.Com_VPrintf(PRINT_DEVELOPER, msg, argptr);
+-	va_end(argptr);
+-}
+-
+-void
+-Com_Error(int code, const char *fmt, ...)
+-{
+-	va_list argptr;
+-	char text[MAXPRINTMSG];
+-
+-	va_start(argptr, fmt);
+-	vsnprintf(text, sizeof(text), fmt, argptr);
+-	va_end(argptr);
+-
+-	ri.Sys_Error(code, "%s", text);
+-}
++/*
++ * Phoenix single-ELF port: the renderer is linked into the same binary as
++ * the engine, so Sys_Error / Com_Printf / Com_DPrintf / Com_Error resolve
++ * directly to the engine's real implementations. The .so-era forwarders
++ * that used to live here (routing through ri.* because a separate ref_*.so
++ * could not see the engine's symbols) are dropped to avoid multiple-
++ * definition with the engine copies. R_Printf above still routes through
++ * ri.Com_VPrintf, which is the renderer's public print entry point.
++ */
+ 
+ /* shared variables */
+ refdef_t r_newrefdef;
+diff --git a/src/client/vid/vid.c b/src/client/vid/vid.c
+index 793ef38f..c0b757ba 100644
+--- a/src/client/vid/vid.c
++++ b/src/client/vid/vid.c
+@@ -332,15 +332,10 @@ VID_GetRendererLibPath(const char *renderer, char *path, size_t len)
+ qboolean
+ VID_HasRenderer(const char *renderer)
+ {
+-	char reflib_path[MAX_OSPATH] = {0};
+-	VID_GetRendererLibPath(renderer, reflib_path, sizeof(reflib_path));
+-
+-	if (Sys_IsFile(reflib_path))
+-	{
+-		return true;
+-	}
+-
+-	return false;
++	/* Phoenix single-ELF port: the renderer is statically linked, there is
++	 * no ref_*.so file to stat. Report the compiled-in renderer (gl1) as
++	 * present; Sys_LoadLibrary() hands back its GetRefAPI directly. */
++	return (strcmp(renderer, "gl1") == 0) ? true : false;
+ }
+ 
+ /*
+diff --git a/src/game/g_main.c b/src/game/g_main.c
+index 59a62649..a17eac3b 100644
+--- a/src/game/g_main.c
++++ b/src/game/g_main.c
+@@ -147,31 +147,13 @@ GetGameAPI(const game_import_t *import)
+  * this is only here so the functions
+  * in shared source files can link
+  */
+-void
+-Sys_Error(const char *error, ...)
+-{
+-	va_list argptr;
+-	char text[1024];
+-
+-	va_start(argptr, error);
+-	vsnprintf(text, sizeof(text), error, argptr);
+-	va_end(argptr);
+-
+-	gi.error("%s", text);
+-}
+-
+-void
+-Com_Printf(const char *msg, ...)
+-{
+-	va_list argptr;
+-	char text[1024];
+-
+-	va_start(argptr, msg);
+-	vsnprintf(text, sizeof(text), msg, argptr);
+-	va_end(argptr);
+-
+-	gi.dprintf("%s", text);
+-}
++/*
++ * Phoenix single-ELF port: the game is linked into the engine binary rather
++ * than a separate game.so, so Sys_Error / Com_Printf resolve directly to the
++ * engine's real implementations. The gi.error / gi.dprintf forwarders that
++ * used to live here (a game.so could not see the engine's symbols) are
++ * dropped to avoid multiple-definition with the engine copies.
++ */
+ 
+ /* ====================================================================== */
+ 
