@@ -1,0 +1,42 @@
+diff --git a/run.c b/run.c
+index 2fcd687..1b61eb1 100644
+--- a/run.c
++++ b/run.c
+@@ -152,11 +152,24 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
+     fseek(file, 0, SEEK_END); // move file pointer to end of file
+     *file_size = ftell(file); // get the file size, in bytes
+     fclose(file);
++#if defined(__phoenix__)
++    // Phoenix-RTOS: read the whole checkpoint into RAM instead of mmap()ing the
++    // file (a file-backed MAP_PRIVATE mapping, especially over NFS, is not relied
++    // upon on this port). Uses more RAM but is portable to the Pi 4's 4 GB.
++    *fd = -1;
++    file = fopen(checkpoint, "rb");
++    if (!file) { fprintf(stderr, "Couldn't reopen file %s\n", checkpoint); exit(EXIT_FAILURE); }
++    *data = malloc(*file_size);
++    if (*data == NULL) { fprintf(stderr, "malloc failed for %ld bytes!\n", (long)*file_size); exit(EXIT_FAILURE); }
++    if (fread(*data, 1, *file_size, file) != (size_t)*file_size) { fprintf(stderr, "read failed!\n"); exit(EXIT_FAILURE); }
++    fclose(file);
++#else
+     // memory map the Transformer weights into the data pointer
+     *fd = open(checkpoint, O_RDONLY); // open in read only mode
+     if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
+     *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
+     if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
++#endif
+     float* weights_ptr = *data + sizeof(Config)/sizeof(float);
+     memory_map_weights(weights, config, weights_ptr, shared_weights);
+ }
+@@ -170,8 +183,12 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
+ 
+ void free_transformer(Transformer* t) {
+     // close the memory mapping
++#if defined(__phoenix__)
++    if (t->data != NULL) { free(t->data); }
++#else
+     if (t->data != MAP_FAILED) { munmap(t->data, t->file_size); }
+     if (t->fd != -1) { close(t->fd); }
++#endif
+     // free the RunState buffers
+     free_run_state(&t->state);
+ }
