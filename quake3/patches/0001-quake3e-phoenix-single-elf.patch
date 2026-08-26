@@ -1,0 +1,124 @@
+diff --git a/code/qcommon/huffman.c b/code/qcommon/huffman.c
+index a54a352..d59f242 100644
+--- a/code/qcommon/huffman.c
++++ b/code/qcommon/huffman.c
+@@ -281,10 +281,13 @@ static int Huff_Receive(node_t *node, int *ch, byte *fin) {
+ 	return (*ch = node->symbol);
+ }
+ 
+-/* Send the prefix code for this node */
+-static void send(node_t *node, node_t *child, byte *fout) {
++/* Send the prefix code for this node.
++ * Phoenix-RTOS port: renamed from the file-local `send` to `Huff_send` so it
++ * no longer shadows POSIX send() (the Phoenix build force-includes the socket
++ * headers via the port's compat shim; the unqualified name collided). */
++static void Huff_send(node_t *node, node_t *child, byte *fout) {
+ 	if (node->parent) {
+-		send(node->parent, node, fout);
++		Huff_send(node->parent, node, fout);
+ 	}
+ 	if (child) {
+ 		if (node->right == child) {
+@@ -305,7 +308,7 @@ static void Huff_transmit( huff_t *huff, int ch, byte *fout ) {
+ 			add_bit((char)((ch >> i) & 0x1), fout);
+ 		}
+ 	} else {
+-		send(huff->loc[ch], NULL, fout);
++		Huff_send(huff->loc[ch], NULL, fout);
+ 	}
+ }
+ 
+diff --git a/code/qcommon/q_platform.h b/code/qcommon/q_platform.h
+index e4c1864..c1621eb 100644
+--- a/code/qcommon/q_platform.h
++++ b/code/qcommon/q_platform.h
+@@ -160,6 +160,19 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ 
+ #endif // __linux___
+ 
++// ============================= Phoenix-RTOS ==============================
++
++#ifdef __phoenix__
++
++#define OS_STRING "phoenix"
++#define ID_INLINE inline
++
++// ARCH_STRING / Q3_LITTLE_ENDIAN / PATH_SEP / DLL_EXT (".so") all resolve in
++// the common-unix block above for __aarch64__; only the OS identity and the
++// inline keyword are missing, so the port adds just those two here.
++
++#endif // __phoenix__
++
+ // =============================== BSD =====================================
+ 
+ #if defined (__FreeBSD__) || defined (__NetBSD__) || defined (__OpenBSD__)
+diff --git a/code/qcommon/vm_aarch64.c b/code/qcommon/vm_aarch64.c
+index c1ab375..f7688f5 100644
+--- a/code/qcommon/vm_aarch64.c
++++ b/code/qcommon/vm_aarch64.c
+@@ -2287,7 +2287,9 @@ __recompile:
+ 			return qfalse;
+ 		}
+ #else
+-		vm->codeBase.ptr = mmap( NULL, allocSize, PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0 );
++		/* Phoenix: the kernel honors PROT_EXEC at mmap time (vm/map.c) but mprotect cannot ADD
++		 * PROT_EXEC to an existing mapping, so allocate the code buffer RWX up front. */
++		vm->codeBase.ptr = mmap( NULL, allocSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_SHARED | MAP_ANONYMOUS, -1, 0 );
+ 		if ( vm->codeBase.ptr == MAP_FAILED ) {
+ 			VM_FreeBuffers();
+ 			Com_Printf( S_COLOR_WARNING "%s(%s): mmap failed\n", __func__, vm->name );
+@@ -2339,9 +2341,10 @@ __recompile:
+ 	}
+ #else
+ 	if ( mprotect( vm->codeBase.ptr, vm->codeLength, PROT_READ | PROT_EXEC ) ) {
+-		VM_Destroy_Compiled( vm );
+-		Com_Printf( S_COLOR_WARNING "%s(%s): mprotect failed\n", __func__, vm->name );
+-		return qfalse;
++		/* Phoenix: mprotect can't add/keep PROT_EXEC on an existing mapping, but the buffer was
++		 * mmap'd RWX above (the kernel honors PROT_EXEC at map time), so it is already executable.
++		 * A failure here is non-fatal — it just leaves the pages writable too. */
++		Com_Printf( S_COLOR_WARNING "%s(%s): mprotect(RX) failed; running from the RWX mmap\n", __func__, vm->name );
+ 	}
+ 
+ 	// clear icache, http://blogs.arm.com/software-enablement/141-caches-and-self-modifying-code/
+diff --git a/code/renderer/qgl.h b/code/renderer/qgl.h
+index 113bce1..31e103b 100644
+--- a/code/renderer/qgl.h
++++ b/code/renderer/qgl.h
+@@ -40,6 +40,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ #elif defined( __linux__ ) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined( __sun )
+ #include <GL/gl.h>
+ #include <GL/glx.h>
++#elif defined(__phoenix__)
++// Phoenix-RTOS port: pull the GL types (GLint/GLuint/...) from the ported
++// Mesa headers, but NOT <GL/glx.h> — SDL owns the GL context, and Phoenix has
++// no X11/GLX. (The X11/GLX proc-pointer block near the end of this header is
++// likewise excluded for __phoenix__.)
++#include <GL/gl.h>
+ #elif defined(__APPLE__)
+ #include <OpenGL/gl.h>
+ #endif
+@@ -282,7 +288,14 @@ typedef char GLchar;
+ 	GLE( void, glXCopyContext, Display *dpy, GLXContext src, GLXContext dst, GLuint mask ) \
+ 	GLE( void, glXSwapBuffers, Display *dpy, GLXDrawable drawable )
+ 
+-#ifndef __APPLE__
++// Phoenix-RTOS port: SDL supplies the GL context (SDL_GL_GetProcAddress /
++// SDL_GL_SetSwapInterval), so the platform-native swap-interval and X11/GLX
++// proc pointers below are never used, and QGL_LinX11_PROCS references
++// Display/GLXContext/XVisualInfo/Bool types that Phoenix's headers lack.
++// Exclude the block for Phoenix exactly as it is already excluded for Apple
++// (grep confirms no qglX*/QGL_Swp_PROCS references anywhere in the renderer,
++// sdl or client TUs).
++#if !defined(__APPLE__) && !defined(__phoenix__)
+ 
+ #define GLE( ret, name, ... ) extern ret ( APIENTRY * q##name )( __VA_ARGS__ );
+ 	QGL_Swp_PROCS;
+@@ -293,6 +306,6 @@ typedef char GLchar;
+ #endif
+ #undef GLE
+ 
+-#endif // !__APPLE__
++#endif // !__APPLE__ && !__phoenix__
+ 
+ #endif // __QGL_H__
