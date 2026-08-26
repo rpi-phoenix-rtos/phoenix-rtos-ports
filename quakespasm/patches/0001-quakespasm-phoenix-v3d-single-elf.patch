@@ -1,0 +1,242 @@
+diff --git a/Quake/gl_mesh.c b/Quake/gl_mesh.c
+index 03b79ef..e4638f7 100644
+--- a/Quake/gl_mesh.c
++++ b/Quake/gl_mesh.c
+@@ -451,6 +451,7 @@ static void GLMesh_LoadVertexBuffer (qmodel_t *m, const aliashdr_t *hdr)
+ 	const trivertx_t *trivertexes;
+ 	byte *vbodata;
+ 	int f;
++	int vboposes;
+ 
+ 	if (!gl_glsl_alias_able)
+ 		return;
+@@ -462,8 +463,16 @@ static void GLMesh_LoadVertexBuffer (qmodel_t *m, const aliashdr_t *hdr)
+ 	// (test case: roman1.bsp from arwop, 64mb heap)
+ 	m->vboindexofs = 0;
+ 
++	// #67: one pose block per pose. Single-pose (numposes==1) models are always drawn at
++	// blend==0, where GL_DrawAliasFrame_GLSL DISABLES the Pose2 attribute entirely (Pose2 is
++	// mix()ed away), so no second pose block is needed. An earlier workaround allocated a
++	// duplicate 2nd block for single-pose models; that inflated the VBO to nvvbo*24 bytes and
++	// on the V3D port a large single-pose VBO (>4KB) collapsed the geometry of high-vertex
++	// pickups (g_nail/g_light/g_nail2). With Pose2 disabled the duplicate block was dead, so
++	// it is removed: single-pose VBO is now nvvbo*16 and those models render correctly.
++	vboposes = hdr->numposes;
+ 	m->vboxyzofs = 0;
+-	totalvbosize += (hdr->numposes * hdr->numverts_vbo * sizeof (meshxyz_t)); // ericw -- what RMQEngine called nummeshframes is called numposes in QuakeSpasm
++	totalvbosize += (vboposes * hdr->numverts_vbo * sizeof (meshxyz_t)); // ericw -- what RMQEngine called nummeshframes is called numposes in QuakeSpasm
+ 
+ 	m->vbostofs = totalvbosize;
+ 	totalvbosize += (hdr->numverts_vbo * sizeof (meshst_t));
+@@ -490,7 +499,7 @@ static void GLMesh_LoadVertexBuffer (qmodel_t *m, const aliashdr_t *hdr)
+ 	memset(vbodata, 0, totalvbosize);
+ 
+ // fill in the vertices at the start of the buffer
+-	for (f = 0; f < hdr->numposes; f++) // ericw -- what RMQEngine called nummeshframes is called numposes in QuakeSpasm
++	for (f = 0; f < vboposes; f++) // ericw -- what RMQEngine called nummeshframes is called numposes in QuakeSpasm
+ 	{
+ 		int v;
+ 		meshxyz_t *xyz = (meshxyz_t *) (vbodata + (f * hdr->numverts_vbo * sizeof (meshxyz_t)));
+diff --git a/Quake/gl_warp.c b/Quake/gl_warp.c
+index 3c6ea5e..624e35e 100644
+--- a/Quake/gl_warp.c
++++ b/Quake/gl_warp.c
+@@ -24,7 +24,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ 
+ extern cvar_t r_drawflat;
+ 
+-cvar_t r_oldwater = {"r_oldwater", "0", CVAR_ARCHIVE};
++/* Phoenix/V3D port: default to the classic per-vertex water warp (r_oldwater 1).
++ * The modern path (0) renders each warp texture to an offscreen region and copies
++ * it into tx->warpimage via glCopyTexSubImage2D (R_UpdateWarpTextures, gl_warp.c),
++ * a framebuffer->texture copy that the ported Mesa v3d GL frontend does not
++ * implement -> warpimage stays uninitialised GPU memory and water surfaces sample
++ * RGB noise. The classic path warps the (correctly-uploaded) base texture directly
++ * with no FBO copy. TODO: implement glCopyTexSubImage2D (or an FBO warp pass) to
++ * restore the higher-quality warpimage path. */
++cvar_t r_oldwater = {"r_oldwater", "1", CVAR_ARCHIVE};
+ cvar_t r_waterquality = {"r_waterquality", "8", CVAR_NONE};
+ cvar_t r_waterwarp = {"r_waterwarp", "1", CVAR_NONE};
+ 
+diff --git a/Quake/net_main.c b/Quake/net_main.c
+index bbd599a..9694338 100644
+--- a/Quake/net_main.c
++++ b/Quake/net_main.c
+@@ -442,6 +442,14 @@ qsocket_t *NET_Connect (const char *host)
+ 			if (n < hostCacheCount)
+ 				goto JustDoIt;
+ 		}
++
++		/* Phoenix #68 fix: a specific target host does NOT need the broadcast
++		 * SearchForHosts slist (LAN discovery) -- the datagram driver resolves
++		 * the host string and unicasts the connect directly in _Datagram_Connect.
++		 * Upstream runs a silent slist first, but on Phoenix that loop hangs
++		 * (slistInProgress never clears -> "hangs at LOADING"). Connect straight
++		 * away; the slist is only used for discovery (host == NULL) below. */
++		goto JustDoIt;
+ 	}
+ 
+ 	slistSilent = host ? true : false;
+diff --git a/Quake/net_udp.c b/Quake/net_udp.c
+index 1f3644b..c1cd407 100644
+--- a/Quake/net_udp.c
++++ b/Quake/net_udp.c
+@@ -262,22 +262,37 @@ int UDP_Connect (sys_socket_t socketid, struct qsockaddr *addr)
+ 
+ sys_socket_t UDP_CheckNewConnections (void)
+ {
+-	int		available;
+ 	struct sockaddr_in	from;
+-	socklen_t	fromlen;
++	socklen_t	fromlen = sizeof(from);
+ 	char		buff[1];
++	int		ret;
+ 
+ 	if (net_acceptsocket == INVALID_SOCKET)
+ 		return INVALID_SOCKET;
+ 
+-	if (ioctl (net_acceptsocket, FIONREAD, &available) == -1)
++	/* Phoenix/lwIP port: upstream probes the accept socket with ioctl(FIONREAD),
++	 * but the Pi's lwIP build has LWIP_SO_RCVBUF==0 / LWIP_FIONREAD_LINUXMODE==0, so
++	 * FIONREAD is unimplemented and the syscall errors -- and upstream turns that into
++	 * a fatal Sys_Error, which (with stray LAN broadcast traffic) hung the flagship as
++	 * soon as a packet arrived (task #26). FIONBIO *is* implemented, so the accept
++	 * socket is non-blocking (see UDP_OpenSocket); peek it instead. A non-blocking
++	 * MSG_PEEK recvfrom returns >=0 when a datagram is pending and EWOULDBLOCK when
++	 * not -- the same "is there data?" answer FIONREAD gave, with no kernel change and
++	 * no Sys_Error path. NOTE: returns the socket on a pending datagram WITHOUT
++	 * consuming it (PEEK), matching the FIONREAD>0 case; the empty/zero-length packet
++	 * is consumed below exactly as upstream did. */
++	ret = recvfrom (net_acceptsocket, buff, sizeof(buff), MSG_PEEK,
++			(struct sockaddr *) &from, &fromlen);
++	if (ret > 0)
++		return net_acceptsocket;
++	if (ret == SOCKET_ERROR)
+ 	{
+ 		int err = SOCKETERRNO;
+-		Sys_Error ("UDP: ioctlsocket (FIONREAD) failed (%s)", socketerror(err));
++		if (err != NET_EWOULDBLOCK && err != NET_ECONNREFUSED)
++			Con_SafePrintf ("UDP_CheckNewConnections, recvfrom: %s\n", socketerror(err));
++		return INVALID_SOCKET;
+ 	}
+-	if (available)
+-		return net_acceptsocket;
+-	// quietly absorb empty packets
++	// quietly absorb empty (zero-length) packets
+ 	recvfrom (net_acceptsocket, buff, 0, 0, (struct sockaddr *) &from, &fromlen);
+ 	return INVALID_SOCKET;
+ }
+diff --git a/Quake/r_alias.c b/Quake/r_alias.c
+index f179976..bbe12ef 100644
+--- a/Quake/r_alias.c
++++ b/Quake/r_alias.c
+@@ -225,6 +225,7 @@ Based on code by MH from RMQEngine
+ void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltexture_t *tx, gltexture_t *fb)
+ {
+ 	float	blend;
++	int	pose2bind;
+ 
+ 	if (lerpdata.pose1 != lerpdata.pose2)
+ 	{
+@@ -235,6 +236,12 @@ void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltextu
+ 		blend = 0;
+ 	}
+ 
++	/* #67 single-pose DE-ALIAS: a numposes==1 model is always drawn at blend==0, where the
++	 * Pose2 attribute is DISABLED below (mix() ignores it). So pose2bind is never actually
++	 * bound for single-pose models; keep it at the valid block 0 (there is no duplicate 2nd
++	 * block anymore -- see gl_mesh.c). Multi-pose models bind the real second pose as usual. */
++	pose2bind = (paliashdr->numposes == 1) ? 0 : lerpdata.pose2;
++
+ 	GL_UseProgramFunc (r_alias_program);
+ 
+ 	GL_BindBuffer (GL_ARRAY_BUFFER, currententity->model->meshvbo);
+@@ -242,16 +249,33 @@ void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltextu
+ 
+ 	GL_EnableVertexAttribArrayFunc (texCoordsAttrIndex);
+ 	GL_EnableVertexAttribArrayFunc (pose1VertexAttrIndex);
+-	GL_EnableVertexAttribArrayFunc (pose2VertexAttrIndex);
+ 	GL_EnableVertexAttribArrayFunc (pose1NormalAttrIndex);
+-	GL_EnableVertexAttribArrayFunc (pose2NormalAttrIndex);
+ 
+ 	GL_VertexAttribPointerFunc (texCoordsAttrIndex, 2, GL_FLOAT, GL_FALSE, 0, (void *)(intptr_t)currententity->model->vbostofs);
+ 	GL_VertexAttribPointerFunc (pose1VertexAttrIndex, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof (meshxyz_t), GLARB_GetXYZOffset (paliashdr, lerpdata.pose1));
+-	GL_VertexAttribPointerFunc (pose2VertexAttrIndex, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof (meshxyz_t), GLARB_GetXYZOffset (paliashdr, lerpdata.pose2));
+ // GL_TRUE to normalize the signed bytes to [-1 .. 1]
+ 	GL_VertexAttribPointerFunc (pose1NormalAttrIndex, 4, GL_BYTE, GL_TRUE, sizeof (meshxyz_t), GLARB_GetNormalOffset (paliashdr, lerpdata.pose1));
+-	GL_VertexAttribPointerFunc (pose2NormalAttrIndex, 4, GL_BYTE, GL_TRUE, sizeof (meshxyz_t), GLARB_GetNormalOffset (paliashdr, lerpdata.pose2));
++
++	/* #67 SINGLE-POSE FIX (2026-07-27): the deterministic alias spike glitch (pickups/torches/idle
++	 * viewmodel = mangled black-triangle wedges) is triggered by drawing with blend==0 while TWO
++	 * byte position attributes (Pose1+Pose2, identical data) are active — the V3D mishandles this
++	 * single-effective-pose draw (HW-confirmed by video; aliasing + the Mesa byte-attr path were
++	 * ruled out). At blend==0 the shader's mix(Pose1,Pose2,0.0) == Pose1, so Pose2 is mathematically
++	 * unused: DON'T bind/enable it at all. A disabled attribute supplies the generic default, which
++	 * mix()es away at blend==0 -> position/normal come solely from Pose1. Only bind Pose2 for the
++	 * real lerp (blend!=0), which already renders correctly. */
++	if (blend != 0)
++	{
++		GL_EnableVertexAttribArrayFunc (pose2VertexAttrIndex);
++		GL_EnableVertexAttribArrayFunc (pose2NormalAttrIndex);
++		GL_VertexAttribPointerFunc (pose2VertexAttrIndex, 4, GL_UNSIGNED_BYTE, GL_FALSE, sizeof (meshxyz_t), GLARB_GetXYZOffset (paliashdr, pose2bind));
++		GL_VertexAttribPointerFunc (pose2NormalAttrIndex, 4, GL_BYTE, GL_TRUE, sizeof (meshxyz_t), GLARB_GetNormalOffset (paliashdr, pose2bind));
++	}
++	else
++	{
++		GL_DisableVertexAttribArrayFunc (pose2VertexAttrIndex);
++		GL_DisableVertexAttribArrayFunc (pose2NormalAttrIndex);
++	}
+ 
+ // set uniforms
+ 	GL_Uniform1fFunc (blendLoc, blend);
+diff --git a/Quake/r_part.c b/Quake/r_part.c
+index 32e067a..57b19fb 100644
+--- a/Quake/r_part.c
++++ b/Quake/r_part.c
+@@ -40,7 +40,13 @@ static gltexture_t *particletexture, *particletexture1, *particletexture2, *part
+ static float texturescalefactor; //johnfitz -- compensate for apparent size of different particle textures
+ 
+ cvar_t	r_particles = {"r_particles","1", CVAR_ARCHIVE}; //johnfitz
+-cvar_t	r_quadparticles = {"r_quadparticles","1", CVAR_ARCHIVE}; //johnfitz
++/* Phoenix/V3D: default 0 (GL_TRIANGLES particles) instead of 1 (GL_QUADS). The V3D
++ * gallium path wedges the GPU (bin + render control threads hang, QPUs active, no
++ * fault) on the immediate-mode GL_QUADS particle batches in heavy scenes — the
++ * quad->triangle index conversion hits the same "V3D needs bound indices" path that
++ * broke world rendering. GL_TRIANGLES particles render identically (and fix the
++ * opaque-square artifact) with no stall. See docs/inprogress/2026-06-16-quake-scanout-visual-bugs.md */
++cvar_t	r_quadparticles = {"r_quadparticles","0", CVAR_ARCHIVE}; //johnfitz
+ 
+ /*
+ ===============
+diff --git a/Quake/r_world.c b/Quake/r_world.c
+index 22dd574..a72d395 100644
+--- a/Quake/r_world.c
++++ b/Quake/r_world.c
+@@ -369,7 +369,17 @@ static void R_FlushBatch (void)
+ {
+ 	if (num_vbo_indices > 0)
+ 	{
+-		glDrawElements (GL_TRIANGLES, num_vbo_indices, GL_UNSIGNED_INT, vbo_indices);
++		/* V3D (GLES-style GPU) cannot draw from a CLIENT-MEMORY index array; it needs the
++		 * indices in a bound element buffer. The host's desktop GL allowed client indices,
++		 * so the brush-surface draw only broke on-device (it drew nothing -> flat-gray world).
++		 * Upload the batch indices to a streaming element VBO and draw from it (offset 0). */
++		static GLuint r_batch_ibo = 0;
++		if (r_batch_ibo == 0)
++			GL_GenBuffersFunc (1, &r_batch_ibo);
++		GL_BindBufferFunc (GL_ELEMENT_ARRAY_BUFFER, r_batch_ibo);
++		GL_BufferDataFunc (GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(num_vbo_indices * sizeof(vbo_indices[0])), vbo_indices, GL_STREAM_DRAW);
++		glDrawElements (GL_TRIANGLES, num_vbo_indices, GL_UNSIGNED_INT, (const GLvoid *)0);
++		GL_BindBufferFunc (GL_ELEMENT_ARRAY_BUFFER, 0);
+ 		num_vbo_indices = 0;
+ 	}
+ }
+@@ -886,7 +896,7 @@ void GLWorld_CreateShaders (void)
+ 		return;
+ 
+ 	r_world_program = GL_CreateProgram (vertSource, fragSource, Q_COUNTOF(bindings), bindings);
+-	
++
+ 	if (r_world_program != 0)
+ 	{
+ 		// get uniform locations
