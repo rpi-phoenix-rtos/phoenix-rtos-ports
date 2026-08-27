@@ -235,7 +235,16 @@ void *PHOENIX_GL_GetProcAddress(_THIS, const char *proc)
             return phoenix_gl_procs[i].addr;
         }
     }
-    SDL_SetError("PHOENIX: GL entry point '%s' not in the static proc table", proc);
+    /* Table miss: fall back to Mesa's shared-glapi resolver, which knows the whole
+     * GL + GLES entrypoint set (the ES3 API a glad-gles3 loader needs). The static
+     * table above still wins first (stable for the desktop-GL games). */
+    {
+        void *p = phxgl_get_proc(proc);
+        if (p) {
+            return p;
+        }
+    }
+    SDL_SetError("PHOENIX: GL entry point '%s' not resolvable (table + glapi miss)", proc);
     return NULL;
 }
 
@@ -261,11 +270,19 @@ SDL_GLContext PHOENIX_GL_CreateContext(_THIS, SDL_Window *window)
     }
 
     /* Create the V3D screen + Mesa state-tracker context + scanout FBO(s) at the
-     * window's (native) size. Provided by the separately-linked GL glue TU. */
-    if (phxgl_init(window->w, window->h) != 0) {
-        SDL_free(ctx);
-        SDL_SetError("PHOENIX: phxgl_init (V3D GL context create) failed");
-        return NULL;
+     * window's (native) size. Provided by the separately-linked GL glue TU.
+     * If the app requested an OpenGL ES profile (SDL_GL_CONTEXT_PROFILE_ES),
+     * bring up a GLES context; otherwise desktop compat GL (the default the GL
+     * games use — unchanged). */
+    {
+        int gles = (_this->gl_config.profile_mask == SDL_GL_CONTEXT_PROFILE_ES) ? 1 : 0;
+        SDL_Log("PHOENIX: GL_CreateContext profile_mask=0x%x -> %s",
+                _this->gl_config.profile_mask, gles ? "OpenGL ES" : "OpenGL compat");
+        if (phxgl_init(window->w, window->h, gles) != 0) {
+            SDL_free(ctx);
+            SDL_SetError("PHOENIX: phxgl_init (V3D GL context create) failed");
+            return NULL;
+        }
     }
     phxgl_make_current();
     phxgl_bind_fbo(); /* the surfaceless context has no usable default FB 0 */

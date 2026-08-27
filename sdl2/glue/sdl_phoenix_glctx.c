@@ -50,6 +50,17 @@ extern int  v3d_phoenix_scanout_double(void);
 extern int  v3d_phoenix_scanout_nbuf(void);   /* page-flip buffer count: 1 (none), 2 (double), 3 (triple) */
 extern void v3d_phoenix_flip(int buf);
 
+/* Mesa's shared-glapi resolver (_mesa_glapi_get_proc_address, declared by the
+ * included Mesa headers, returns a _glapi_proc function pointer) resolves ANY gl*
+ * entrypoint by name — GL + GLES share one dispatch table. Backs phxgl_get_proc →
+ * SDL_GL_GetProcAddress so a GLES loader (yQuake2 gl3's glad-gles3) resolves the
+ * whole ES3 API, not just the hand-maintained desktop-GL table in
+ * SDL_phoenixopengl.c. */
+void *phxgl_get_proc(const char *name)
+{
+	return name ? (void *)_mesa_glapi_get_proc_address(name) : NULL;
+}
+
 static struct st_context *g_st = NULL;
 
 /* RENDER DIRECTLY INTO THE BACK BUFFER + PAGE-FLIP — the textbook double/triple-buffered present.
@@ -165,7 +176,7 @@ int phxgl_capture_gl(void *pix, int w, int h)
 	return 1;
 }
 
-int phxgl_init(int w, int h)
+int phxgl_init(int w, int h, int gles)
 {
 	struct pipe_screen_config cfg;
 	struct pipe_screen *pscreen;
@@ -199,7 +210,11 @@ int phxgl_init(int w, int h)
 
 	memset(&visual, 0, sizeof(visual));
 	memset(&opts, 0, sizeof(opts));
-	st = st_create_context(API_OPENGL_COMPAT, pipe, &visual, NULL, &opts, 0, 0);
+	/* gles!=0 → an OpenGL ES context (API_OPENGLES2 yields the driver's max, ES 3.1
+	 * on V3D 4.2 — HW-proven by gl_es_smoke/gl_es_triangle); else desktop compat GL
+	 * (the default, unchanged path the GL games use). */
+	st = st_create_context(gles ? API_OPENGLES2 : API_OPENGL_COMPAT,
+	                       pipe, &visual, NULL, &opts, 0, 0);
 	if (!st) { printf("phxgl: st_create_context NULL\n"); return 1; }
 	_mesa_make_current(st->ctx, NULL, NULL);
 	g_st = st;

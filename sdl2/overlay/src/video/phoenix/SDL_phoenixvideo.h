@@ -69,7 +69,9 @@ typedef struct
  * phxgl_bind_fbo     bind the framebuffer the next frame renders into (the
  *                    surfaceless context has no usable default framebuffer 0).
  */
-extern int phxgl_init(int w, int h);
+extern int phxgl_init(int w, int h, int gles);
+/* SDL_GL_GetProcAddress backend: resolves any GL/GLES entrypoint by name. */
+extern void *phxgl_get_proc(const char *name);
 extern void phxgl_make_current(void);
 extern int phxgl_resolve(void);
 extern void phxgl_bind_fbo(void);
