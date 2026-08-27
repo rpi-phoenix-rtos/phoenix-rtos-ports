@@ -13,7 +13,7 @@
 	license="MIT"
 	license_file="COPYING"
 	conflicts=""
-	depends=""
+	depends="oniguruma"
 	supports="phoenix>=3.3"
 }
 
@@ -21,8 +21,9 @@
 # a bundled decNumber, and has NO config.h -- ./configure normally emits the HAVE_*
 # feature macros as -D flags. We compile directly with the cross toolchain and bake
 # a curated, Phoenix-valid macro set (a native ./configure minus the libm functions
-# libphoenix lacks). Regex builtins (test/match/sub/gsub/splits) need oniguruma and
-# are compiled out (HAVE_LIBONIG left undefined) -- core jq is unaffected.
+# libphoenix lacks). Regex builtins (test/match/sub/gsub/splits/scan) are ENABLED
+# via the oniguruma port (depends=oniguruma): -DHAVE_LIBONIG + -I${PREFIX_H} at
+# compile, -L${PREFIX_A} -lonig at link (libonig.a + <oniguruma.h> in the sysroot).
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
@@ -31,7 +32,7 @@ p_prepare() {
 	cd "${PREFIX_PORT_WORKDIR}"
 	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$/\\n"/' \
 		src/builtin.jq >src/builtin.inc
-	printf '#define JQ_CONFIG "phoenix-direct (no oniguruma)"\n' >src/config_opts.inc
+	printf '#define JQ_CONFIG "phoenix-direct (+oniguruma)"\n' >src/config_opts.inc
 	printf '#define JQ_VERSION "%s"\n' "${version}" >src/version.h
 }
 
@@ -52,6 +53,8 @@ p_build() {
 		-DHAVE_FMAX=1 -DHAVE_FMIN=1 -DHAVE_FMOD=1 -DHAVE_HYPOT=1 -DHAVE_LOG10=1 -DHAVE_LOG2=1 -DHAVE_LOG=1 -DHAVE_MODF=1
 		-DHAVE_NEARBYINT=1 -DHAVE_POW=1 -DHAVE_RINT=1 -DHAVE_ROUND=1 -DHAVE_SCALBN=1 -DHAVE_SIN=1 -DHAVE_SINH=1 -DHAVE_SQRT=1
 		-DHAVE_TAN=1 -DHAVE_TANH=1 -DHAVE_TRUNC=1 -DIEEE_8087=1
+		# Regex builtins via the oniguruma port (libonig.a + <oniguruma.h> in the sysroot).
+		-DHAVE_LIBONIG=1 -DHAVE_ONIGURUMA_H=1
 	)
 	local SRCS=(
 		src/builtin.c src/bytecode.c src/compile.c src/execute.c src/jv.c src/jv_alloc.c src/jv_aux.c
@@ -65,7 +68,8 @@ p_build() {
 	# different-arity fn pointers in one slot (arity checked at runtime); GCC 14
 	# turns the cast into an error by default. Benign for jq.
 	"${CROSS}gcc" ${CFLAGS} ${LDFLAGS} -O2 -Wno-incompatible-pointer-types \
-		-Isrc -I. "${DEFS[@]}" "${SRCS[@]}" -o "${PREFIX_PROG}/jq" -lm
+		-Isrc -I. -I"${PREFIX_H}" "${DEFS[@]}" "${SRCS[@]}" \
+		-o "${PREFIX_PROG}/jq" -L"${PREFIX_A}" -lonig -lm
 	${STRIP} -o "${PREFIX_PROG_STRIPPED}/jq" "${PREFIX_PROG}/jq"
 	b_install "${PREFIX_PROG_TO_INSTALL}/jq" /usr/bin
 }
