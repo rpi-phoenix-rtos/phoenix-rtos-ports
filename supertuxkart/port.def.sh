@@ -229,15 +229,23 @@ p_build() {
 
 	# ----- Stage 4: final group-link --------------------------------------------
 	# Re-run CMake's computed link line (objects + STK/bundled static libs) with
-	# the glue objects and the GL group appended. Trailing archives resolve the
-	# GLES undefineds recorded by the earlier STK libs in one pass; the group
-	# covers the libGL<->libv3d<->SDL<->glue cycle. Driver is g++ (link.txt) so
-	# libstdc++/libm come in automatically; an 8 MB stack matches the heavier C++.
+	# the glue objects and a trailing --start-group appended. The group resolves,
+	# in one extra pass, two classes the single-pass CMake order leaves undefined:
+	#   * the GLES entrypoints (glClear, glDrawArrays, ...) referenced by the STK
+	#     libs but provided only by libGL-phoenix.a / libv3d-phoenix.a;
+	#   * ogg/vorbis/zlib — CMake lists libogg/libvorbis/libvorbisfile as raw file
+	#     paths in producer-first order (no CMake-target dependency info), so
+	#     vorbisfile->vorbis->ogg and zlib back-references cannot resolve L-to-R.
+	# The group also covers the libGL<->libv3d<->SDL<->glue cycle. Driver is g++
+	# (from link.txt) so libstdc++/libm come in automatically; the 8 MB committed
+	# stack matches the heavier C++ (yQuake2 used 4 MB).
 	echo ">> [supertuxkart] final group-link against libGL/libv3d + SDL2 glue"
 	local linkcmd; linkcmd="$(cat "${linktxt}")"
 	eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
-		-Wl,--start-group '${sdllib}' '${gllib}' '${v3dlib}' -Wl,--end-group \
-		-Wl,-z,stack-size=8388608"
+		-Wl,--start-group '${sdllib}' '${gllib}' '${v3dlib}' \
+		'${pfx}/lib/libz.a' '${pfx}/lib/libogg.a' '${pfx}/lib/libvorbis.a' \
+		'${pfx}/lib/libvorbisfile.a' '${pfx}/lib/libvorbisenc.a' \
+		-Wl,--end-group -Wl,-z,stack-size=8388608"
 
 	local elf="${build}/bin/supertuxkart"
 	[ -f "${elf}" ] || b_die "supertuxkart: final link produced no ELF (see link errors above)."
