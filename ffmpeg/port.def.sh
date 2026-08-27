@@ -46,6 +46,15 @@ p_prepare() {
 	# that clashed with libphoenix's non-static prototypes. In the framework build
 	# we link against the FRESH PREFIX_BUILD libphoenix (which defines all four), so
 	# the probes may already pass; the flip in p_prepare is tolerant either way.
+	# --disable-autodetect: the ad-hoc driver configured against a stale sysroot
+	# with no --extra-cflags, so ffmpeg's external-library probes found nothing. The
+	# framework build passes --extra-cflags=${CFLAGS} pointing at PREFIX_H, where
+	# other framework ports (zlib, libiconv) may have installed headers -- ffmpeg
+	# would then SILENTLY enable zlib/iconv and emit undefined refs (libiconv_open,
+	# ...) into the archives, an undeclared dependency that breaks a consumer link.
+	# Disabling autodetect keeps the port hermetic and faithful to the ad-hoc
+	# decode-only scope regardless of what else has populated the sysroot; only the
+	# explicit --enable-* below are built (depends="" stays honest).
 	if [ ! -f "$PREFIX_PORT_WORKDIR/config.h" ]; then
 		(cd "$PREFIX_PORT_WORKDIR" && "./configure" \
 			--enable-cross-compile \
@@ -58,6 +67,7 @@ p_prepare() {
 			--prefix="$PREFIX_PORT_INSTALL" \
 			--libdir="$PREFIX_A" \
 			--incdir="$PREFIX_H" \
+			--disable-autodetect \
 			--disable-everything \
 			--enable-decoder=mjpeg,h264,rawvideo,pcm_s16le \
 			--enable-parser=h264 \
@@ -87,8 +97,12 @@ p_prepare() {
 p_build() {
 	# --disable-programs means `make` builds only the enabled libraries.
 	make -C "$PREFIX_PORT_WORKDIR"
-	# install-libs stages the static archives (libdir) + headers (incdir) only,
-	# without any ffmpeg/ffprobe binaries. This is a library port: no b_install of
-	# a runtime program (the E4 players live in tools/ffmpeg-port).
-	make -C "$PREFIX_PORT_WORKDIR" install-libs
+	# `make install` = install-libs + install-headers (ffmpeg's install target is
+	# exactly those two; --disable-programs means no ffmpeg/ffprobe binary to
+	# install). Stages the static archives into --libdir (PREFIX_A) and the public
+	# libav*/libsw* headers into --incdir (PREFIX_H) so a consumer can
+	# `depends="ffmpeg"` and both link the decode core and #include its headers.
+	# This is a library port: no b_install of a runtime program (the E4 players
+	# live in tools/ffmpeg-port).
+	make -C "$PREFIX_PORT_WORKDIR" install
 }
