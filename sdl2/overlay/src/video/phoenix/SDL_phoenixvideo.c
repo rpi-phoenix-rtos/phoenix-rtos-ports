@@ -36,6 +36,7 @@
 
 #include "SDL_video.h"
 #include "SDL_mouse.h"
+#include "SDL_syswm.h"   /* SDL_SysWMinfo / SDL_SYSWM_UNKNOWN for GetWindowWMInfo */
 #include "../SDL_sysvideo.h"
 #include "../SDL_pixels_c.h"
 #include "../../events/SDL_events_c.h"
@@ -73,6 +74,7 @@ static int PHOENIX_SetDisplayMode(_THIS, SDL_VideoDisplay *display, SDL_DisplayM
 static void PHOENIX_VideoQuit(_THIS);
 static int PHOENIX_CreateWindow(_THIS, SDL_Window *window);
 static void PHOENIX_DestroyWindow(_THIS, SDL_Window *window);
+static SDL_bool PHOENIX_GetWindowWMInfo(_THIS, SDL_Window *window, struct SDL_SysWMinfo *info);
 
 /*
  * DOS-style graphics-mode switch: tell the HDMI text console (pl011-tty fbcon)
@@ -152,6 +154,7 @@ static SDL_VideoDevice *PHOENIX_CreateDevice(void)
     /* Window (single fullscreen window; no mode switching) */
     device->CreateSDLWindow = PHOENIX_CreateWindow;
     device->DestroyWindow = PHOENIX_DestroyWindow;
+    device->GetWindowWMInfo = PHOENIX_GetWindowWMInfo;
 
     /* Software framebuffer path (non-GL windows) */
     device->CreateWindowFramebuffer = PHOENIX_CreateWindowFramebuffer;
@@ -319,6 +322,25 @@ static void PHOENIX_DestroyWindow(_THIS, SDL_Window *window)
     if (data->window == window) {
         data->window = NULL;
     }
+}
+
+/* There is no window manager on Phoenix-RTOS (the single window IS the fb0
+ * scanout), so there are no native WM handles to report. SDL only refuses the
+ * query (returns SDL_FALSE) when a driver leaves this hook NULL, and some
+ * SDL consumers treat that refusal as a fatal "display init failed" — notably
+ * SuperTuxKart's bundled Irrlicht CIrrDeviceSDL, which aborts device creation
+ * if SDL_GetWindowWMInfo() fails, even on the pure-SDL GL path that never reads
+ * the returned handles. Provide the hook and report success with the honest
+ * SDL_SYSWM_UNKNOWN subsystem (which SDL_GetWindowWMInfo already pre-fills).
+ * The WM-specific union in SDL_SysWMinfo is intentionally left untouched: on
+ * this driver's OpenGL path no caller reads it (only the iOS/DirectX9 branches
+ * do, and neither is compiled here). */
+static SDL_bool PHOENIX_GetWindowWMInfo(_THIS, SDL_Window *window, struct SDL_SysWMinfo *info)
+{
+    (void)_this;
+    (void)window;
+    info->subsystem = SDL_SYSWM_UNKNOWN;
+    return SDL_TRUE;
 }
 
 #endif /* SDL_VIDEO_DRIVER_PHOENIX */
