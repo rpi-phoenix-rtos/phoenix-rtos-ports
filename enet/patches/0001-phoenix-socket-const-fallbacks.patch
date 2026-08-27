@@ -1,0 +1,21 @@
+--- a/unix.c
++++ b/unix.c
+@@ -61,6 +61,18 @@
+ #define MSG_NOSIGNAL 0
+ #endif
+ 
++/* Phoenix-RTOS's lwip-backed socket layer does not define these two POSIX
++ * socket constants. Provide portable fallbacks: SOMAXCONN is the classic
++ * listen-backlog cap, and MSG_TRUNC (a recvmsg msg_flags bit ENet only tests)
++ * is harmless to treat as never-set. */
++#ifndef SOMAXCONN
++#define SOMAXCONN 128
++#endif
++
++#ifndef MSG_TRUNC
++#define MSG_TRUNC 0
++#endif
++
+ static enet_uint32 timeBase = 0;
+ 
+ int
