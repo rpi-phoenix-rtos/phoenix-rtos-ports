@@ -3,6 +3,7 @@ ac_cv_file__dev_ptc=no
 ac_cv_buggy_getaddrinfo=no
 ac_cv_little_endian_double=yes
 ac_cv_have_long_long_format=yes
+py_cv_module__blake2=n/a
 py_cv_module_binascii=n/a
 py_cv_module__bz2=n/a
 py_cv_module__ctypes=n/a

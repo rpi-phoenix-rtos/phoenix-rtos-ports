@@ -26,7 +26,7 @@
 	# PREFIX_A/PREFIX_H, so python (also non-conflicting, same shared prefix) links
 	# them via -I${PREFIX_H} -L${PREFIX_A}. openssl (1.1.1a) is conflictable ->
 	# installs to a versioned dir, resolved at build time via b_dependency_dir.
-	depends="zlib openssl>=1.1.1a sqlite3 libffi"
+	depends="zlib openssl>=1.1.1a sqlite3 libffi bzip2 xz"
 
 	supports="phoenix>=3.3"
 }
@@ -149,6 +149,24 @@ p_prepare() {
 		echo "_ssl _ssl.c -I${OSSL}/include -L${OSSL}/lib -lssl -lcrypto" >> "${cfg}/Modules/Setup.local"
 	grep -q '^_hashlib ' "${cfg}/Modules/Setup.local" || \
 		echo "_hashlib _hashopenssl.c -I${OSSL}/include -L${OSSL}/lib -lcrypto" >> "${cfg}/Modules/Setup.local"
+
+	# 4f. _blake2 (hashlib.blake2b/blake2s). CPython 3.14 bundles the portable HACL*
+	#     Blake2 impl -> self-contained (no external lib). The x86 SIMD variants
+	#     compile out on aarch64 (_Py_HACL_CAN_COMPILE_VEC* == 0), so link only the
+	#     portable HACL sources + Lib_Memzero0.c (a HACL dep). config.site sets
+	#     py_cv_module__blake2=n/a so configure emits no colliding rules.
+	grep -q '^_blake2 ' "${cfg}/Modules/Setup.local" || \
+		echo "_blake2 blake2module.c _hacl/Hacl_Hash_Blake2s.c _hacl/Hacl_Hash_Blake2b.c _hacl/Lib_Memzero0.c -IModules/_hacl -IModules/_hacl/include -D_BSD_SOURCE -D_DEFAULT_SOURCE" >> "${cfg}/Modules/Setup.local"
+
+	# 4g. _bz2 (bzip2 compression) against the framework bzip2 port (libbz2.a + bzlib.h
+	#     in the shared sysroot). config.site sets py_cv_module__bz2=n/a.
+	grep -q '^_bz2 ' "${cfg}/Modules/Setup.local" || \
+		echo "_bz2 _bz2module.c -I${PREFIX_H} -L${PREFIX_A} -lbz2" >> "${cfg}/Modules/Setup.local"
+
+	# 4h. _lzma (xz/LZMA compression) against the framework xz port (liblzma.a + lzma.h
+	#     in the shared sysroot). config.site sets py_cv_module__lzma=n/a.
+	grep -q '^_lzma ' "${cfg}/Modules/Setup.local" || \
+		echo "_lzma _lzmamodule.c -I${PREFIX_H} -L${PREFIX_A} -llzma" >> "${cfg}/Modules/Setup.local"
 }
 
 p_build() {
