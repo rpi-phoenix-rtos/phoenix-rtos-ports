@@ -1,0 +1,24 @@
+# Build these pure-C stdlib extension modules STATICALLY into the interpreter
+# (Phoenix: avoid runtime .so loading). Curated: no external lib, no special flags.
+*static*
+array arraymodule.c
+_struct _struct.c
+_json _json.c
+_random _randommodule.c
+_csv _csv.c
+_pickle _pickle.c
+_heapq _heapqmodule.c
+_bisect _bisectmodule.c
+_queue _queuemodule.c
+_statistics _statisticsmodule.c
+_zoneinfo _zoneinfo.c
+math mathmodule.c
+cmath cmathmodule.c
+unicodedata unicodedata.c
+fcntl fcntlmodule.c
+grp grpmodule.c
+select selectmodule.c
+_socket socketmodule.c
+mmap mmapmodule.c
+_posixsubprocess _posixsubprocess.c
+binascii binascii.c
