@@ -101,6 +101,14 @@ p_build() {
 	# ref_gl1's initialized `modes` (texture-filter table) collides with the client's
 	# initialized `modes` (video-mode menu); rename the renderer's across all gl1 TUs.
 	local gl1_cflags="${base_cflags} -Dmodes=yq2_gl1_modes"
+	# ref_gl3 (GLES3) variant: same initialized `modes` collision (gl3_image.c) needs
+	# the same rename. YQ2_GL3_GLES3 takes the GLES3 code path (glad-gles3 loader,
+	# <GLES3> types, ES context request in gl3_sdl.c); YQ2_GL3_GLES gates the parts
+	# common to all GLES targets (the gladLoadGLES2Loader call, KHR-debug config) —
+	# upstream defines BOTH for its ref_gles3 target (Makefile / CMakeLists.txt), and
+	# gl3_sdl.c's ES loader path is gated on the shorter one. The extra -I lets the
+	# glad-gles3 loader's `#include <glad/glad.h>` resolve.
+	local gl3_cflags="${base_cflags} -DYQ2_GL3_GLES3 -DYQ2_GL3_GLES -Dmodes=yq2_gl3_modes -I${src}/client/refresh/gl3/glad-gles3/include"
 	# SDL2 GL-context glue is compiled with Mesa's include/define set (winsys bridge).
 	local mesa_cflags="${CFLAGS} -c -O2 -g -ffreestanding -fno-strict-aliasing -Wno-error -Wno-undef -DUTIL_ARCH_LITTLE_ENDIAN=1 -DUTIL_ARCH_BIG_ENDIAN=0 -DHAVE_STRUCT_TIMESPEC -include ${mcompat} -I${mesa}/src -I${mesa}/include -I${mesa}/src/mesa -I${mesa}/src/mapi -I${mesa}/src/compiler -I${mesa}/src/gallium/include -I${mesa}/src/gallium/auxiliary -I${mesa}/src/util -I/tmp/mesa-v3d-build/src -I${sdlinc}"
 
@@ -160,8 +168,31 @@ p_build() {
 		client/refresh/files/stb client/refresh/files/surf client/refresh/files/wal
 		client/refresh/files/pvs
 	)
+	# GL3-Source — ref_gl3 (built as GLES3), mirroring the gl1 list: the 12 gl3_*.c
+	# TUs + the glad-gles3 loader + the SAME shared client/refresh/files/*.c (compiled
+	# once, whichever renderer is selected). Selected instead of gl1 when
+	# YQ2_RENDERER=gl3; never built alongside gl1 (only one GetRefAPI per binary).
+	local gl3=(
+		client/refresh/gl3/gl3_draw client/refresh/gl3/gl3_image client/refresh/gl3/gl3_light
+		client/refresh/gl3/gl3_lightmap client/refresh/gl3/gl3_main client/refresh/gl3/gl3_mesh
+		client/refresh/gl3/gl3_misc client/refresh/gl3/gl3_model client/refresh/gl3/gl3_sdl
+		client/refresh/gl3/gl3_shaders client/refresh/gl3/gl3_surf client/refresh/gl3/gl3_warp
+		client/refresh/gl3/glad-gles3/src/glad
+		client/refresh/files/common client/refresh/files/models client/refresh/files/pcx
+		client/refresh/files/stb client/refresh/files/surf client/refresh/files/wal
+		client/refresh/files/pvs
+	)
 	# Phoenix backend (glue/) replacing backends/unix/{system,main,shared/hunk}.c.
 	local phoenix=(pl_phoenix_sys pl_phoenix_main pl_phoenix_hunk)
+
+	# Renderer selection: default gl1 (existing working build unchanged when unset).
+	local renderer_kind="${YQ2_RENDERER:-gl1}"
+	local renderer=()
+	case "${renderer_kind}" in
+		gl1) renderer=("${gl1[@]}") ;;
+		gl3) renderer=("${gl3[@]}") ;;
+		*) b_die "yquake2: unknown YQ2_RENDERER='${renderer_kind}' (want gl1 or gl3)" ;;
+	esac
 
 	local objdir="${PREFIX_PORT_WORKDIR}/_phoenix_obj"
 	mkdir -p "${objdir}"
@@ -173,6 +204,7 @@ p_build() {
 		case "${kind}" in
 			base) flags="${YQ2_BASE_CFLAGS}" ;;
 			gl1) flags="${YQ2_GL1_CFLAGS}" ;;
+			gl3) flags="${YQ2_GL3_CFLAGS}" ;;
 			mesa) flags="${YQ2_MESA_CFLAGS}" ;;
 		esac
 		obj="${YQ2_OBJDIR}/${unit//\//_}.o"
@@ -184,14 +216,15 @@ p_build() {
 	}
 	export -f _yq2_cc
 	export CC YQ2_OBJDIR="${objdir}" \
-		YQ2_BASE_CFLAGS="${base_cflags}" YQ2_GL1_CFLAGS="${gl1_cflags}" YQ2_MESA_CFLAGS="${mesa_cflags}"
+		YQ2_BASE_CFLAGS="${base_cflags}" YQ2_GL1_CFLAGS="${gl1_cflags}" \
+		YQ2_GL3_CFLAGS="${gl3_cflags}" YQ2_MESA_CFLAGS="${mesa_cflags}"
 
 	{
 		local u
 		for u in "${client[@]}" "${client_sdl[@]}" "${generic[@]}" "${unix_keep[@]}" "${game[@]}"; do
 			printf 'base\t%s\t%s\n' "${u}" "${src}"
 		done
-		for u in "${gl1[@]}"; do printf 'gl1\t%s\t%s\n' "${u}" "${src}"; done
+		for u in "${renderer[@]}"; do printf '%s\t%s\t%s\n' "${renderer_kind}" "${u}" "${src}"; done
 		for u in "${phoenix[@]}"; do printf 'base\t%s\t%s\n' "${u}" "${glue_dir}"; done
 		printf 'mesa\t%s\t%s\n' "sdl_phoenix_glctx" "${sdl2_glue}"
 		printf 'base\t%s\t%s\n' "sdl_phoenix_glstubs" "${sdl2_glue}"
@@ -200,7 +233,7 @@ p_build() {
 	# Deterministic object list (compile order above is parallel/non-deterministic).
 	local objs=() u
 	for u in "${client[@]}" "${client_sdl[@]}" "${generic[@]}" "${unix_keep[@]}" \
-		"${game[@]}" "${gl1[@]}" "${phoenix[@]}" sdl_phoenix_glctx sdl_phoenix_glstubs; do
+		"${game[@]}" "${renderer[@]}" "${phoenix[@]}" sdl_phoenix_glctx sdl_phoenix_glstubs; do
 		local o="${objdir}/${u//\//_}.o"
 		[ -f "${o}" ] || b_die "yquake2: object missing after compile: ${o}"
 		objs+=("${o}")

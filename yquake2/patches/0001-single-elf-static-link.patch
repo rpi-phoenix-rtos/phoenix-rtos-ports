@@ -96,9 +96,9 @@ index 793ef38f..c0b757ba 100644
 -
 -	return false;
 +	/* Phoenix single-ELF port: the renderer is statically linked, there is
-+	 * no ref_*.so file to stat. Report the compiled-in renderer (gl1) as
-+	 * present; Sys_LoadLibrary() hands back its GetRefAPI directly. */
-+	return (strcmp(renderer, "gl1") == 0) ? true : false;
++	 * no ref_*.so file to stat. GetRefAPI link-resolves to the ONE compiled-in
++	 * renderer (gl1 or gl3/gles3), so accept those names; Sys_LoadLibrary() hands back its GetRefAPI. */
++	return (strcmp(renderer, "gl1") == 0 || strcmp(renderer, "gl3") == 0 || strcmp(renderer, "gles3") == 0) ? true : false;
  }
  
  /*
