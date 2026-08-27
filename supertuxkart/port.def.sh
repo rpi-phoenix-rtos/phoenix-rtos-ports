@@ -241,11 +241,17 @@ p_build() {
 	# stack matches the heavier C++ (yQuake2 used 4 MB).
 	echo ">> [supertuxkart] final group-link against libGL/libv3d + SDL2 glue"
 	local linkcmd; linkcmd="$(cat "${linktxt}")"
-	eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
+	# link.txt uses paths relative to the build dir (objects + `-o bin/supertuxkart`),
+	# so run the relink from ${build}; and create bin/ first — on a CLEAN build CMake
+	# has not yet made the output dir (it would create it only during its own link,
+	# which we bypass), so ld's `-o bin/supertuxkart` fails with "cannot open output
+	# file ... No such file or directory". (An incremental build masked this because a
+	# prior partial link had already created bin/.)
+	( cd "${build}" && mkdir -p bin && eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
 		-Wl,--start-group '${sdllib}' '${gllib}' '${v3dlib}' \
 		'${pfx}/lib/libz.a' '${pfx}/lib/libogg.a' '${pfx}/lib/libvorbis.a' \
 		'${pfx}/lib/libvorbisfile.a' '${pfx}/lib/libvorbisenc.a' \
-		-Wl,--end-group -Wl,-z,stack-size=8388608"
+		-Wl,--end-group -Wl,-z,stack-size=8388608" )
 
 	local elf="${build}/bin/supertuxkart"
 	[ -f "${elf}" ] || b_die "supertuxkart: final link produced no ELF (see link errors above)."
