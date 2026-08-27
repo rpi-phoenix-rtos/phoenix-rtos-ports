@@ -20,7 +20,7 @@
 	license_file="COPYING"
 
 	iuse="mbedtls"
-	depends="mbedtls? (mbedtls>=2.28.0)"
+	depends="zlib mbedtls? (mbedtls>=2.28.0)"
 	conflicts=""
 
 	supports="phoenix>=3.3"
@@ -33,8 +33,11 @@ p_common() {
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 
+	# --with-zlib: HTTP gzip/deflate content-encoding decode (Accept-Encoding).
+	# libz.a + zlib.h come from the framework zlib port in the shared sysroot,
+	# which the port CFLAGS (-I$PREFIX_H) / LDFLAGS (-L$PREFIX_A) already reference.
 	CONFIGURE_PARAMS=(--host="${HOST}" --sbindir="$PREFIX_PROG" --disable-pthreads --disable-threaded-resolver
-		--disable-ipv6 --prefix="$PREFIX_CURL_INSTALL" --disable-ntlm-wb --without-zlib)
+		--disable-ipv6 --prefix="$PREFIX_CURL_INSTALL" --disable-ntlm-wb --with-zlib)
 
 	b_use "mbedtls" && CONFIGURE_PARAMS+=(--without-ssl --with-mbedtls)
 
