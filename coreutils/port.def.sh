@@ -75,6 +75,6 @@ p_build() {
 		n=$((n + 1))
 	done
 
-	echo "coreutils: installed ${n} tools (all 104, incl. stty)"
-	[ "${n}" -ge 100 ] || b_die "coreutils: only ${n} tools built (expected ~104) - build broke"
+	echo "coreutils: installed ${n} tools (full set, stty included)"
+	[ "${n}" -ge 100 ] || b_die "coreutils: only ${n} tools built (expected ~105) - build broke"
 }
