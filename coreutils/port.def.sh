@@ -55,9 +55,10 @@ p_prepare() {
 p_build() {
 	local n=0 f name
 
-	# -k: stty (see header) fails to compile on missing termios macros; keep going
-	# and build the other 103 into src/. (We can't use `make install`: its `all`
-	# prerequisite fails on stty, so -k skips install-am.)
+	# All 104 tools build (stty included — see header: patch 0004 + libphoenix now
+	# defines the four termios input flags IUCLC/IXANY/IMAXBEL/XCASE). -k is kept
+	# defensively so a future single-tool break still ships the rest; install is
+	# from src/ below (not `make install`, whose install-am wants the full `all`).
 	make -k -C "${PREFIX_PORT_WORKDIR}" || true
 
 	# Install the built tools straight from src/. Filter to aarch64 ELF executables:
@@ -74,6 +75,6 @@ p_build() {
 		n=$((n + 1))
 	done
 
-	echo "coreutils: installed ${n} tools (only stty skipped - see port.def.sh)"
-	[ "${n}" -ge 100 ] || b_die "coreutils: only ${n} tools built (expected ~103) - build broke"
+	echo "coreutils: installed ${n} tools (all 104, incl. stty)"
+	[ "${n}" -ge 100 ] || b_die "coreutils: only ${n} tools built (expected ~104) - build broke"
 }
