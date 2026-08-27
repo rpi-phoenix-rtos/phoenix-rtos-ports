@@ -1,0 +1,41 @@
+--- a/lib/graphics_engine/include/vk_mem_alloc.h
++++ b/lib/graphics_engine/include/vk_mem_alloc.h
+@@ -2706,6 +2706,25 @@
+ {
+     return _aligned_malloc(size, alignment);
+ }
++#elif defined(__phoenix__)
++// Phoenix-RTOS libc has neither aligned_alloc nor posix_memalign. Emulate with
++// an over-allocation that stashes the malloc base immediately before the
++// returned aligned pointer; vma_aligned_free() recovers it. (VMA is compiled on
++// the GLES2/SP path but its Vulkan allocator is never invoked at runtime there.)
++#include <cstdlib>
++#include <cstdint>
++static void* vma_aligned_alloc(size_t alignment, size_t size)
++{
++    if (alignment < sizeof(void*))
++        alignment = sizeof(void*);
++    void* base = malloc(size + alignment + sizeof(void*));
++    if (!base)
++        return VMA_NULL;
++    uintptr_t raw = (uintptr_t)base + sizeof(void*);
++    uintptr_t aligned = (raw + (alignment - 1)) & ~(uintptr_t)(alignment - 1);
++    ((void**)aligned)[-1] = base;
++    return (void*)aligned;
++}
+ #else
+ static void* vma_aligned_alloc(size_t alignment, size_t size)
+ {
+@@ -2718,6 +2737,12 @@
+ {
+     _aligned_free(ptr);
+ }
++#elif defined(__phoenix__)
++static void vma_aligned_free(void* VMA_NULLABLE ptr)
++{
++    if (ptr)
++        free(((void**)ptr)[-1]);
++}
+ #else
+ static void vma_aligned_free(void* VMA_NULLABLE ptr)
+ {

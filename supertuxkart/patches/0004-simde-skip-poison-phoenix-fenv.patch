@@ -1,0 +1,28 @@
+--- a/lib/simd_wrapper/simde/simde-common.h
++++ b/lib/simd_wrapper/simde/simde-common.h
+@@ -701,6 +701,11 @@
+ 
+ #if defined(FE_ALL_EXCEPT)
+   #define SIMDE_HAVE_FENV_H
++#elif defined(__phoenix__)
++  /* Phoenix-RTOS: <fenv.h> is a poison-pill stub that #errors on include (it
++     provides no fenv functionality). Leave SIMDE_HAVE_FENV_H undefined so simde
++     falls back to its non-fenv rounding-mode default (SIMDE_MM_ROUND_NEAREST)
++     rather than #include <fenv.h> and referencing FE_* / fe*round. */
+ #elif defined(__has_include)
+   #if __has_include(<fenv.h>)
+     #include <fenv.h>
+@@ -723,7 +728,12 @@
+   #define SIMDE_HAVE_STDLIB_H
+ #endif
+ 
+-#if defined(__has_include)
++#if defined(__phoenix__)
++/* Phoenix-RTOS: skip <cfenv>/<fenv.h> (poison-pill stub that #errors on
++   include); pull in only <stdlib.h>. simde's fenv-dependent paths are gated on
++   SIMDE_HAVE_FENV_H, left undefined above. */
++#  include <stdlib.h>
++#elif defined(__has_include)
+ #  if defined(__cplusplus) && (__cplusplus >= 201103L) && __has_include(<cfenv>)
+ #    include <cfenv>
+ #  elif __has_include(<fenv.h>)

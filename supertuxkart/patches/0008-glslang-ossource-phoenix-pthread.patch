@@ -1,0 +1,27 @@
+--- a/lib/shaderc/third_party/glslang/glslang/OSDependent/Unix/ossource.cpp
++++ b/lib/shaderc/third_party/glslang/glslang/OSDependent/Unix/ossource.cpp
+@@ -39,7 +39,12 @@
+ #include "../../../OGLCompilersDLL/InitializeDll.h"
+ 
+ #include <pthread.h>
++#if !defined(__phoenix__)
++// Phoenix-RTOS libc ships no <semaphore.h>. glslang's Unix OSDependent includes
++// it but never references any sem_* API (the semaphore path is unused), so the
++// include is simply dropped on Phoenix.
+ #include <semaphore.h>
++#endif
+ #include <assert.h>
+ #include <errno.h>
+ #include <stdint.h>
+@@ -73,7 +78,10 @@
+ //
+ void OS_CleanupThreadData(void)
+ {
+-#if defined(__ANDROID__) || defined(__Fuchsia__)
++#if defined(__ANDROID__) || defined(__Fuchsia__) || defined(__phoenix__)
++    // Phoenix-RTOS pthread has pthread_setcancelstate but neither
++    // pthread_setcanceltype nor PTHREAD_CANCEL_DEFERRED. Use the Android/Fuchsia
++    // path (direct detach), which needs no cancellation-type control.
+     DetachThreadLinux(NULL);
+ #else
+     int old_cancel_state, old_cancel_type;

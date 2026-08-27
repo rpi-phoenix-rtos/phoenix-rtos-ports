@@ -1,0 +1,15 @@
+--- a/lib/shaderc/third_party/glslang/glslang/CMakeLists.txt
++++ b/lib/shaderc/third_party/glslang/glslang/CMakeLists.txt
+@@ -33,7 +33,11 @@
+ 
+ if(WIN32)
+     add_subdirectory(OSDependent/Windows)
+-elseif(UNIX OR "${CMAKE_SYSTEM_NAME}" STREQUAL "Fuchsia" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "NintendoSwitch")
++elseif(UNIX OR "${CMAKE_SYSTEM_NAME}" STREQUAL "Fuchsia" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "NintendoSwitch" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "Generic")
++    # Generic = Phoenix-RTOS cross build (CMAKE_SYSTEM_NAME=Generic leaves UNIX
++    # false). OSDependent/Unix is pthreads-based and builds fine against
++    # libpthread; without this branch libOSDependent.a is never built and the
++    # final link degrades to a bare `-lOSDependent` with no provider.
+     add_subdirectory(OSDependent/Unix)
+ else()
+     message("unknown platform")

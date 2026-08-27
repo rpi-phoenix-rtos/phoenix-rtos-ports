@@ -1,0 +1,106 @@
+--- a/lib/irrlicht/include/irrTypes.h
++++ b/lib/irrlicht/include/irrTypes.h
+@@ -260,5 +260,103 @@
+ #define _strcmpi(a,b) strcmpi(a,b)
+ #endif
+ 
++// ---------------------------------------------------------------------------
++// Phoenix-RTOS: libphoenix ships no wide-char printf family (wchar.h declares
++// none of swprintf/vswprintf/fwprintf, and libc.a exports no such symbol).
++// Irrlicht — and STK src, which includes Irrlicht headers everywhere — calls
++// swprintf() to format small strings. Provide a self-contained shim covering
++// the conversions Irrlicht actually uses: integers (d i u o x X c), floating
++// (f F e E g G a A), pointer (p) and wide strings (s / ls, treated as
++// wchar_t*, matching Irrlicht's usage of passing wchar_t* to %s). Numeric
++// conversions are rendered via the narrow snprintf and widened; wide strings
++// are copied through. This is a portability shim, not a full C99 wide printf.
++// TODO(TD-STK-SWPRINTF): drop when libphoenix gains swprintf/vswprintf.
++// ---------------------------------------------------------------------------
++#if defined(__phoenix__) && defined(__cplusplus)
++#include <cstdarg>
++#include <cstdio>
++#include <cstddef>
++
++static inline int irr_phoenix_vswprintf(wchar_t *out, size_t n,
++                                        const wchar_t *fmt, va_list ap)
++{
++	size_t o = 0;
++	#define IRR_PUTW(wc) do { if (n && o + 1 < n) out[o] = (wchar_t)(wc); ++o; } while (0)
++	for (const wchar_t *p = fmt; *p; ++p)
++	{
++		if (*p != L'%') { IRR_PUTW(*p); continue; }
++		char spec[40];
++		size_t si = 0;
++		spec[si++] = '%';
++		++p;
++		if (*p == L'%') { IRR_PUTW(L'%'); continue; }
++		// flags
++		while (*p == L'-' || *p == L'+' || *p == L' ' || *p == L'#' || *p == L'0')
++		{ if (si < sizeof(spec) - 2) spec[si++] = (char)*p; ++p; }
++		// width
++		while (*p >= L'0' && *p <= L'9') { if (si < sizeof(spec) - 2) spec[si++] = (char)*p; ++p; }
++		// precision
++		if (*p == L'.')
++		{
++			if (si < sizeof(spec) - 2) spec[si++] = '.'; ++p;
++			while (*p >= L'0' && *p <= L'9') { if (si < sizeof(spec) - 2) spec[si++] = (char)*p; ++p; }
++		}
++		// length modifiers (consumed; narrow reformat re-derives width from arg promotion)
++		int is_long = 0;
++		while (*p == L'l' || *p == L'h' || *p == L'L' || *p == L'z' || *p == L'j' || *p == L't')
++		{ if (*p == L'l') ++is_long; ++p; }
++		const wchar_t conv = *p;
++		char tmp[160];
++		switch (conv)
++		{
++		case L'd': case L'i': case L'u': case L'o': case L'x': case L'X':
++			if (is_long >= 2) { spec[si++] = 'l'; spec[si++] = 'l'; }
++			else if (is_long == 1) { spec[si++] = 'l'; }
++			spec[si++] = (char)conv; spec[si] = 0;
++			if (is_long >= 2) snprintf(tmp, sizeof(tmp), spec, va_arg(ap, long long));
++			else if (is_long == 1) snprintf(tmp, sizeof(tmp), spec, va_arg(ap, long));
++			else snprintf(tmp, sizeof(tmp), spec, va_arg(ap, int));
++			for (char *t = tmp; *t; ++t) IRR_PUTW((unsigned char)*t);
++			break;
++		case L'f': case L'F': case L'e': case L'E':
++		case L'g': case L'G': case L'a': case L'A':
++			spec[si++] = (char)conv; spec[si] = 0;
++			snprintf(tmp, sizeof(tmp), spec, va_arg(ap, double));
++			for (char *t = tmp; *t; ++t) IRR_PUTW((unsigned char)*t);
++			break;
++		case L'p':
++			spec[si++] = 'p'; spec[si] = 0;
++			snprintf(tmp, sizeof(tmp), spec, va_arg(ap, void *));
++			for (char *t = tmp; *t; ++t) IRR_PUTW((unsigned char)*t);
++			break;
++		case L'c':
++			IRR_PUTW((wchar_t)va_arg(ap, int));
++			break;
++		case L's': // Irrlicht passes wchar_t* to %s; treat s and ls as wide.
++		{
++			const wchar_t *ws = va_arg(ap, const wchar_t *);
++			if (ws) for (; *ws; ++ws) IRR_PUTW(*ws);
++			break;
++		}
++		default:
++			IRR_PUTW(L'%'); IRR_PUTW(conv); break;
++		}
++	}
++	if (n) out[(o < n) ? o : n - 1] = L'\0';
++	#undef IRR_PUTW
++	return (int)o;
++}
++
++static inline int __attribute__((unused))
++swprintf(wchar_t *out, size_t n, const wchar_t *fmt, ...)
++{
++	va_list ap;
++	va_start(ap, fmt);
++	int r = irr_phoenix_vswprintf(out, n, fmt, ap);
++	va_end(ap);
++	return r;
++}
++#endif // __phoenix__ && __cplusplus
++
+ #endif // __IRR_TYPES_H_INCLUDED__
+ 

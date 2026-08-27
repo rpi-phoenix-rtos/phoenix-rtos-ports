@@ -1,0 +1,14 @@
+--- a/src/utils/translation.cpp
++++ b/src/utils/translation.cpp
+@@ -302,8 +302,9 @@
+     // LC_ALL does not work, sscanf will then not always be able
+     // to scan for example: s=-1.1,-2.3,-3.3 correctly, which is
+     // used in driveline files.
+-#if defined(WIN32) && !defined(__CYGWIN__)
+-    // Windows does not have LC_MESSAGES
++#if (defined(WIN32) && !defined(__CYGWIN__)) || defined(__phoenix__)
++    // Windows — and Phoenix-RTOS, whose libc locale.h defines LC_ALL..LC_TIME
++    // but not LC_MESSAGES — do not have LC_MESSAGES.
+     setlocale(LC_CTYPE,    "");
+ #else
+     setlocale(LC_MESSAGES, "");

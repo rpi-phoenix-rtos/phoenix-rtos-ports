@@ -39,8 +39,9 @@
 }
 
 p_prepare() {
-	# Three configure-portability patches (all Generic/cmake-4 fallout, none
-	# touching runtime code):
+	# Portability patches. 0001-0003 are M2 configure fallout (Generic/cmake-4);
+	# 0004-0010 are M3 build fallout (libc/libstdc++ gaps on the compile surface).
+	# None change renderer behaviour.
 	#  0001 FindFreetype.cmake — its non-Win/Apple/SunOS branch calls
 	#       pkg_check_modules(freetype2), but under CMAKE_SYSTEM_NAME=Generic the
 	#       UNIX-gated include(FindPkgConfig) never ran, so that command is
@@ -48,21 +49,40 @@ p_prepare() {
 	#  0002 CMakeLists.txt — STK forces policy CMP0043 to OLD, which host cmake
 	#       4.x no longer supports (hard error); gate it on cmake < 4.0.
 	#  0003 lib/shaderc/third_party/spirv-tools — its platform switch FATAL_ERRORs
-	#       on unknown CMAKE_SYSTEM_NAME; add a Generic branch (treat as Linux),
-	#       mirroring STK's own NintendoSwitch addition.
+	#       on unknown CMAKE_SYSTEM_NAME; add a Generic branch (treat as Linux but
+	#       with timers OFF: Phoenix rusage lacks ru_maxrss/minflt/majflt and has
+	#       no CLOCK_PROCESS_CPUTIME_ID, so util/timer.* would not compile).
+	#  0004 simde-common.h — Phoenix <fenv.h> is a poison-pill stub (#errors on
+	#       include); skip both fenv-detection blocks so simde uses its non-fenv
+	#       rounding fallback (SIMDE_HAVE_FENV_H left undefined).
+	#  0005 vk_mem_alloc.h — Phoenix libc has no aligned_alloc/posix_memalign; add
+	#       a __phoenix__ vma_aligned_alloc/free using a base-stashing malloc.
+	#  0006 irrlicht/irrTypes.h — libphoenix ships no wide-char printf; add a
+	#       self-contained swprintf() shim (numeric + wide-%s) for Irrlicht/STK.
+	#  0007 glslang glslang/CMakeLists.txt — add Generic to the OSDependent/Unix
+	#       gate, else libOSDependent.a is never built and the link degrades to a
+	#       bare, unprovided -lOSDependent.
+	#  0008 glslang OSDependent/Unix/ossource.cpp — drop the unused <semaphore.h>
+	#       include (Phoenix has none) and route thread cleanup through the
+	#       Android/Fuchsia path (no pthread_setcanceltype / PTHREAD_CANCEL_*).
+	#  0009 src/guiengine/widgets/spinner_widget.cpp — Phoenix libstdc++ has no
+	#       wide iostreams; format via a narrow stream widened through stringw.
+	#  0010 src/utils/translation.cpp — Phoenix locale.h lacks LC_MESSAGES; route
+	#       it through the existing Windows LC_CTYPE branch.
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 }
 
 p_build() {
 	# ---------------------------------------------------------------------------
-	# MILESTONE M2: cross-CONFIGURE only.
+	# MILESTONE M3: cross-CONFIGURE + BUILD + LINK the supertuxkart ELF.
 	#
-	# This p_build runs cmake's configure+generate for aarch64-phoenix and stops.
-	# It deliberately does NOT build or link the supertuxkart ELF — that is M3,
-	# which still has open link-surface work (GLES entrypoints, libstdc++,
-	# Irrlicht device/GL glue; see the port plan doc). A bounded smoke build of a
-	# small socket-free bundled lib (mcpp) is attempted as a configure sanity
-	# check and is non-fatal.
+	# Stages: (1) cmake configure/generate for aarch64-phoenix; (2) `make` the
+	# full game (all STK src + bundled Irrlicht/GE/bullet/angelscript/mojoal/
+	# shaderc on the GLES2/SP path); (3) compile the shared SDL2 phoenix GL glue;
+	# (4) final group-link against our in-process Mesa/V3D GL stack — CMake's own
+	# link step cannot resolve the GLES entrypoints (they live in libGL-phoenix.a,
+	# not in the static STK libs), so we relink from CMake's computed object/lib
+	# list (link.txt) with the yQuake2 gl3 --start-group recipe.
 	# ---------------------------------------------------------------------------
 
 	# All non-conflict framework ports install into ONE shared prefix, so every
@@ -70,11 +90,29 @@ p_build() {
 	local pfx="${PORT_DEP_sdl2}"
 	local sysroot="${PREFIX_SYSROOT:-${pfx}/sysroot}"
 
+	# This port reaches build artifacts outside the ports tree (the not-yet-
+	# portified Mesa/V3D GL stack): repo_root/external/mesa (GLES2/GLES3 headers +
+	# glue includes) and repo_root/tools/.gpu-libs (libGL/libv3d). Same anchor
+	# pattern as the yquake2 port.
+	local repo_root; repo_root="$(cd "${PREFIX_PORT}/../../.." && pwd)"
+	local mesa="${repo_root}/external/mesa"
+	local gpu_libs="${repo_root}/tools/.gpu-libs"
+	local mcompat="${repo_root}/tools/v3d-driver-port/phoenix_mesa_compat.h"
+	local sdl2_glue; sdl2_glue="$(cd "${PREFIX_PORT}/../sdl2/glue" && pwd)"
+
 	# Consumed by the committed toolchain file (aarch64-phoenix.cmake) for the
 	# cross compilers, the flag surface and find-root confinement.
 	export CROSS CFLAGS LDFLAGS
 	export STK_PREFIX="${pfx}"
 	export STK_SYSROOT="${sysroot}"
+
+	# Two compile-surface additions folded into the flags every sub-project sees:
+	#   * -I${mesa}/include so Irrlicht's <GLES2/gl2.h> / <GLES3/gl3.h> resolve
+	#     (STK's Irrlicht/GE select GLES purely by preprocessor define and never
+	#     find_package a GL lib, so no headers are on the include path otherwise).
+	#   * a force-included compat header supplying a few BSD socket constants that
+	#     libphoenix omits but bundled enet/dnsc reference (macro-only, C+C++ safe).
+	CFLAGS="${CFLAGS} -I${mesa}/include -include ${PREFIX_PORT}/stk_phoenix_compat.h"
 
 	# Fold CFLAGS into LDFLAGS so link-time configure probes (STK's
 	# std::atomic<uint64_t> check, shaderc's compiler-flag checks) carry the
@@ -141,11 +179,74 @@ p_build() {
 			"${PREFIX_PORT_WORKDIR}")
 	fi
 
-	echo ">> [supertuxkart] cmake configure complete (M2). Full build/link is M3."
+	echo ">> [supertuxkart] cmake configure complete. Building game objects + libs."
 
-	# Bounded, non-fatal smoke: a small socket-free bundled lib. Confirms the
-	# generated build graph + cross toolchain actually compile a STK sub-target.
-	(cd "${build}" && make mcpp) \
-		&& echo ">> [supertuxkart] smoke build of bundled mcpp OK" \
-		|| echo ">> [supertuxkart] mcpp smoke build skipped/failed (non-fatal at M2)"
+	# ----- Stage 2: compile all STK src + bundled libs (GLES2/SP path) ----------
+	# CMake's own link of the supertuxkart target CANNOT succeed here: the GLES
+	# entrypoints referenced by Irrlicht/GE are unresolved in the static libs
+	# (resolved only against libGL-phoenix.a at the executable link, stage 4). So
+	# we let `make` compile everything and reach — and fail — its link step, then
+	# relink ourselves. `make -k` keeps going so every real compile error surfaces
+	# in one pass; a genuine compile failure is caught by the object check below.
+	(cd "${build}" && make -k -j"$(nproc)" supertuxkart) || true
+
+	# ----- Prerequisite check: GL stack artifacts (fail loud) -------------------
+	local sdllib="${pfx}/lib/libSDL2.a"
+	local gllib="${gpu_libs}/libGL-phoenix.a"
+	local v3dlib="${gpu_libs}/libv3d-phoenix.a"
+	local p missing=0
+	for p in "${sdllib}" "${gllib}" "${v3dlib}" "${mcompat}" \
+		"${sdl2_glue}/sdl_phoenix_glctx.c" "${sdl2_glue}/sdl_phoenix_glstubs.c"; do
+		[ -f "${p}" ] || { echo "supertuxkart: MISSING prerequisite: ${p}" >&2; missing=1; }
+	done
+	for p in "${mesa}/src" "${mesa}/include" "/tmp/mesa-v3d-build/src"; do
+		[ -d "${p}" ] || { echo "supertuxkart: MISSING prerequisite dir: ${p}" >&2; missing=1; }
+	done
+	[ "${missing}" = 0 ] || b_die "GL/V3D stack not present. Build it first: tools/v3d-driver-port/build-gl-phoenix.py (+ build-v3d-phoenix.py) → tools/.gpu-libs + /tmp/mesa-v3d-build."
+
+	local linktxt="${build}/CMakeFiles/supertuxkart.dir/link.txt"
+	[ -f "${linktxt}" ] || b_die "supertuxkart: CMake link.txt missing — the make stage did not reach linking (a real compile error). See the build log."
+
+	# ----- Stage 3: compile the SDL2 phoenix GL-context glue --------------------
+	# Identical seam to the yquake2 gl3 port: the SDL2 static lib is built with
+	# undefined PHOENIX_GL_* / phxgl_* that this glue provides, bridging the ES
+	# 3.0 context request (SDL_GL_CONTEXT_PROFILE_ES) to the in-process Mesa/V3D
+	# winsys and blitting the default FBO to /dev/fb0.
+	local gluedir="${build}/_phoenix_glue"
+	mkdir -p "${gluedir}"
+	local base_cc="${CFLAGS}"
+	local mesa_cc="${CFLAGS} -O2 -ffreestanding -fno-strict-aliasing -Wno-error -Wno-undef \
+		-DUTIL_ARCH_LITTLE_ENDIAN=1 -DUTIL_ARCH_BIG_ENDIAN=0 -DHAVE_STRUCT_TIMESPEC \
+		-include ${mcompat} -I${mesa}/src -I${mesa}/include -I${mesa}/src/mesa \
+		-I${mesa}/src/mapi -I${mesa}/src/compiler -I${mesa}/src/gallium/include \
+		-I${mesa}/src/gallium/auxiliary -I${mesa}/src/util -I/tmp/mesa-v3d-build/src \
+		-I${pfx}/include -I${pfx}/include/SDL2"
+	# shellcheck disable=2086
+	"${CROSS}gcc" ${mesa_cc} -c -o "${gluedir}/sdl_phoenix_glctx.o" "${sdl2_glue}/sdl_phoenix_glctx.c"
+	# shellcheck disable=2086
+	"${CROSS}gcc" ${base_cc} -O2 -ffreestanding -fno-strict-aliasing -Wno-error \
+		-c -o "${gluedir}/sdl_phoenix_glstubs.o" "${sdl2_glue}/sdl_phoenix_glstubs.c"
+
+	# ----- Stage 4: final group-link --------------------------------------------
+	# Re-run CMake's computed link line (objects + STK/bundled static libs) with
+	# the glue objects and the GL group appended. Trailing archives resolve the
+	# GLES undefineds recorded by the earlier STK libs in one pass; the group
+	# covers the libGL<->libv3d<->SDL<->glue cycle. Driver is g++ (link.txt) so
+	# libstdc++/libm come in automatically; an 8 MB stack matches the heavier C++.
+	echo ">> [supertuxkart] final group-link against libGL/libv3d + SDL2 glue"
+	local linkcmd; linkcmd="$(cat "${linktxt}")"
+	eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
+		-Wl,--start-group '${sdllib}' '${gllib}' '${v3dlib}' -Wl,--end-group \
+		-Wl,-z,stack-size=8388608"
+
+	local elf="${build}/bin/supertuxkart"
+	[ -f "${elf}" ] || b_die "supertuxkart: final link produced no ELF (see link errors above)."
+
+	# Install the engine binary. The ~1 GB art assets (stk-assets) are a separate
+	# RUNTIME concern staged outside the port (see the port plan §6).
+	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
+	cp "${elf}" "${PREFIX_PROG}/supertuxkart"
+	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/supertuxkart" "${elf}"
+	b_install "${PREFIX_PROG_TO_INSTALL}/supertuxkart" /usr/bin
+	echo ">> [supertuxkart] M3 complete: /usr/bin/supertuxkart linked + installed."
 }

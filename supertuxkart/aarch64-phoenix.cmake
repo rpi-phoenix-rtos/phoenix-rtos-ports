@@ -41,9 +41,17 @@ set(BUILD_SHARED_LIBS OFF)
 # since the port env exports no CXXFLAGS). Fold CFLAGS into the linker flags so
 # CMake's link-time probes (e.g. STK's std::atomic<uint64_t> check and shaderc's
 # compiler-flag checks) carry the sysroot and cpu flags and actually link.
-set(CMAKE_C_FLAGS   "$ENV{CFLAGS}"  CACHE STRING "" FORCE)
-set(CMAKE_CXX_FLAGS "$ENV{CFLAGS}"  CACHE STRING "" FORCE)
-set(CMAKE_EXE_LINKER_FLAGS "$ENV{CFLAGS} $ENV{LDFLAGS}" CACHE STRING "" FORCE)
+#
+# The framework CFLAGS carries -std=gnu17, a C-only option. It is harmless for
+# the configure-time C++ probes (a warning), but several of STK's bundled
+# sub-projects (graphics_engine, shaderc, ...) compile C++ with -Werror, where
+# GCC's "'-std=gnu17' is valid for C/ObjC but not for C++" warning becomes a
+# hard error. Strip it from the C++ flags; STK's own CMAKE_CXX_STANDARD selects
+# the C++ dialect. Keep it for C (enet/dnsc/zlib TUs).
+string(REPLACE "-std=gnu17" "" _stk_cxx_flags "$ENV{CFLAGS}")
+set(CMAKE_C_FLAGS   "$ENV{CFLAGS}"      CACHE STRING "" FORCE)
+set(CMAKE_CXX_FLAGS "${_stk_cxx_flags}" CACHE STRING "" FORCE)
+set(CMAKE_EXE_LINKER_FLAGS "${_stk_cxx_flags} $ENV{LDFLAGS}" CACHE STRING "" FORCE)
 
 # Find-root confinement. Search the shared framework install prefix (ported
 # libs/headers) and the phoenix sysroot for libraries and headers; never let a

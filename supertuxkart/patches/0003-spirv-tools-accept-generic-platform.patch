@@ -1,4 +1,4 @@
-spirv-tools: accept CMAKE_SYSTEM_NAME=Generic (treat as Linux)
+spirv-tools: accept CMAKE_SYSTEM_NAME=Generic (treat as Linux, timers off)
 
 STK bundles shaderc, whose third_party/spirv-tools CMakeLists dispatches on
 CMAKE_SYSTEM_NAME and FATAL_ERRORs on anything unknown ("Your platform
@@ -8,21 +8,24 @@ Vulkan/SPIR-V path at runtime.
 
 Add a Generic branch mirroring the Linux one — the same way STK already added a
 NintendoSwitch branch just below. SPIRV_LINUX only selects ANSI colour codes in
-source/print.cpp, and the phoenix libc provides clock_gettime, so timers stay
-enabled.
+source/print.cpp. Unlike the Linux branch we do NOT enable SPIRV_TIMER_ENABLED:
+Phoenix's struct rusage lacks ru_maxrss/ru_minflt/ru_majflt and it has no
+CLOCK_PROCESS_CPUTIME_ID, so source/util/timer.{h,cpp} would not compile.
+Timers are an optional profiling aid, unused by STK.
 
 --- a/lib/shaderc/third_party/spirv-tools/CMakeLists.txt
 +++ b/lib/shaderc/third_party/spirv-tools/CMakeLists.txt
-@@ -39,6 +39,12 @@
+@@ -39,6 +39,13 @@
  if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
    add_definitions(-DSPIRV_LINUX)
    set(SPIRV_TIMER_ENABLED ${SPIRV_ALLOW_TIMERS})
 +elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "Generic")
-+  # STK/Phoenix cross build sets CMAKE_SYSTEM_NAME=Generic. Treat it as Linux:
-+  # SPIRV_LINUX only selects ANSI colour codes in source/print.cpp, and the
-+  # phoenix libc provides clock_gettime so timers can stay enabled.
++  # STK/Phoenix cross build sets CMAKE_SYSTEM_NAME=Generic. Treat it as Linux for
++  # SPIRV_LINUX (ANSI colour codes in source/print.cpp only). Do NOT enable
++  # SPIRV_TIMER_ENABLED: Phoenix's struct rusage lacks ru_maxrss/ru_minflt/
++  # ru_majflt and it has no CLOCK_PROCESS_CPUTIME_ID, so source/util/timer.* does
++  # not compile. Timers are an optional profiling aid, unused by STK.
 +  add_definitions(-DSPIRV_LINUX)
-+  set(SPIRV_TIMER_ENABLED ${SPIRV_ALLOW_TIMERS})
  elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "NintendoSwitch")
      # STK addition treat it as linux, SPIRV_LINUX is used in source/print.cpp:17 only
      add_definitions(-DSPIRV_LINUX)

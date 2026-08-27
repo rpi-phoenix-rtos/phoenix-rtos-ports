@@ -1,0 +1,31 @@
+--- a/src/guiengine/widgets/spinner_widget.cpp
++++ b/src/guiengine/widgets/spinner_widget.cpp
+@@ -16,6 +16,7 @@
+ //  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ 
+ #include <iostream>
++#include <sstream>
+ 
+ #include "graphics/irr_driver.hpp"
+ #include "guiengine/engine.hpp"
+@@ -438,10 +439,20 @@
+         }
+         else
+         {
++#if defined(__phoenix__)
++            // Phoenix-RTOS libstdc++ ships no wide iostreams (std::wstringstream
++            // is absent). Format with a narrow stream and widen through
++            // Irrlicht's stringw, which already backs this widget's text.
++            std::ostringstream ns;
++            ns << (m_value*m_step);
++            stringw text(ns.str().c_str());
++            m_children[1].m_element->setText( text.c_str() );
++#else
+             std::wstringstream ws;
+             ws << (m_value*m_step);
+             std::wstring text = ws.str();
+             m_children[1].m_element->setText( text.c_str() );
++#endif
+         }
+     }
+ }
