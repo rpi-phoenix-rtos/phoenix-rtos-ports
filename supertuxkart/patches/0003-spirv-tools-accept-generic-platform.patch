@@ -1,0 +1,28 @@
+spirv-tools: accept CMAKE_SYSTEM_NAME=Generic (treat as Linux)
+
+STK bundles shaderc, whose third_party/spirv-tools CMakeLists dispatches on
+CMAKE_SYSTEM_NAME and FATAL_ERRORs on anything unknown ("Your platform
+'Generic' is not supported!"). A bare Phoenix cross build uses Generic, so
+configure aborts here even though the GLES2/SP renderer never invokes the
+Vulkan/SPIR-V path at runtime.
+
+Add a Generic branch mirroring the Linux one — the same way STK already added a
+NintendoSwitch branch just below. SPIRV_LINUX only selects ANSI colour codes in
+source/print.cpp, and the phoenix libc provides clock_gettime, so timers stay
+enabled.
+
+--- a/lib/shaderc/third_party/spirv-tools/CMakeLists.txt
++++ b/lib/shaderc/third_party/spirv-tools/CMakeLists.txt
+@@ -39,6 +39,12 @@
+ if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
+   add_definitions(-DSPIRV_LINUX)
+   set(SPIRV_TIMER_ENABLED ${SPIRV_ALLOW_TIMERS})
++elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "Generic")
++  # STK/Phoenix cross build sets CMAKE_SYSTEM_NAME=Generic. Treat it as Linux:
++  # SPIRV_LINUX only selects ANSI colour codes in source/print.cpp, and the
++  # phoenix libc provides clock_gettime so timers can stay enabled.
++  add_definitions(-DSPIRV_LINUX)
++  set(SPIRV_TIMER_ENABLED ${SPIRV_ALLOW_TIMERS})
+ elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "NintendoSwitch")
+     # STK addition treat it as linux, SPIRV_LINUX is used in source/print.cpp:17 only
+     add_definitions(-DSPIRV_LINUX)

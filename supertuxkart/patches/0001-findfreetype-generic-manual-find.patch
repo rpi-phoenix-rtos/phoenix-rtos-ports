@@ -1,0 +1,25 @@
+FindFreetype: use manual find under CMAKE_SYSTEM_NAME=Generic
+
+STK's bundled cmake/FindFreetype.cmake falls through to
+pkg_check_modules(FREETYPE freetype2) for every non-Windows, non-Apple,
+non-SunOS system. On a bare cross build (CMAKE_SYSTEM_NAME=Generic, the setting
+every Phoenix-RTOS framework port uses) the UNIX-gated include(FindPkgConfig)
+blocks in the top-level CMakeLists never run before this module is invoked, so
+pkg_check_modules is an undefined command and configure aborts.
+
+Route Generic through the same manual find_path/find_library branch Apple/SunOS
+already use. The port pre-seeds FREETYPE_INCLUDE_DIRS / FREETYPE_LIBRARY as
+cache vars pointing at the ported freetype, so the finds short-circuit
+deterministically.
+
+--- a/cmake/FindFreetype.cmake
++++ b/cmake/FindFreetype.cmake
+@@ -14,7 +14,7 @@
+     find_library(FREETYPE_LIBRARY NAMES freetype libfreetype PATHS "${PROJECT_SOURCE_DIR}/${DEPENDENCIES}/lib")
+     set(FREETYPE_FOUND 1)
+     set(FREETYPE_LIBRARIES ${FREETYPE_LIBRARY})
+-elseif(APPLE OR ${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
++elseif(APPLE OR ${CMAKE_SYSTEM_NAME} MATCHES "SunOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "Generic")
+     find_path(FREETYPE_INCLUDE_DIRS NAMES ft2build.h PATH_SUFFIXES freetype2 include/freetype2 include)
+     find_library(FREETYPE_LIBRARY NAMES freetype)
+     set(FREETYPE_FOUND 1)

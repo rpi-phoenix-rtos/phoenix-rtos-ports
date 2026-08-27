@@ -1,0 +1,19 @@
+CMakeLists: don't force CMP0043 OLD on CMake >= 4
+
+STK's top-level CMakeLists sets policy CMP0043 to OLD unconditionally on
+CMake >= 3. CMake 4.x removed OLD support for CMP0043 (per-config
+COMPILE_DEFINITIONS_<CONFIG>) and hard-errors when it is requested, aborting
+configure. CMP0043 NEW behaviour is irrelevant to this build, so gate the
+policy set on CMake < 4.0; older CMake keeps the original behaviour.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -6,7 +6,7 @@
+
+ add_definitions( -DSUPERTUXKART_VERSION="${PROJECT_VERSION}" )
+
+-if(NOT (CMAKE_MAJOR_VERSION VERSION_LESS 3))
++if(NOT (CMAKE_MAJOR_VERSION VERSION_LESS 3) AND CMAKE_VERSION VERSION_LESS 4.0)
+   cmake_policy(SET CMP0043 OLD)
+ endif()
+
