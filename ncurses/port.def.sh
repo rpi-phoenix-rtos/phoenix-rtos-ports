@@ -41,7 +41,7 @@ p_prepare() {
 			--disable-db-install --enable-termcap --disable-home-terminfo --enable-sp-funcs \
 			--without-pkg-config \
 			--with-fallbacks="xterm,xterm-256color,vt100,vt220,linux,ansi,dumb,screen" \
-			CFLAGS="${CFLAGS} -O2" CPPFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}" \
+			CFLAGS="${CFLAGS} -O2 -fPIC" CPPFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}" \
 			RANLIB="${CROSS}ranlib")
 	fi
 }
