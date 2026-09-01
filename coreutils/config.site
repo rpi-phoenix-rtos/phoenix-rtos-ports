@@ -8,12 +8,7 @@ ac_cv_func_clock_gettime=yes
 ac_cv_func_clock_settime=yes
 ac_cv_func_closedir=yes
 ac_cv_func_endmntent=yes
-# fchdir is a no-op stub in libphoenix (returns 0 without changing cwd), which
-# silently breaks gnulib's save_cwd/fchdir/unlink emulation of unlinkat() and thus
-# `rm -r`/fts. Tell configure it's absent so gnulib compiles its own tracked
-# rpl_fchdir (registers each dir fd's path via its open/dup2/close wrappers, then
-# chdir()s to it) -- correct and dup2-hole-free. See tools/coreutils-maketest.
-ac_cv_func_fchdir=no
+ac_cv_func_fchdir=yes
 ac_cv_func_fchown=yes
 ac_cv_func_fcntl=yes
 ac_cv_func_fdopendir=yes
