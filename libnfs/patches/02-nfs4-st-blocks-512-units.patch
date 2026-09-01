@@ -1,0 +1,19 @@
+st_blocks must be in 512-byte units (POSIX), like the NFSv3 path.
+
+nfs4_parse_fattr() computed nfs_blocks by dividing the used-space by NFS_BLKSIZE
+(4096) instead of 512, so over an NFSv4 mount stat(2).st_blocks came back ~8x too
+small and du(1)/ls -s under-reported disk usage. The NFSv3 path (nfs_v3.c) already
+uses /512 -- match it. nfs_blksize (the preferred I/O size) is unchanged.
+
+diff --git a/lib/nfs_v4.c b/lib/nfs_v4.c
+--- a/lib/nfs_v4.c
++++ b/lib/nfs_v4.c
+@@ -574,7 +574,7 @@
+         len -= 4;
+
+         st->nfs_blksize = NFS_BLKSIZE;
+-        st->nfs_blocks  = (st->nfs_used + NFS_BLKSIZE -1) / NFS_BLKSIZE;
++        st->nfs_blocks  = (st->nfs_used + 512 - 1) / 512;
+
+         return 0;
+ }
