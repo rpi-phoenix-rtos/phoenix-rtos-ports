@@ -229,12 +229,23 @@ p_build() {
 	rm -f "${lib}"
 	"${AR}" rcs "${lib}" "${objs[@]}"
 
+	# --build-id: V3DV's init_uuids() walks the ELF for a build-id note to derive the
+	# pipeline-cache UUID; without the note create_physical_device fails with
+	# "Failed to find build-id" and no Vulkan device is created (HW-proven via the
+	# _user/rpi4-vkquake link this recipe replaces).
+	# -z stack-size=32 MiB: PT_GNU_STACK p_memsz is what the kernel (process.c) uses
+	# for the MAIN-thread stack, and vkQuake runs Host_Init + the Host_Frame loop on
+	# the main thread (glue/pl_phoenix_main.c) with deep recursive render frames.
+	# Both flags were present in the HW-verified _user/rpi4-vkquake link and were
+	# missing here, so a ports-built vkquake had no build-id note and no PT_GNU_STACK
+	# at all (verified with readelf on 2026-09-03).
 	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
 	# shellcheck disable=2086
 	"${CC}" ${CFLAGS} ${LDFLAGS} \
-		-Wl,--allow-multiple-definition \
+		-Wl,--build-id -Wl,--allow-multiple-definition \
 		-Wl,--whole-archive "${lib}" "${v3dvlib}" -Wl,--no-whole-archive \
 		-Wl,--start-group "${v3dvlib}" "${v3dlib}" -Wl,--end-group -lm \
+		-Wl,-z,stack-size=33554432 \
 		-o "${PREFIX_PROG}/vkquake"
 
 	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/vkquake" "${PREFIX_PROG}/vkquake"

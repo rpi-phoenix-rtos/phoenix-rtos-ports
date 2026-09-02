@@ -9,7 +9,7 @@
 	# wants a dotted/numeric version, so record the release-ish "8.71" here and keep
 	# the authoritative provenance in `commit`/archive_filename/src_path below.
 	version="8.71"
-	desc="yQuake2 (Quake II engine) — single static ELF, ref_gl1 on the ported SDL2 + Mesa/V3D GL stack"
+	desc="yQuake2 (Quake II engine) — single static ELF, ref_gl3/GLES3 on the ported SDL2 + Mesa/V3D GL stack"
 
 	# yQuake2 tags its releases but this port is pinned to a specific master commit
 	# (the one the tools/yquake2-port bring-up validated: YQ2VERSION 8.71pre,
@@ -36,7 +36,8 @@
 # Framework migration of tools/yquake2-port/build-yquake2-phoenix.py (the C4 Quake II
 # bring-up). Phoenix has no dlopen/dlsym, so yQuake2's two dynamic-load seams (the
 # game DLL and the renderer DLL) are folded into ONE static ELF: client + integrated
-# server + baseq2 game + ref_gl1 renderer + a Phoenix backend (glue/pl_phoenix_*),
+# server + baseq2 game + one renderer (ref_gl3/GLES3 by default, ref_gl1 via
+# YQ2_RENDERER=gl1) + a Phoenix backend (glue/pl_phoenix_*),
 # linked against the ported SDL2 (depends="sdl2") + the Mesa/V3D GL stack. Installs
 # the engine as /usr/bin/yquake2. The `quake2` launcher + `ram-stage-play` + the
 # baseq2 game data (paks) are RUNTIME concerns staged separately (the port builds only
@@ -190,8 +191,14 @@ p_build() {
 	# Phoenix backend (glue/) replacing backends/unix/{system,main,shared/hunk}.c.
 	local phoenix=(pl_phoenix_sys pl_phoenix_main pl_phoenix_hunk)
 
-	# Renderer selection: default gl1 (existing working build unchanged when unset).
-	local renderer_kind="${YQ2_RENDERER:-gl1}"
+	# Renderer selection: default gl3 (GLES3). That is the configuration the owner
+	# has actually seen render a textured 3D frame on the Pi 4's V3D 4.2, and it is
+	# the build that has been staged on the netboot root all along; the patch's
+	# gl3_image.c hunk additionally defaults glGenerateMipmap OFF (set
+	# YQ2_GL3_MIPMAP=1 to re-enable), which is what makes it load in reasonable
+	# time. gl1 stays available via YQ2_RENDERER=gl1 but has never been confirmed to
+	# reach the 3D view here, so it must not be what an image build ships by default.
+	local renderer_kind="${YQ2_RENDERER:-gl3}"
 	local renderer=()
 	case "${renderer_kind}" in
 		gl1) renderer=("${gl1[@]}") ;;

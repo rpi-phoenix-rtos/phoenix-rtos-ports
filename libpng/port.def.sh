@@ -26,7 +26,16 @@
 }
 
 p_prepare() {
-	if [ ! -f "$PREFIX_PORT_WORKDIR/Makefile" ]; then
+	# Guard on config.status, NOT Makefile: b_port_invalidate_stale_configure()
+	# (phoenix-rtos-build/port_manager/port.subr) drops config.status when the
+	# libphoenix API fingerprint changes, expecting the port to re-run configure.
+	# Every other autoconf port here keys its guard on config.status; libpng was
+	# the only one keying on Makefile, so the invalidation deleted config.status
+	# while the stale Makefile suppressed the reconfigure -- and the next
+	# `make install` died in libpng's own rule with
+	# `./config.status: No such file or directory` (observed 2026-09-03 building
+	# libpng as a supertuxkart dependency).
+	if [ ! -f "$PREFIX_PORT_WORKDIR/config.status" ]; then
 		# libpng finds zlib via the framework install prefix (PREFIX_H/PREFIX_A):
 		# CPPFLAGS carries -I because libpng's pnglibconf preprocessing rules use
 		# $(CPPFLAGS), not $(CFLAGS), for the zlib.h include.
