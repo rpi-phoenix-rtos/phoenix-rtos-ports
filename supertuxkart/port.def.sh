@@ -97,7 +97,7 @@ p_build() {
 	local repo_root; repo_root="$(cd "${PREFIX_PORT}/../../.." && pwd)"
 	local mesa="${repo_root}/external/mesa"
 	local gpu_libs="${repo_root}/tools/.gpu-libs"
-	local mcompat="${repo_root}/tools/v3d-driver-port/phoenix_mesa_compat.h"
+	local mcompat="${repo_root}/sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/phoenix_mesa_compat.h"
 	local sdl2_glue; sdl2_glue="$(cd "${PREFIX_PORT}/../sdl2/glue" && pwd)"
 
 	# Consumed by the committed toolchain file (aarch64-phoenix.cmake) for the
@@ -202,7 +202,7 @@ p_build() {
 	for p in "${mesa}/src" "${mesa}/include" "/tmp/mesa-v3d-build/src"; do
 		[ -d "${p}" ] || { echo "supertuxkart: MISSING prerequisite dir: ${p}" >&2; missing=1; }
 	done
-	[ "${missing}" = 0 ] || b_die "GL/V3D stack not present. Build it first: tools/v3d-driver-port/build-gl-phoenix.py (+ build-v3d-phoenix.py) → tools/.gpu-libs + /tmp/mesa-v3d-build."
+	[ "${missing}" = 0 ] || b_die "GL/V3D stack not present. Build it first: sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/build-gl-phoenix.py (+ build-v3d-phoenix.py) → tools/.gpu-libs + /tmp/mesa-v3d-build."
 
 	local linktxt="${build}/CMakeFiles/supertuxkart.dir/link.txt"
 	[ -f "${linktxt}" ] || b_die "supertuxkart: CMake link.txt missing — the make stage did not reach linking (a real compile error). See the build log."

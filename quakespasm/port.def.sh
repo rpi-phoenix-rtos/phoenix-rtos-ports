@@ -85,7 +85,7 @@ p_build() {
 	sdl2_glue="$(cd "${PREFIX_PORT}/../sdl2/glue" && pwd)"
 	gpu_libs="${repo_root}/tools/.gpu-libs"
 	mesa="${repo_root}/external/mesa"
-	mcompat="${repo_root}/tools/v3d-driver-port/phoenix_mesa_compat.h"
+	mcompat="${repo_root}/sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/phoenix_mesa_compat.h"
 
 	local sdllib="${PREFIX_A}/libSDL2.a"
 	local sdlinc="${PREFIX_H}"
@@ -103,7 +103,7 @@ p_build() {
 		[ -d "${p}" ] || { echo "quakespasm: MISSING prerequisite dir: ${p}" >&2; missing=1; }
 	done
 	if [ "${missing}" != 0 ]; then
-		b_die "GL/V3D stack not present. Rebuild it first: tools/v3d-driver-port/build-gl-phoenix.py (and build-v3d-phoenix.py); it stages libGL/libv3d in tools/.gpu-libs and /tmp/mesa-v3d-build."
+		b_die "GL/V3D stack not present. Rebuild it first: sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/build-gl-phoenix.py (and build-v3d-phoenix.py); it stages libGL/libv3d in tools/.gpu-libs and /tmp/mesa-v3d-build."
 	fi
 
 	# --- Compile flags ---

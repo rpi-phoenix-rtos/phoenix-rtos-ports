@@ -134,7 +134,7 @@ p_build() {
 	done
 	[ -f "${vkinc}/vulkan/vulkan_core.h" ] || { echo "vkquake: MISSING Vulkan header: ${vkinc}/vulkan/vulkan_core.h" >&2; missing=1; }
 	if [ "${missing}" != 0 ]; then
-		b_die "V3DV/Vulkan stack not present. Rebuild it first: tools/v3d-driver-port/build-v3dv-phoenix.py (and build-v3d-phoenix.py); it stages libv3dv/libv3d in tools/.gpu-libs. Vulkan headers come from external/mesa/include."
+		b_die "V3DV/Vulkan stack not present. Rebuild it first: sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/build-v3dv-phoenix.py (and build-v3d-phoenix.py); it stages libv3dv/libv3d in tools/.gpu-libs. Vulkan headers come from external/mesa/include."
 	fi
 
 	# --- Generate the embedded base pak (embedded_pak.c) from the upstream tarball. The
