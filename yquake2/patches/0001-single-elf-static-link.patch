@@ -78,11 +78,297 @@ index eba3fd3d..4deac01c 100644
  
  /* shared variables */
  refdef_t r_newrefdef;
+diff --git a/src/client/refresh/gl1/gl1_main.c b/src/client/refresh/gl1/gl1_main.c
+index 9f88c28e..f3c63f36 100644
+--- a/src/client/refresh/gl1/gl1_main.c
++++ b/src/client/refresh/gl1/gl1_main.c
+@@ -1212,6 +1212,9 @@ R_SetLightLevel(entity_t *currententity)
+ static void
+ RI_RenderFrame(refdef_t *fd)
+ {
++	extern int yq2cap_scene_rendered;	/* visual-regression capture gate (gl1_sdl.c) */
++	yq2cap_scene_rendered = 1;
++
+ 	R_ApplyGLBuffer();	// menu rendering when needed
+ 	R_RenderView(fd);
+ 	R_SetLightLevel (NULL);
+diff --git a/src/client/refresh/gl1/gl1_sdl.c b/src/client/refresh/gl1/gl1_sdl.c
+index 92e64fad..68f78dd1 100644
+--- a/src/client/refresh/gl1/gl1_sdl.c
++++ b/src/client/refresh/gl1/gl1_sdl.c
+@@ -33,6 +33,16 @@
+ #include <SDL2/SDL.h>
+ #endif
+ 
++/* Capture-harness TCP sink (Pi -> host): the nfs-fs VFS large-write bridge stalls,
++ * so on the Pi the deterministic capture streams frames over a raw TCP socket to a
++ * host listener (scripts/quake-capture-sink.py) instead of writing files. Same wire
++ * format + byte order as the Quake1 harness (external/quakespasm gl_screen.c). */
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++#include <stdint.h>
++
+ static SDL_Window* window = NULL;
+ static SDL_GLContext context = NULL;
+ qboolean IsHighDPIaware = false;
+@@ -42,6 +52,200 @@ extern cvar_t *gl1_discardfb;
+ 
+ // ----
+ 
++/*
++ * Deterministic visual-regression capture hook.
++ *
++ * Dumps every scr_capture-th in-game (3D) frame to
++ * <scr_capture_dir>/cap_NNNN.tga as an uncompressed 24-bit BGR bottom-up TGA,
++ * then exits after scr_capture_max shots. The TGA byte layout is identical on
++ * the host reference (native GL / llvmpipe) and the Pi (V3D) so the frames pair
++ * 1:1 for SSIM / black-texture / HUD comparison. Same design as the QuakeSpasm
++ * harness (external/quakespasm gl_screen.c: SCR_CaptureTick / SCR_CaptureFrame).
++ * See docs/inprogress/2026-08-22-quake23-visual-harness.md.
++ *
++ * Determinism is provided by the launch cvars (timedemo 1 + fixedtime <usec> +
++ * cl_particles 0), NOT by this hook. This hook only decides WHICH frames to dump.
++ *
++ * yq2cap_scene_rendered is latched by RI_RenderFrame (gl1_main.c) and cleared
++ * here, so only frames in which the 3D world actually rendered are counted --
++ * loading/menu frames are skipped and index 0 == first demo world frame on every
++ * machine (the renderer cannot see the client's cls.demoplayback directly).
++ */
++int yq2cap_scene_rendered = 0;
++
++/* TCP sink socket (opened lazily on the first captured frame, kept open for the
++ * whole run). -1 = not yet connected / disabled (host cvar empty). */
++static int yq2cap_sock = -1;
++
++static int
++YQ2_CaptureSendAll(int s, const void *buf, size_t len)
++{
++	const char *p = (const char *)buf;
++	size_t off = 0;
++	while (off < len)
++	{
++		int r = send(s, p + off, len - off, 0);
++		if (r <= 0)
++		{
++			return -1;
++		}
++		off += (size_t)r;
++	}
++	return 0;
++}
++
++static int
++YQ2_CaptureConnect(const char *host, int port)
++{
++	struct sockaddr_in sa;
++	int s = socket(AF_INET, SOCK_STREAM, 0);
++	if (s < 0)
++	{
++		return -1;
++	}
++	memset(&sa, 0, sizeof(sa));
++	sa.sin_family = AF_INET;
++	sa.sin_port = htons((unsigned short)port);
++	sa.sin_addr.s_addr = inet_addr(host);
++	if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) != 0)
++	{
++		close(s);
++		return -1;
++	}
++	return s;
++}
++
++static void
++YQ2_CaptureTick(void)
++{
++	static cvar_t *cap = NULL, *cap_max = NULL, *cap_dir = NULL;
++	static cvar_t *cap_host = NULL, *cap_port = NULL;
++	static int frames = 0, shots = 0;
++	int step, w, h, i, n;
++	byte *pix, hdr[18];
++	char path[1024];
++	const char *dir;
++	FILE *f;
++
++	if (cap == NULL)
++	{
++		cap      = ri.Cvar_Get("scr_capture", "0", 0);
++		cap_max  = ri.Cvar_Get("scr_capture_max", "0", 0);
++		cap_dir  = ri.Cvar_Get("scr_capture_dir", ".", 0);
++		cap_host = ri.Cvar_Get("scr_capture_host", "", 0);
++		cap_port = ri.Cvar_Get("scr_capture_port", "5599", 0);
++	}
++
++	/* Truncate once and gate on the integer step: a fractional scr_capture in
++	 * (0,1) truncates to 0, and `% 0` is a SIGFPE. Only count real 3D frames. */
++	step = (int)cap->value;
++	if (step < 1 || !yq2cap_scene_rendered)
++	{
++		return;
++	}
++	yq2cap_scene_rendered = 0;
++
++	if ((frames++ % step) != 0)
++	{
++		return;
++	}
++
++	w = vid.width;
++	h = vid.height;
++	n = w * h;
++	pix = malloc((size_t)n * 3);
++	if (pix == NULL)
++	{
++		return;
++	}
++
++#ifdef YQ2CAP_PHOENIX
++	/* Phoenix/V3D renders into a scanout-backed FBO (sdl_phoenix_glctx.c), not
++	 * FB0; a plain glReadPixels there returns noise. Blit the just-rendered
++	 * scanout FBO to a normal FBO on the GPU and read that back (fills pix RGB
++	 * bottom-up, matching the TGA writer below). */
++	extern int phxgl_capture_gl(void *pix, int w, int h);
++	if (!phxgl_capture_gl(pix, w, h))
++#endif
++	{
++		glFinish();
++		glPixelStorei(GL_PACK_ALIGNMENT, 1);
++		glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pix);
++	}
++
++	for (i = 0; i < n; i++)		/* RGB -> BGR in place */
++	{
++		byte t = pix[i * 3];
++		pix[i * 3] = pix[i * 3 + 2];
++		pix[i * 3 + 2] = t;
++	}
++
++	memset(hdr, 0, sizeof(hdr));
++	hdr[2]  = 2;			/* uncompressed true-color */
++	hdr[12] = w & 0xff; hdr[13] = (w >> 8) & 0xff;
++	hdr[14] = h & 0xff; hdr[15] = (h >> 8) & 0xff;
++	hdr[16] = 24;			/* bpp; descriptor 0 => bottom-up, matches glReadPixels */
++
++	/* TCP sink (Pi): stream [u32 idx][u32 tgalen][TGA bytes] to a host listener,
++	 * which writes cap_<idx>.tga. Same wire format + network byte order as the Q1
++	 * harness. Bypasses the broken nfs-fs VFS large-write path. Falls back to the
++	 * fopen/fwrite path below when scr_capture_host is empty (host reference run). */
++	if (cap_host->string && cap_host->string[0])
++	{
++		uint32_t rec[2];
++		uint32_t tgalen = (uint32_t)(sizeof(hdr) + (size_t)n * 3);
++		if (yq2cap_sock < 0)
++		{
++			yq2cap_sock = YQ2_CaptureConnect(cap_host->string, (int)cap_port->value);
++			Com_Printf("CAPTURE: tcp %s:%d %s\n", cap_host->string,
++				(int)cap_port->value, (yq2cap_sock >= 0) ? "connected" : "FAILED");
++		}
++		if (yq2cap_sock >= 0)
++		{
++			rec[0] = htonl((uint32_t)shots);
++			rec[1] = htonl(tgalen);
++			if (YQ2_CaptureSendAll(yq2cap_sock, rec, sizeof(rec)) != 0 ||
++			    YQ2_CaptureSendAll(yq2cap_sock, hdr, sizeof(hdr)) != 0 ||
++			    YQ2_CaptureSendAll(yq2cap_sock, pix, (size_t)n * 3) != 0)
++			{
++				Com_Printf("CAPTURE: tcp send failed at idx=%d\n", shots);
++				close(yq2cap_sock);
++				yq2cap_sock = -1;
++			}
++		}
++		free(pix);
++		shots++;
++
++		if ((int)cap_max->value > 0 && shots >= (int)cap_max->value)
++		{
++			Com_Printf("CAPTURE: done (%d shots), quitting\n", shots);
++			fflush(NULL);
++			exit(0);
++		}
++		return;
++	}
++
++	dir = (cap_dir->string && cap_dir->string[0]) ? cap_dir->string : ".";
++	snprintf(path, sizeof(path), "%s/cap_%04d.tga", dir, shots);
++	f = fopen(path, "wb");
++	if (f != NULL)
++	{
++		fwrite(hdr, 1, sizeof(hdr), f);
++		fwrite(pix, 1, (size_t)n * 3, f);
++		fclose(f);
++	}
++	Com_Printf("CAPTURE: cap_%04d.tga %s\n", shots, (f != NULL) ? "OK" : "FAILED");
++	free(pix);
++	shots++;
++
++	if ((int)cap_max->value > 0 && shots >= (int)cap_max->value)
++	{
++		Com_Printf("CAPTURE: done (%d shots), quitting\n", shots);
++		fflush(NULL);
++		exit(0);
++	}
++}
++
+ /*
+  * Swaps the buffers and shows the next frame.
+  */
+@@ -50,6 +254,8 @@ RI_EndFrame(void)
+ {
+ 	R_ApplyGLBuffer();	// to draw buffered 2D text
+ 
++	YQ2_CaptureTick();	// visual-regression capture (no-op unless scr_capture>0)
++
+ #ifdef YQ2_GL1_GLES
+ 	static const GLenum attachments[3] = {GL_COLOR_EXT, GL_DEPTH_EXT, GL_STENCIL_EXT};
+ 
+diff --git a/src/client/refresh/gl3/gl3_image.c b/src/client/refresh/gl3/gl3_image.c
+index 83394dbc..d112e259 100644
+--- a/src/client/refresh/gl3/gl3_image.c
++++ b/src/client/refresh/gl3/gl3_image.c
+@@ -212,7 +212,26 @@ GL3_Upload32(unsigned *data, int width, int height, qboolean mipmap)
+ 
+ 	res = (samples == gl3_alpha_format);
+ 
+-	if (mipmap)
++	/* Phoenix/V3D: gl3 (ES3) builds a full mip chain per texture via
++	 * glGenerateMipmap; on the ported Mesa V3D each mip level is a separate TFU
++	 * copy + L2T cache flush, so a map's texture load takes minutes. Setting
++	 * YQ2_GL3_NOMIP=1 skips mipmap generation (trilinear->bilinear quality
++	 * trade) to keep the load bounded. Read once and cached. Default unchanged. */
++	static int gl3_nomip = -1;
++	if (gl3_nomip < 0)
++	{
++		/* Phoenix/V3D port default: skip mipmap generation. gl3 (ES3) would
++		 * otherwise glGenerateMipmap every texture, and on the ported Mesa V3D
++		 * each mip level is a separate TFU copy + L2T cache flush, so a map's
++		 * texture load takes many minutes and the 3D view never appears. With
++		 * mipmaps off the load completes in seconds and the full textured 3D
++		 * map renders (HW-verified on RPi4). Trade-off: bilinear instead of
++		 * trilinear filtering (mild distance aliasing). Set YQ2_GL3_MIPMAP=1 to
++		 * force the upstream full-mipmap behavior. */
++		gl3_nomip = (getenv("YQ2_GL3_MIPMAP") != NULL) ? 0 : 1;
++	}
++
++	if (mipmap && (gl3_nomip == 0))
+ 	{
+ 		// TODO: some hardware may require mipmapping disabled for NPOT textures!
+ 		glGenerateMipmap(GL_TEXTURE_2D);
+@@ -225,7 +244,7 @@ GL3_Upload32(unsigned *data, int width, int height, qboolean mipmap)
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter_max);
+ 	}
+ 
+-	if (mipmap && gl3config.anisotropic && gl_anisotropic->value)
++	if (mipmap && (gl3_nomip == 0) && gl3config.anisotropic && gl_anisotropic->value)
+ 	{
+ 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, Q_max(gl_anisotropic->value, 1.f));
+ 	}
 diff --git a/src/client/vid/vid.c b/src/client/vid/vid.c
-index 793ef38f..c0b757ba 100644
+index 793ef38f..5e8f61c7 100644
 --- a/src/client/vid/vid.c
 +++ b/src/client/vid/vid.c
-@@ -332,15 +332,10 @@ VID_GetRendererLibPath(const char *renderer, char *path, size_t len)
+@@ -332,15 +332,14 @@ VID_GetRendererLibPath(const char *renderer, char *path, size_t len)
  qboolean
  VID_HasRenderer(const char *renderer)
  {
@@ -97,8 +383,12 @@ index 793ef38f..c0b757ba 100644
 -	return false;
 +	/* Phoenix single-ELF port: the renderer is statically linked, there is
 +	 * no ref_*.so file to stat. GetRefAPI link-resolves to the ONE compiled-in
-+	 * renderer (gl1 or gl3/gles3), so accept those names; Sys_LoadLibrary() hands back its GetRefAPI. */
-+	return (strcmp(renderer, "gl1") == 0 || strcmp(renderer, "gl3") == 0 || strcmp(renderer, "gles3") == 0) ? true : false;
++	 * renderer, which is gl1 OR gl3/gles3 depending on how the port was built,
++	 * so accept any of those names; Sys_LoadLibrary() hands back its GetRefAPI.
++	 * Naming only gl1 here breaks the gl3/GLES3 build, which is the one we
++	 * currently stage. */
++	return ((strcmp(renderer, "gl1") == 0) || (strcmp(renderer, "gl3") == 0) ||
++		(strcmp(renderer, "gles3") == 0)) ? true : false;
  }
  
  /*

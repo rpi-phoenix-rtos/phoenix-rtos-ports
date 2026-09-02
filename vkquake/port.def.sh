@@ -111,6 +111,11 @@ _vkq_repo_root() { (cd "${PREFIX_PORT}/../../.." && pwd); }
 p_prepare() {
 	# Single documented patch: the genuine Phoenix/V3DV engine fixes only (the clone-local
 	# 2D bisector / trace / watchdog diagnostics are excluded — see header note).
+	# The patch below is GENERATED from our fork (external/<game>, branch
+	# phoenix-rpi4-port) by scripts/game-port-patch.sh in the coordination
+	# repo. Do NOT hand-edit it: commit to the fork and re-run --regen, or
+	# the two representations drift apart (they did -- see
+	# docs/misc/2026-09-02-game-source-of-truth-audit.md).
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 }
 

@@ -1,24 +1,8 @@
-diff -urN a/Quake/glquake.h b/Quake/glquake.h
---- a/Quake/glquake.h	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/glquake.h	2026-08-26 15:02:20.929236433 +0200
-@@ -719,6 +719,13 @@
- void R_CreatePipelineLayouts ();
- void R_CreatePipelines ();
- void R_DestroyPipelines ();
-+/* Phoenix no-WSI fb0 path (pl_phoenix_vk_vid.c) builds only the UI-variant basic pipelines, so these
-+ * four (formerly file-static in gl_rmisc.c) are exposed. R_CreateBasicPipelines skips MAIN/OIT/WBOIT
-+ * variants whose render pass is VK_NULL_HANDLE. */
-+void R_CreateShaderModules ();
-+void R_DestroyShaderModules ();
-+void R_InitVertexAttributes ();
-+void R_CreateBasicPipelines ();
- 
- #define MAX_PUSH_CONSTANT_SIZE 128 // Vulkan guaranteed minimum maxPushConstantsSize
- 
-diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
---- a/Quake/gl_rmisc.c	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/gl_rmisc.c	2026-08-26 15:02:36.248174407 +0200
-@@ -27,6 +27,15 @@
+diff --git a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
+index 9444f07..fb7b306 100644
+--- a/Quake/gl_rmisc.c
++++ b/Quake/gl_rmisc.c
+@@ -27,6 +27,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  #include "gl_heap.h"
  #include <float.h>
  
@@ -34,10 +18,15 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  cvar_t r_lodbias = {"r_lodbias", "1", CVAR_ARCHIVE};
  cvar_t gl_lodbias = {"gl_lodbias", "0", CVAR_ARCHIVE};
  
-@@ -2144,8 +2153,10 @@
+@@ -2144,10 +2153,18 @@ static VkShaderModule R_CreateShaderModule (const byte *code, const int size, co
  	module_create_info.codeSize = size;
  	module_create_info.pCode = (const uint32_t *)code;
  
++	/* TODO(vkquake-port): drop this diag once R_CreateShaderModules is proven on HW.
++	 * Print BEFORE the call so the faulting shader's line is already on the UART when
++	 * vkCreateShaderModule dies (Phoenix no-WSI bring-up, Instruction Abort pc=0). */
++	Sys_Printf ("vkvid: shmod %s size=%d code=%p dev=%p\n", name, (int)size, (const void *)code, (const void *)vulkan_globals.device);
++
 +	/* Phoenix no-WSI fb0 path: pass an mmap-backed pAllocator so the >page (codeSize > 4096 B)
 +	 * shader-module allocation bypasses the libphoenix malloc path that faults for such sizes. */
  	VkShaderModule module;
@@ -45,8 +34,11 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
 +	VkResult	   err = vkCreateShaderModule (vulkan_globals.device, &module_create_info, PL_VkHostAllocator (), &module);
  	if (err != VK_SUCCESS)
  		Sys_Error ("vkCreateShaderModule failed with code %i", (int)err);
++	Sys_Printf ("vkvid: shmod %s ok mod=%p\n", name, (const void *)module);
  
-@@ -2191,12 +2202,15 @@
+ 	GL_SetObjectName ((uint64_t)module, VK_OBJECT_TYPE_SHADER_MODULE, name);
+ 
+@@ -2191,12 +2208,15 @@ static VkVertexInputBindingDescription	 md5_vertex_binding_description;
  	{                                                                                                      \
  		name##_module = cond ? R_CreateShaderModule (name##_spv, name##_spv_size, #name) : VK_NULL_HANDLE; \
  	} while (0)
@@ -68,7 +60,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  	} while (0)
  
  DECLARE_SHADER_MODULE (basic_vert);
-@@ -2281,7 +2295,7 @@
+@@ -2281,7 +2301,7 @@ static void R_SetWBOITBlend (VkPipelineColorBlendAttachmentState *blend_attachme
  R_InitVertexAttributes
  ===============
  */
@@ -77,7 +69,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  {
  	{
  		basic_vertex_input_attribute_descriptions[0].binding = 0;
-@@ -2422,6 +2436,10 @@
+@@ -2422,6 +2442,10 @@ static void R_InitDefaultStates (pipeline_create_infos_t *infos)
  
  	infos->rasterization_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
  	infos->rasterization_state.polygonMode = VK_POLYGON_MODE_FILL;
@@ -88,7 +80,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  	infos->rasterization_state.cullMode = VK_CULL_MODE_BACK_BIT;
  	infos->rasterization_state.frontFace = VK_FRONT_FACE_CLOCKWISE;
  	infos->rasterization_state.depthClampEnable = VK_FALSE;
-@@ -2484,12 +2502,23 @@
+@@ -2484,12 +2508,23 @@ static void R_InitDefaultStates (pipeline_create_infos_t *infos)
  R_CreateBasicPipelines
  ===============
  */
@@ -113,7 +105,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  	const VkRenderPass main_render_pass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_STANDARD][MAIN_RENDER_PASS_STENCIL_CLEAR];
  	const VkRenderPass main_oit_render_pass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
  	VkRenderPass	   ui_render_pass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
-@@ -2511,6 +2540,8 @@
+@@ -2511,6 +2546,8 @@ static void R_CreateBasicPipelines ()
  	for (int render_pass = 0; render_pass < countof (render_pass_variants); ++render_pass)
  	{
  		const int index = render_pass_variants[render_pass].index;
@@ -122,7 +114,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
  		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
  		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
-@@ -2531,6 +2562,8 @@
+@@ -2531,6 +2568,8 @@ static void R_CreateBasicPipelines ()
  	for (int render_pass = 0; render_pass < countof (render_pass_variants); ++render_pass)
  	{
  		const int index = render_pass_variants[render_pass].index;
@@ -131,7 +123,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
  		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
  		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
-@@ -2555,6 +2588,8 @@
+@@ -2555,6 +2594,8 @@ static void R_CreateBasicPipelines ()
  	{
  		const int	   index = render_pass_variants[render_pass].index;
  		const qboolean wboit_pass = (index == RENDER_PASS_INDEX_WBOIT);
@@ -140,7 +132,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
  		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
  		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
-@@ -3953,7 +3988,7 @@
+@@ -3953,7 +3994,7 @@ static void R_CreateIndirectComputePipelines ()
  R_CreateShaderModules
  ===============
  */
@@ -149,7 +141,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  {
  	CREATE_SHADER_MODULE (basic_vert);
  	CREATE_SHADER_MODULE (basic_frag);
-@@ -3968,6 +4003,10 @@
+@@ -3968,6 +4009,10 @@ static void R_CreateShaderModules ()
  	CREATE_SHADER_MODULE (alias_alphatest_frag);
  	CREATE_SHADER_MODULE (alias_oit_frag);
  	CREATE_SHADER_MODULE (alias_alphatest_oit_frag);
@@ -160,7 +152,7 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  	CREATE_SHADER_MODULE (md5_vert);
  	CREATE_SHADER_MODULE (sky_layer_vert);
  	CREATE_SHADER_MODULE (sky_layer_frag);
-@@ -4005,7 +4044,7 @@
+@@ -4005,7 +4050,7 @@ static void R_CreateShaderModules ()
  R_DestroyShaderModules
  ===============
  */
@@ -169,10 +161,11 @@ diff -urN a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
  {
  	DESTROY_SHADER_MODULE (basic_vert);
  	DESTROY_SHADER_MODULE (basic_frag);
-diff -urN a/Quake/gl_screen.c b/Quake/gl_screen.c
---- a/Quake/gl_screen.c	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/gl_screen.c	2026-08-26 15:02:40.154184014 +0200
-@@ -1107,9 +1107,6 @@
+diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
+index 83a8c67..cd06f65 100644
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -1107,9 +1107,6 @@ static void SCR_DrawGUI (void *unused)
  {
  	cb_context_t *cbx = vulkan_globals.secondary_cb_contexts[SCBX_GUI];
  
@@ -182,10 +175,39 @@ diff -urN a/Quake/gl_screen.c b/Quake/gl_screen.c
  	// FIXME: only call this when needed
  	R_BeginDebugUtilsLabel (cbx, "2D");
  	SCR_TileClear (cbx);
-diff -urN a/Quake/gl_texmgr.c b/Quake/gl_texmgr.c
---- a/Quake/gl_texmgr.c	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/gl_texmgr.c	2026-08-26 15:02:20.929209642 +0200
-@@ -1229,6 +1229,35 @@
+@@ -1201,6 +1198,27 @@ needs almost the entire 256k of stack space!
+ */
+ void SCR_UpdateScreen (qboolean use_tasks)
+ {
++	/* TODO(vkquake-port): bring-up gate trace — log only on STATE CHANGE which early-return
++	 * (if any) is suppressing frames, so the orchestrator can tell "frames blocked by loading"
++	 * from "rendering". Edge-triggered to avoid flooding the lwip-shared UART. Remove once the
++	 * sustained 2D frame loop is proven on HW. */
++	{
++		static int last_gate = -2; /* -2 == uninitialized */
++		int		   gate;
++		if (!scr_initialized || !con_initialized || in_update_screen)
++			gate = 1; /* not initialized yet */
++		else if (Tasks_IsWorker ())
++			gate = 2; /* worker thread, not safe */
++		else if (scr_disabled_for_loading)
++			gate = 3; /* suppressed during load */
++		else
++			gate = 0; /* rendering */
++		if (gate != last_gate) {
++			Sys_Printf ("vkvid: SCR_UpdateScreen gate -> %d (0=render 1=init 2=worker 3=loading)\n", gate);
++			last_gate = gate;
++		}
++	}
++
+ 	if (!scr_initialized || !con_initialized || in_update_screen)
+ 		return; // not initialized yet
+ 
+diff --git a/Quake/gl_texmgr.c b/Quake/gl_texmgr.c
+index a1f471c..a082585 100644
+--- a/Quake/gl_texmgr.c
++++ b/Quake/gl_texmgr.c
+@@ -1229,6 +1229,35 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
  	image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
  	vkCmdPipelineBarrier (command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
  
@@ -221,10 +243,29 @@ diff -urN a/Quake/gl_texmgr.c b/Quake/gl_texmgr.c
  	vkCmdCopyBufferToImage (command_buffer, staging_buffer, glt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, num_mips * (is_cube ? 6 : 1), regions);
  
  	image_memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-diff -urN a/Quake/host_cmd.c b/Quake/host_cmd.c
---- a/Quake/host_cmd.c	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/host_cmd.c	2026-08-26 15:02:20.929252002 +0200
-@@ -2637,6 +2637,19 @@
+diff --git a/Quake/glquake.h b/Quake/glquake.h
+index 0aaaca9..0b42ab3 100644
+--- a/Quake/glquake.h
++++ b/Quake/glquake.h
+@@ -719,6 +719,13 @@ void R_InitSamplers ();
+ void R_CreatePipelineLayouts ();
+ void R_CreatePipelines ();
+ void R_DestroyPipelines ();
++/* Phoenix no-WSI fb0 path (pl_phoenix_vk_vid.c) builds only the UI-variant basic pipelines, so these
++ * four (formerly file-static in gl_rmisc.c) are exposed. R_CreateBasicPipelines skips MAIN/OIT/WBOIT
++ * variants whose render pass is VK_NULL_HANDLE. */
++void R_CreateShaderModules ();
++void R_DestroyShaderModules ();
++void R_InitVertexAttributes ();
++void R_CreateBasicPipelines ();
+ 
+ #define MAX_PUSH_CONSTANT_SIZE 128 // Vulkan guaranteed minimum maxPushConstantsSize
+ 
+diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
+index 159a6ad..7572dbd 100644
+--- a/Quake/host_cmd.c
++++ b/Quake/host_cmd.c
+@@ -2637,6 +2637,19 @@ static void Host_Startdemos_f (void)
  	if (!sv.active && cls.demonum != -1 && !cls.demoplayback)
  	{
  		cls.demonum = 0;
@@ -244,10 +285,11 @@ diff -urN a/Quake/host_cmd.c b/Quake/host_cmd.c
  		if (!fitzmode && !cl_startdemos.value)
  		{ /* QuakeSpasm customization: */
  			/* go straight to menu, no CL_NextDemo */
-diff -urN a/Quake/r_alias.c b/Quake/r_alias.c
---- a/Quake/r_alias.c	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/r_alias.c	2026-08-26 15:02:20.929281447 +0200
-@@ -198,6 +198,13 @@
+diff --git a/Quake/r_alias.c b/Quake/r_alias.c
+index 54593cd..79d1b12 100644
+--- a/Quake/r_alias.c
++++ b/Quake/r_alias.c
+@@ -198,6 +198,13 @@ static void GL_DrawAliasFrame (
  		if (paliashdr->poseverttype == PV_QUAKE3)
  			ubo->flags |= 0x4;
  
@@ -261,10 +303,11 @@ diff -urN a/Quake/r_alias.c b/Quake/r_alias.c
  		ubo->entalpha = entity_alpha;
  
  		VkDescriptorSet descriptor_sets[3] = {tx->descriptor_set, (fb != NULL) ? fb->descriptor_set : tx->descriptor_set, ubo_set};
-diff -urN a/Quake/sv_main.c b/Quake/sv_main.c
---- a/Quake/sv_main.c	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/sv_main.c	2026-08-26 15:02:20.929295143 +0200
-@@ -1381,6 +1381,16 @@
+diff --git a/Quake/sv_main.c b/Quake/sv_main.c
+index 3b5c4ca..273bf2f 100644
+--- a/Quake/sv_main.c
++++ b/Quake/sv_main.c
+@@ -1381,6 +1381,16 @@ void SV_LocalSound (client_t *client, const char *sample)
  {
  	int sound_num, field_mask;
  
@@ -281,10 +324,11 @@ diff -urN a/Quake/sv_main.c b/Quake/sv_main.c
  	for (sound_num = 1; sound_num < MAX_SOUNDS && sv.sound_precache[sound_num]; sound_num++)
  	{
  		if (!strcmp (sample, sv.sound_precache[sound_num]))
-diff -urN a/Quake/sys_sdl.c b/Quake/sys_sdl.c
---- a/Quake/sys_sdl.c	2026-05-29 19:34:42.000000000 +0200
-+++ b/Quake/sys_sdl.c	2026-08-26 15:02:20.929332433 +0200
-@@ -30,6 +30,7 @@
+diff --git a/Quake/sys_sdl.c b/Quake/sys_sdl.c
+index 487713f..836754e 100644
+--- a/Quake/sys_sdl.c
++++ b/Quake/sys_sdl.c
+@@ -30,6 +30,7 @@ typedef struct file_handle_s
  {
  	FILE	   *file;
  	const byte *memory;
@@ -292,7 +336,7 @@ diff -urN a/Quake/sys_sdl.c b/Quake/sys_sdl.c
  	int			pos;
  	int			size;
  } file_handle_t;
-@@ -65,24 +66,54 @@
+@@ -65,24 +66,54 @@ qfileofs_t Sys_filelength (FILE *f)
  qfileofs_t Sys_FileOpenRead (const char *path, int *hndl)
  {
  	FILE *f;
@@ -355,7 +399,7 @@ diff -urN a/Quake/sys_sdl.c b/Quake/sys_sdl.c
  }
  
  void Sys_MemFileOpenRead (const byte *memory, int size, int *hndl)
-@@ -117,8 +148,14 @@
+@@ -117,8 +148,14 @@ void Sys_FileClose (int handle)
  		fclose (sys_handles[handle].file);
  		sys_handles[handle].file = NULL;
  	}
@@ -372,7 +416,7 @@ diff -urN a/Quake/sys_sdl.c b/Quake/sys_sdl.c
  }
  
  void Sys_FileSeek (int handle, int position)
-@@ -135,6 +172,11 @@
+@@ -135,6 +172,11 @@ int Sys_FileRead (int handle, void *dest, int count)
  		return fread (dest, 1, count, sys_handles[handle].file);
  	else
  	{
@@ -384,10 +428,11 @@ diff -urN a/Quake/sys_sdl.c b/Quake/sys_sdl.c
  		memcpy (dest, sys_handles[handle].memory + sys_handles[handle].pos, count);
  		sys_handles[handle].pos += count;
  		return count;
-diff -urN a/Shaders/alias_common.inc b/Shaders/alias_common.inc
---- a/Shaders/alias_common.inc	2026-05-29 19:34:42.000000000 +0200
-+++ b/Shaders/alias_common.inc	2026-08-26 15:02:20.929332433 +0200
-@@ -21,6 +21,13 @@
+diff --git a/Shaders/alias_common.inc b/Shaders/alias_common.inc
+index 90b102c..6fed31a 100644
+--- a/Shaders/alias_common.inc
++++ b/Shaders/alias_common.inc
+@@ -21,6 +21,13 @@ vec4 AliasFragmentColor ()
  
  	result.a = original_diffuse_tex_a * ubo.entalpha;
  

@@ -1,3 +1,23 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..6094f63
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,14 @@
++# Build artifacts (host reference build + object/dep files)
++*.o
++*.d
++Quake/quakespasm
++Quake/quakespasm-sdl12
++Quake/quakespasm.exe
++
++# Editor / OS noise
++*.swp
++.DS_Store
++
++# Runtime artifacts written by the game itself
++Quake/history.txt
++Quake/config.cfg
 diff --git a/Quake/gl_mesh.c b/Quake/gl_mesh.c
 index 03b79ef..e4638f7 100644
 --- a/Quake/gl_mesh.c
@@ -37,6 +57,497 @@ index 03b79ef..e4638f7 100644
  	{
  		int v;
  		meshxyz_t *xyz = (meshxyz_t *) (vbodata + (f * hdr->numverts_vbo * sizeof (meshxyz_t)));
+diff --git a/Quake/gl_rmain.c b/Quake/gl_rmain.c
+index 1406759..c51adb4 100644
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -94,6 +94,7 @@ cvar_t	r_showtris = {"r_showtris", "0", CVAR_NONE};
+ cvar_t	r_showbboxes = {"r_showbboxes", "0", CVAR_NONE};
+ cvar_t	r_lerpmodels = {"r_lerpmodels", "1", CVAR_NONE};
+ cvar_t	r_lerpmove = {"r_lerpmove", "1", CVAR_NONE};
++cvar_t	r_alias_lerpmode = {"r_alias_lerpmode", "1", CVAR_NONE}; // Pi4 V3D: 1 real 2-pose lerp (DEFAULT; the old 2-offset garbage no longer reproduces) / 0 snap fallback / 2 fetch-isolation
+ cvar_t	r_nolerp_list = {"r_nolerp_list", "progs/flame.mdl,progs/flame2.mdl,progs/braztall.mdl,progs/brazshrt.mdl,progs/longtrch.mdl,progs/flame_pyre.mdl,progs/v_saw.mdl,progs/v_xfist.mdl,progs/h2stuff/newfire.mdl", CVAR_NONE};
+ cvar_t	r_noshadow_list = {"r_noshadow_list", "progs/flame2.mdl,progs/flame.mdl,progs/bolt1.mdl,progs/bolt2.mdl,progs/bolt3.mdl,progs/laser.mdl", CVAR_NONE};
+ 
+@@ -920,10 +921,28 @@ void R_DrawShadows (void)
+ R_RenderScene
+ ================
+ */
++static int r_mg_idx;  /* #67 gallery: forward decl (defined below) so R_RenderScene can read it */
++
+ void R_RenderScene (void)
+ {
+ 	R_SetupScene (); //johnfitz -- this does everything that should be done once per call to RenderScene
+ 
++	if (r_mg_active)
++	{
++		/* #67 MODEL GALLERY: draw ONLY the single test entity on a dark cleared background,
++		 * still via the unmodified R_DrawEntitiesOnList -> R_DrawAliasModel path (faithful).
++		 * Skipping the world DRAW does not change the entity render path (lighting is forced
++		 * fullbright anyway); it just gives a clean silhouette for shape comparison. */
++		/* Constant dark background. The model index is self-identified per frame by a robust
++		 * 6-bit BINARY BLOCK CODE drawn in the 2D pass (R_ModelGallery_DrawTag), which survives
++		 * HDMI gamma/downscale/colour-crosstalk far better than a background-colour ramp did. */
++		glClearColor (0.06f, 0.08f, 0.11f, 1.0f);
++		glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++		R_DrawEntitiesOnList (false);
++		R_DrawEntitiesOnList (true);
++		return;
++	}
++
+ 	Fog_EnableGFog (); //johnfitz
+ 
+ 	Sky_DrawSky (); //johnfitz
+@@ -1065,6 +1084,159 @@ void R_ScaleView (void)
+ R_RenderView
+ ================
+ */
++/* ================= #67 MODEL GALLERY (2026-07-28 test harness — REMOVE after) =========
++ * Renders every alias model individually, centered, fullbright, via the UNMODIFIED
++ * R_DrawAliasModel world-entity path, and screenshots each to mg/<model>.tga in the game
++ * dir. Deterministic + faithful: same code on Pi (V3D) and host (llvmpipe) → 1:1 compare.
++ * Driven by autoexec: `map start` (any map; satisfies the worldmodel requirement) then `mg`.
++ * ==================================================================================== */
++static const char *r_mg_models[] = {
++	/* full alias-model sweep (61 progs/*.mdl from pak0.pak); g_rock CLEAN / g_nail BROKEN
++	 * are the calibration anchors verified in Step 1. */
++	"progs/armor.mdl", "progs/backpack.mdl", "progs/bolt.mdl", "progs/bolt2.mdl",
++	"progs/bolt3.mdl", "progs/boss.mdl", "progs/demon.mdl", "progs/dog.mdl",
++	"progs/end1.mdl", "progs/eyes.mdl", "progs/flame.mdl", "progs/flame2.mdl",
++	"progs/g_light.mdl", "progs/g_nail.mdl", "progs/g_nail2.mdl", "progs/g_rock.mdl",
++	"progs/g_rock2.mdl", "progs/g_shot.mdl", "progs/gib1.mdl", "progs/gib2.mdl",
++	"progs/gib3.mdl", "progs/grenade.mdl", "progs/h_demon.mdl", "progs/h_dog.mdl",
++	"progs/h_guard.mdl", "progs/h_knight.mdl", "progs/h_ogre.mdl", "progs/h_player.mdl",
++	"progs/h_shams.mdl", "progs/h_wizard.mdl", "progs/h_zombie.mdl", "progs/invisibl.mdl",
++	"progs/invulner.mdl", "progs/knight.mdl", "progs/lavaball.mdl", "progs/m_g_key.mdl",
++	"progs/m_s_key.mdl", "progs/missile.mdl", "progs/ogre.mdl", "progs/player.mdl",
++	"progs/quaddama.mdl", "progs/s_light.mdl", "progs/s_spike.mdl", "progs/shambler.mdl",
++	"progs/soldier.mdl", "progs/spike.mdl", "progs/suit.mdl", "progs/v_axe.mdl",
++	"progs/v_light.mdl", "progs/v_nail.mdl", "progs/v_nail2.mdl", "progs/v_rock.mdl",
++	"progs/v_rock2.mdl", "progs/v_shot.mdl", "progs/v_shot2.mdl", "progs/w_g_key.mdl",
++	"progs/w_s_key.mdl", "progs/w_spike.mdl", "progs/wizard.mdl", "progs/zom_gib.mdl",
++	"progs/zombie.mdl",
++	NULL
++};
++int r_mg_active = 0;      /* armed by the "mg" command */
++int r_mg_shown_idx = 0;   /* index of the model rendered THIS frame (for the 2D block-code tag) */
++int r_mg_fullbright = 0;  /* read by GL_DrawAliasFrame_GLSL to force a bright, lighting-
++                             independent render (coherent shape vs collapse is what matters) */
++cvar_t mg_tga = {"mg_tga", "0", CVAR_NONE};  /* 1 = write mg/<model>.tga (host/local disk;
++                             leave 0 on the Pi netboot — a multi-MB write to the NFS root
++                             hits the nfs-fs large-write hang; use HDMI capture there) */
++#define MG_HOLD_SECS 1.3  /* wall-clock seconds to hold each model (fps-independent) */
++/* r_mg_idx forward-declared above R_RenderScene */
++static int r_mg_settle = 0;      /* 0 = first frame of this model (arm), 1 = holding */
++static double r_mg_tstart = 0.0; /* realtime when the current model started */
++static entity_t r_mg_ent;
++
++void R_ModelGallery_f (void)
++{
++	r_mg_idx = (Cmd_Argc () > 1) ? atoi (Cmd_Argv (1)) : 0;   /* optional start index */
++	if (r_mg_idx < 0) r_mg_idx = 0;
++	r_mg_settle = 0; r_mg_active = 1;
++	Con_Printf ("#MG model-gallery armed (start=%d)\n", r_mg_idx);
++}
++
++/* Draw a robust 6-bit BINARY BLOCK CODE for r_mg_shown_idx in the 2D pass: a solid white
++ * ANCHOR block at the top-left, then 6 data blocks (LSB first) each white=1 / black=0. Read
++ * straight off the HDMI frame — immune to gamma/downscale/colour crosstalk that defeated the
++ * earlier background-colour ramp. Called from SCR_UpdateScreen after GL_Set2D. */
++void R_ModelGallery_DrawTag (void)
++{
++	const int y = 8, h = 72, w = 96, gap = 12, x0 = 8;
++	int j, x;
++	/* anchor: always-white block marks where the code starts */
++	Draw_Fill (x0, y, w, h, 15, 1.0f);
++	for (j = 0; j < 6; j++)
++	{
++		int bit = (r_mg_shown_idx >> j) & 1;
++		x = x0 + (j + 1) * (w + gap);
++		Draw_Fill (x, y, w, h, bit ? 15 : 0, 1.0f);
++	}
++}
++
++/* top of R_RenderView (worldmodel guaranteed): fix the view + make ONE test model the
++ * only visible entity, centered 60u dead ahead, static frame 0 (=> blend==0, the bug path). */
++static void R_ModelGallery_Setup (void)
++{
++	qmodel_t *m;
++	int n = 0;
++	while (r_mg_models[n]) n++;
++	if (r_mg_idx >= n) { Con_Printf ("#MG loop done (%d models), restarting\n", n); r_mg_idx = 0; r_mg_settle = 0; }   /* LOOP so a capture always catches it */
++
++	m = Mod_ForName (r_mg_models[r_mg_idx], false);
++	if (!m || m->type != mod_alias) { Con_Printf ("#MG skip %s (not alias)\n", r_mg_models[r_mg_idx]); r_mg_idx++; r_mg_settle = 0; return; }
++
++	if (r_mg_settle == 0)
++	{
++		aliashdr_t *ah = (aliashdr_t *) Mod_Extradata (m);
++		r_mg_tstart = realtime;
++		r_mg_settle = 1;
++		Con_Printf ("#MG show[%d] %s\n", r_mg_idx, r_mg_models[r_mg_idx]);
++		/* structural fields, to correlate the on-screen collapse with the VBO layout */
++		Con_Printf ("#MGdiag[%d] %s nvvbo=%d nidx=%d nposes=%d skin=%dx%d\n",
++			r_mg_idx, r_mg_models[r_mg_idx], ah->numverts_vbo, ah->numindexes,
++			ah->numposes, ah->skinwidth, ah->skinheight);
++	}
++	r_mg_shown_idx = r_mg_idx;   /* model rendered THIS frame; read by the 2D block-code tag */
++
++	/* map-independent fixed camera at origin, looking +X */
++	r_refdef.vieworg[0] = r_refdef.vieworg[1] = r_refdef.vieworg[2] = 0.0f;
++	r_refdef.viewangles[0] = r_refdef.viewangles[1] = r_refdef.viewangles[2] = 0.0f;
++
++	{
++		/* normalize framing: place each model's bbox center at a fixed screen point, at a
++		 * distance proportional to its size, so tiny guns and big monsters appear the same
++		 * size and centered (fair 1:1 comparison across models and vs the host reference). */
++		const float yawdeg = 30.0f;                 /* fixed 3/4 view */
++		float yaw = yawdeg * (float)(M_PI / 180.0);
++		float cw = cosf (yaw), sw = sinf (yaw);
++		float cx = (m->mins[0] + m->maxs[0]) * 0.5f;
++		float cy = (m->mins[1] + m->maxs[1]) * 0.5f;
++		float cz = (m->mins[2] + m->maxs[2]) * 0.5f;
++		float ex = m->maxs[0] - m->mins[0], ey = m->maxs[1] - m->mins[1], ez = m->maxs[2] - m->mins[2];
++		float rad = 0.5f * (ex > ey ? (ex > ez ? ex : ez) : (ey > ez ? ey : ez));
++		float dist;
++		if (rad < 1.0f) rad = 16.0f;
++		dist = rad * 2.6f + 16.0f;                  /* subtend a consistent, generous size */
++
++		memset (&r_mg_ent, 0, sizeof(r_mg_ent));
++		r_mg_ent.model = m;
++		/* world center = origin + R(yaw)*center ; want it at (dist,0,0) => origin = (dist,0,0) - R(yaw)*center */
++		r_mg_ent.origin[0] = dist - (cx * cw - cy * sw);
++		r_mg_ent.origin[1] =      - (cx * sw + cy * cw);
++		r_mg_ent.origin[2] =      - cz;
++		r_mg_ent.angles[1] = yawdeg;
++		r_mg_ent.frame = 0;                         /* static -> pose1==pose2 -> blend==0 */
++		r_mg_ent.alpha = 0;                         /* ENTALPHA_DEFAULT (opaque) */
++		r_mg_ent.scale = ENTSCALE_DEFAULT;
++		r_mg_ent.lerpflags = LERP_RESETMOVE;
++	}
++
++	cl_numvisedicts = 1;
++	cl_visedicts[0] = &r_mg_ent;
++	r_mg_fullbright = 1;
++}
++
++/* end of R_RenderView (scene in the back buffer, no 2D yet): screenshot + advance. */
++static void R_ModelGallery_Capture (void)
++{
++	byte *buf;
++	char name[64];
++	const char *base;
++	if (realtime - r_mg_tstart < MG_HOLD_SECS) return;   /* hold this model (wall-clock) */
++	if (mg_tga.value)                     /* file output: host/local disk only (NOT Pi NFS) */
++	{
++		base = COM_SkipPath ((char *)r_mg_models[r_mg_idx]);
++		buf = (byte *) malloc ((size_t)glwidth * glheight * 3);
++		if (buf)
++		{
++			glPixelStorei (GL_PACK_ALIGNMENT, 1);
++			glReadPixels (glx, gly, glwidth, glheight, GL_RGB, GL_UNSIGNED_BYTE, buf);
++			q_snprintf (name, sizeof(name), "mg/%s.tga", base);
++			Image_WriteTGA (name, buf, glwidth, glheight, 24, false);
++			free (buf);
++			Con_Printf ("#MG shot mg/%s.tga\n", base);
++		}
++	}
++	r_mg_idx++; r_mg_settle = 0;
++}
++
+ void R_RenderView (void)
+ {
+ 	double	time1, time2;
+@@ -1075,6 +1247,9 @@ void R_RenderView (void)
+ 	if (!cl.worldmodel)
+ 		Sys_Error ("R_RenderView: NULL worldmodel");
+ 
++	if (r_mg_active)
++		R_ModelGallery_Setup ();
++
+ 	time1 = 0; /* avoid compiler warning */
+ 	if (r_speeds.value)
+ 	{
+@@ -1128,6 +1303,9 @@ void R_RenderView (void)
+ 
+ 	R_ScaleView ();
+ 
++	if (r_mg_active)
++		R_ModelGallery_Capture ();
++
+ 	//johnfitz -- modified r_speeds output
+ 	time2 = Sys_DoubleTime ();
+ 	if (r_pos.value)
+diff --git a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
+index 963d55e..d001693 100644
+--- a/Quake/gl_rmisc.c
++++ b/Quake/gl_rmisc.c
+@@ -43,6 +43,7 @@ extern cvar_t r_showtris;
+ extern cvar_t r_showbboxes;
+ extern cvar_t r_lerpmodels;
+ extern cvar_t r_lerpmove;
++extern cvar_t r_alias_lerpmode;
+ extern cvar_t r_nolerp_list;
+ extern cvar_t r_noshadow_list;
+ //johnfitz
+@@ -167,6 +168,8 @@ void R_Init (void)
+ {
+ 	Cmd_AddCommand ("timerefresh", R_TimeRefresh_f);
+ 	Cmd_AddCommand ("pointfile", R_ReadPointFile_f);
++	Cmd_AddCommand ("mg", R_ModelGallery_f); /* #67 model-gallery test harness */
++	Cvar_RegisterVariable (&mg_tga);
+ 
+ 	Cvar_RegisterVariable (&r_norefresh);
+ 	Cvar_RegisterVariable (&r_lightmap);
+@@ -214,6 +217,7 @@ void R_Init (void)
+ 	Cvar_RegisterVariable (&gl_overbright_models);
+ 	Cvar_RegisterVariable (&r_lerpmodels);
+ 	Cvar_RegisterVariable (&r_lerpmove);
++	Cvar_RegisterVariable (&r_alias_lerpmode);
+ 	Cvar_RegisterVariable (&r_nolerp_list);
+ 	Cvar_SetCallback (&r_nolerp_list, R_Model_ExtraFlags_List_f);
+ 	Cvar_RegisterVariable (&r_noshadow_list);
+diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
+index cf7c7ce..193dfa5 100644
+--- a/Quake/gl_screen.c
++++ b/Quake/gl_screen.c
+@@ -25,6 +25,14 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ 
+ #include "quakedef.h"
+ 
++/* Capture-harness TCP sink (Pi -> host): the nfs-fs VFS-write bridge stalls on
++ * large writes, so on the Pi the deterministic capture streams frames over a raw
++ * TCP socket to a host listener instead of writing files. */
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++
+ /*
+ 
+ background clear
+@@ -97,6 +105,17 @@ cvar_t		scr_centertime = {"scr_centertime","2",CVAR_NONE};
+ cvar_t		scr_showturtle = {"showturtle","0",CVAR_NONE};
+ cvar_t		scr_showpause = {"showpause","1",CVAR_NONE};
+ cvar_t		scr_printspeed = {"scr_printspeed","8",CVAR_NONE};
++
++/* Deterministic demo-capture harness (Pi-vs-host visual regression). When
++ * scr_capture > 0, every scr_capture-th rendered in-game demo frame is dumped to
++ * com_gamedir/cap_NNNN.png; after scr_capture_max shots the engine quits. Drive
++ * with `host_framerate <dt>` (fixed timestep) + `r_particles 0` so frame N shows
++ * the same demo moment on every machine -> the PNG sets are directly comparable. */
++cvar_t		scr_capture = {"scr_capture","0",CVAR_NONE};
++cvar_t		scr_capture_max = {"scr_capture_max","0",CVAR_NONE};
++cvar_t		scr_capture_dir = {"scr_capture_dir","",CVAR_NONE};
++cvar_t		scr_capture_host = {"scr_capture_host","",CVAR_NONE};   /* TCP sink host (Pi) */
++cvar_t		scr_capture_port = {"scr_capture_port","5599",CVAR_NONE};
+ cvar_t		gl_triplebuffer = {"gl_triplebuffer", "1", CVAR_ARCHIVE};
+ 
+ cvar_t		cl_gun_fovscale = {"cl_gun_fovscale","1",CVAR_ARCHIVE}; // Qrack
+@@ -407,6 +426,11 @@ void SCR_Init (void)
+ 	Cvar_RegisterVariable (&scr_crosshairscale);
+ 	Cvar_RegisterVariable (&scr_showfps);
+ 	Cvar_RegisterVariable (&scr_clock);
++	Cvar_RegisterVariable (&scr_capture);
++	Cvar_RegisterVariable (&scr_capture_max);
++	Cvar_RegisterVariable (&scr_capture_dir);
++	Cvar_RegisterVariable (&scr_capture_host);
++	Cvar_RegisterVariable (&scr_capture_port);
+ 	//johnfitz
+ 	Cvar_RegisterVariable (&scr_usekfont); // 2021 re-release
+ 	Cvar_SetCallback (&scr_fov, SCR_Callback_refdef);
+@@ -833,6 +857,172 @@ void SCR_ScreenShot_f (void)
+ }
+ 
+ 
++/*
++==================
++SCR_CaptureFrame -- dump the just-rendered frame to com_gamedir/cap_<idx>.png for
++the deterministic Pi-vs-host comparison harness. Frame-indexed (not auto-numbered)
++so the same index = the same demo moment on every machine.
++==================
++*/
++static int cap_sock = -1;
++
++static int scr_sendAll (int s, const void *buf, size_t len)
++{
++	const char *p = (const char *)buf;
++	size_t off = 0;
++	while (off < len) {
++		int r = send (s, p + off, len - off, 0);
++		if (r <= 0)
++			return -1;
++		off += (size_t)r;
++	}
++	return 0;
++}
++
++static int scr_captureConnect (void)
++{
++	struct sockaddr_in sa;
++	int s = socket (AF_INET, SOCK_STREAM, 0);
++	if (s < 0)
++		return -1;
++	memset (&sa, 0, sizeof(sa));
++	sa.sin_family = AF_INET;
++	sa.sin_port = htons ((unsigned short)scr_capture_port.value);
++	sa.sin_addr.s_addr = inet_addr (scr_capture_host.string);
++	if (connect (s, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
++		close (s);
++		return -1;
++	}
++	return s;
++}
++
++static void SCR_CaptureFrame (int idx)
++{
++	byte	*pix, hdr[18];
++	char	path[MAX_OSPATH];
++	const char *dir;
++	FILE	*f;
++	int	w = glwidth, h = glheight, i, n = glwidth * glheight;
++
++	/* Write directory: scr_capture_dir if set, else com_gamedir. The Pi's
++	 * com_gamedir/com_basedir is broken for writes (resolves to "(null)/id1"),
++	 * so the harness sets scr_capture_dir explicitly (e.g. /nfstest/id1 on the
++	 * Pi, straight onto the fast NFS export). Self-contained 24-bit uncompressed
++	 * TGA writer (BGR, bottom-up) so the byte format is identical on every machine
++	 * — no libpng/com_gamedir dependency. */
++	dir = (scr_capture_dir.string && scr_capture_dir.string[0]) ? scr_capture_dir.string : com_gamedir;
++	q_snprintf (path, sizeof(path), "%s/cap_%04d.tga", dir, idx);
++
++	if (!(pix = (byte *) malloc ((size_t)n * 3)))
++		return;
++
++	/* Read the JUST-RENDERED scene, matching GL_EndRendering's proven readback path
++	 * (pl_phoenix_vid.c). Since the 2026-06-21 render rework the port renders into a
++	 * non-default scanout-backed FBO (g_scanout_fbo[g_back] in pl_phoenix_glctx.c),
++	 * NOT the default framebuffer (0). A plain glReadPixels on whatever is bound was
++	 * reading black noise. Re-bind that FBO, select its color attachment as the read
++	 * source, and glFinish() so the tiled V3D tile-store + per-submit L2T flush have
++	 * landed the pixels in the scanout BO's RAM before the (uncached) CPU read. Restore
++	 * the prior read-buffer afterwards so capture doesn't perturb rendering. */
++	{
++#ifdef QSS_PHOENIX
++		/* Render-to-scanout: glReadPixels on the scanout FBO returns noise (its resource's CPU
++		 * mapping is a fresh unwritten alloc; the GPU stored to the aliased fb PA). phxgl_capture_gl
++		 * blits the just-rendered scanout FBO to a normal FBO on the GPU, then glReadPixels that
++		 * (a real CPU-backed BO) — filling pix as RGB bottom-to-top (matches the TGA writer). */
++		extern int phxgl_capture_gl(void *pix, int w, int h);
++		if (!phxgl_capture_gl (pix, w, h)) {
++			glFinish ();
++			glPixelStorei (GL_PACK_ALIGNMENT, 1);
++			glReadPixels (glx, gly, w, h, GL_RGB, GL_UNSIGNED_BYTE, pix);
++		}
++#else
++		/* Host reference build (native GL, renders into the default framebuffer):
++		 * plain readback — no V3D scanout-FBO rebind (phxgl_bind_fbo is Phoenix-only). */
++		glFinish ();
++		glPixelStorei (GL_PACK_ALIGNMENT, 1);
++		glReadPixels (glx, gly, w, h, GL_RGB, GL_UNSIGNED_BYTE, pix);
++#endif
++	}
++	for (i = 0; i < n; i++) {	/* RGB -> BGR in place */
++		byte t = pix[i*3]; pix[i*3] = pix[i*3+2]; pix[i*3+2] = t;
++	}
++
++	memset (hdr, 0, sizeof(hdr));
++	hdr[2] = 2;                 /* uncompressed true-color */
++	hdr[12] = w & 0xff; hdr[13] = (w >> 8) & 0xff;
++	hdr[14] = h & 0xff; hdr[15] = (h >> 8) & 0xff;
++	hdr[16] = 24;              /* bpp */
++
++	/* TCP sink (Pi): stream [u32 idx][u32 tgalen][TGA bytes] to a host listener,
++	 * which writes cap_<idx>.tga. Bypasses the broken nfs-fs VFS write path. */
++	if (scr_capture_host.string && scr_capture_host.string[0]) {
++		uint32_t rec[2];
++		uint32_t tgalen = (uint32_t)(sizeof(hdr) + (size_t)n * 3);
++		if (cap_sock < 0) {
++			cap_sock = scr_captureConnect ();
++			Con_Printf ("CAPTURE: tcp %s:%d %s\n", scr_capture_host.string,
++				(int)scr_capture_port.value, (cap_sock >= 0) ? "connected" : "FAILED");
++		}
++		if (cap_sock >= 0) {
++			rec[0] = htonl ((uint32_t)idx);
++			rec[1] = htonl (tgalen);
++			if (scr_sendAll (cap_sock, rec, sizeof(rec)) != 0 ||
++			    scr_sendAll (cap_sock, hdr, sizeof(hdr)) != 0 ||
++			    scr_sendAll (cap_sock, pix, (size_t)n * 3) != 0) {
++				Con_Printf ("CAPTURE: tcp send failed at idx=%d\n", idx);
++				close (cap_sock);
++				cap_sock = -1;
++			}
++		}
++		free (pix);
++		return;
++	}
++
++	f = fopen (path, "wb");
++	if (f != NULL) {
++		fwrite (hdr, 1, sizeof(hdr), f);
++		fwrite (pix, 1, (size_t)n * 3, f);
++		fclose (f);
++	}
++	if (idx == 0)
++		Con_Printf ("CAPTURE: dir=%s %s\n", dir, (f != NULL) ? "OK" : "fopen FAILED");
++	free (pix);
++}
++
++
++/*
++==================
++SCR_CaptureTick -- called once per rendered frame from SCR_UpdateScreen (just
++before the buffer swap). Captures every scr_capture-th in-game demo frame and
++quits after scr_capture_max shots.
++==================
++*/
++void SCR_CaptureTick (void)
++{
++	static int frames = 0;
++	static int shots = 0;
++	int step = (int)scr_capture.value;
++
++	/* Truncate once and gate on the integer step: a fractional scr_capture in
++	 * (0,1) truncates to 0, and `% 0` is a SIGFPE on the x86 host reference run. */
++	if (step < 1 || !cls.demoplayback || cls.signon != SIGNONS)
++		return;
++
++	if ((frames++ % step) != 0)
++		return;
++
++	SCR_CaptureFrame (shots);
++	Con_Printf ("CAPTURE: cap_%04d.png (demo t=%.2f)\n", shots, cl.time);
++	shots++;
++
++	if (scr_capture_max.value > 0 && shots >= (int)scr_capture_max.value) {
++		Con_Printf ("CAPTURE: done (%d shots), quitting\n", shots);
++		Cbuf_AddText ("quit\n");
++	}
++}
++
++
+ //=============================================================================
+ 
+ 
+@@ -1069,6 +1259,9 @@ void SCR_UpdateScreen (void)
+ 	//FIXME: only call this when needed
+ 	SCR_TileClear ();
+ 
++	if (r_mg_active)			/* #67 gallery: per-frame binary block-code model tag */
++		R_ModelGallery_DrawTag ();
++
+ 	if (scr_drawdialog) //new game confirm
+ 	{
+ 		if (con_forcedup)
+@@ -1111,6 +1304,8 @@ void SCR_UpdateScreen (void)
+ 
+ 	GLSLGamma_GammaCorrect ();
+ 
++	SCR_CaptureTick (); /* deterministic demo-capture (reads the composed frame pre-swap) */
++
+ 	GL_EndRendering ();
+ }
+ 
 diff --git a/Quake/gl_warp.c b/Quake/gl_warp.c
 index 3c6ea5e..624e35e 100644
 --- a/Quake/gl_warp.c
@@ -58,6 +569,25 @@ index 3c6ea5e..624e35e 100644
  cvar_t r_waterquality = {"r_waterquality", "8", CVAR_NONE};
  cvar_t r_waterwarp = {"r_waterwarp", "1", CVAR_NONE};
  
+diff --git a/Quake/glquake.h b/Quake/glquake.h
+index 49f918d..08777cb 100644
+--- a/Quake/glquake.h
++++ b/Quake/glquake.h
+@@ -30,6 +30,14 @@ void GL_Set2D (void);
+ 
+ extern	int glx, gly, glwidth, glheight;
+ 
++/* #67 model-gallery test harness (2026-07-28 — REMOVE after) */
++extern	int	r_mg_active;
++extern	int	r_mg_shown_idx;
++extern	int	r_mg_fullbright;
++extern	cvar_t	mg_tga;
++void	R_ModelGallery_f (void);
++void	R_ModelGallery_DrawTag (void);
++
+ #define	GL_UNUSED_TEXTURE	(~(GLuint)0)
+ 
+ // r_local.h -- private refresh defs
 diff --git a/Quake/net_main.c b/Quake/net_main.c
 index bbd599a..9694338 100644
 --- a/Quake/net_main.c
@@ -127,21 +657,49 @@ index 1f3644b..c1cd407 100644
  	return INVALID_SOCKET;
  }
 diff --git a/Quake/r_alias.c b/Quake/r_alias.c
-index f179976..bbe12ef 100644
+index f179976..49b4dd0 100644
 --- a/Quake/r_alias.c
 +++ b/Quake/r_alias.c
-@@ -225,6 +225,7 @@ Based on code by MH from RMQEngine
+@@ -25,6 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ #include "quakedef.h"
+ 
+ extern cvar_t r_drawflat, gl_overbright_models, gl_fullbrights, r_lerpmodels, r_lerpmove; //johnfitz
++extern cvar_t r_alias_lerpmode; // Pi4 V3D 2-pose fetch experiment (0 snap / 1 lerp / 2 blend0)
+ extern cvar_t scr_fov, cl_gun_fovscale;
+ 
+ //up to 16 color translated skins
+@@ -225,6 +226,24 @@ Based on code by MH from RMQEngine
  void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltexture_t *tx, gltexture_t *fb)
  {
  	float	blend;
 +	int	pose2bind;
++
++	/* Pi4 V3D 2-pose interpolation. History (#28): in 2026-06 animated MDLs (monsters)
++	 * rendered as garbage/morphing under the 2-pose interpolated draw (pose1 != pose2 binds
++	 * Pose2Vert/Pose2Normal at a SECOND VBO offset and mix()es with Pose1), so a workaround
++	 * force-snapped pose1 = pose2 (single known-good offset). That bug NO LONGER REPRODUCES
++	 * after the mid-2026 winsys/mesa render fixes: HW capture of demo1 with real lerp
++	 * (r_alias_lerpmode 1) shows ogres/zombies/dogs interpolating cleanly, no garbage
++	 * (2026-07-18, docs/inprogress/2026-07-18-quake-glitch-marathon.md). So lerp is
++	 * restored as the DEFAULT (smooth animation). r_alias_lerpmode is kept as a fallback +
++	 * diagnostic:
++	 *   1 = real 2-pose lerp (DEFAULT, correct).
++	 *   0 = snap fallback (force pose1=pose2) if the old garbage ever recurs.
++	 *   2 = keep the two distinct pose offsets bound + FETCHED but force blend=0 (isolates a
++	 *       vertex-attribute FETCH bug from the mix/blend path). Diagnostic only.
++	 * (Torch flames / v_saw etc. never lerp regardless -- they are on r_nolerp_list.) */
++	if (r_alias_lerpmode.value == 0)
++		lerpdata.pose1 = lerpdata.pose2;
  
  	if (lerpdata.pose1 != lerpdata.pose2)
  	{
-@@ -235,6 +236,12 @@ void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltextu
+@@ -235,6 +254,15 @@ void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltextu
  		blend = 0;
  	}
  
++	if (r_alias_lerpmode.value == 2)
++		blend = 0; // isolate the 2-offset FETCH: pose2 stays bound but mix() ignores it
++
 +	/* #67 single-pose DE-ALIAS: a numposes==1 model is always drawn at blend==0, where the
 +	 * Pose2 attribute is DISABLED below (mix() ignores it). So pose2bind is never actually
 +	 * bound for single-pose models; keep it at the valid block 0 (there is no duplicate 2nd
@@ -151,7 +709,7 @@ index f179976..bbe12ef 100644
  	GL_UseProgramFunc (r_alias_program);
  
  	GL_BindBuffer (GL_ARRAY_BUFFER, currententity->model->meshvbo);
-@@ -242,16 +249,33 @@ void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltextu
+@@ -242,20 +270,42 @@ void GL_DrawAliasFrame_GLSL (aliashdr_t *paliashdr, lerpdata_t lerpdata, gltextu
  
  	GL_EnableVertexAttribArrayFunc (texCoordsAttrIndex);
  	GL_EnableVertexAttribArrayFunc (pose1VertexAttrIndex);
@@ -189,6 +747,15 @@ index f179976..bbe12ef 100644
  
  // set uniforms
  	GL_Uniform1fFunc (blendLoc, blend);
+ 	GL_Uniform3fFunc (shadevectorLoc, shadevector[0], shadevector[1], shadevector[2]);
++	/* #67 model-gallery: force a bright, lighting-independent render so shape (coherent vs
++	 * collapsed) is what shows, not lighting/position — same on Pi and host. */
++	if (r_mg_fullbright)
++		GL_Uniform4fFunc (lightColorLoc, 3.0f, 3.0f, 3.0f, entalpha);
++	else
+ 	GL_Uniform4fFunc (lightColorLoc, lightcolor[0], lightcolor[1], lightcolor[2], entalpha);
+ 	GL_Uniform1iFunc (texLoc, 0);
+ 	GL_Uniform1iFunc (fullbrightTexLoc, 1);
 diff --git a/Quake/r_part.c b/Quake/r_part.c
 index 32e067a..57b19fb 100644
 --- a/Quake/r_part.c

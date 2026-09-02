@@ -1,5 +1,5 @@
 diff --git a/code/qcommon/huffman.c b/code/qcommon/huffman.c
-index a54a352..d59f242 100644
+index a54a3529..d59f242a 100644
 --- a/code/qcommon/huffman.c
 +++ b/code/qcommon/huffman.c
 @@ -281,10 +281,13 @@ static int Huff_Receive(node_t *node, int *ch, byte *fin) {
@@ -29,7 +29,7 @@ index a54a352..d59f242 100644
  }
  
 diff --git a/code/qcommon/q_platform.h b/code/qcommon/q_platform.h
-index e4c1864..c1621eb 100644
+index e4c18640..c1621eba 100644
 --- a/code/qcommon/q_platform.h
 +++ b/code/qcommon/q_platform.h
 @@ -160,6 +160,19 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -53,7 +53,7 @@ index e4c1864..c1621eb 100644
  
  #if defined (__FreeBSD__) || defined (__NetBSD__) || defined (__OpenBSD__)
 diff --git a/code/qcommon/vm_aarch64.c b/code/qcommon/vm_aarch64.c
-index c1ab375..f7688f5 100644
+index c1ab375d..f7688f54 100644
 --- a/code/qcommon/vm_aarch64.c
 +++ b/code/qcommon/vm_aarch64.c
 @@ -2287,7 +2287,9 @@ __recompile:
@@ -82,7 +82,7 @@ index c1ab375..f7688f5 100644
  
  	// clear icache, http://blogs.arm.com/software-enablement/141-caches-and-self-modifying-code/
 diff --git a/code/renderer/qgl.h b/code/renderer/qgl.h
-index 113bce1..31e103b 100644
+index 113bce13..31e103b6 100644
 --- a/code/renderer/qgl.h
 +++ b/code/renderer/qgl.h
 @@ -40,6 +40,12 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
@@ -122,3 +122,210 @@ index 113bce1..31e103b 100644
 +#endif // !__APPLE__ && !__phoenix__
  
  #endif // __QGL_H__
+diff --git a/code/renderer/tr_init.c b/code/renderer/tr_init.c
+index 76f1160f..ee88bdf0 100644
+--- a/code/renderer/tr_init.c
++++ b/code/renderer/tr_init.c
+@@ -1185,6 +1185,188 @@ static void R_ScreenShot_f( void ) {
+ 
+ //============================================================================
+ 
++/*
++ * Deterministic visual-regression capture: per-frame TGA over a TCP sink
++ * (Pi -> host), mirroring the Quake1/Quake2 harness. The nfs-fs VFS large-write
++ * bridge stalls on the Pi, so instead of quake3e's built-in AVI writer the Pi
++ * streams each captured frame over a raw TCP socket to a host listener
++ * (scripts/quake-capture-sink.py); an empty scr_capture_host falls back to writing
++ * cap_NNNN.tga files (the host reference run). Same wire format + network byte
++ * order as Q1/Q2: [u32 idx][u32 tgalen][TGA bytes].
++ *
++ * Q3Cap_Stream is called from RB_TakeVideoFrameCmd, which quake3e runs pre-flip
++ * inside RB_SwapBuffers and ONLY while CL_VideoRecording() && cls.state ==
++ * CA_ACTIVE, at the fixed cl_aviFrameRate timestep (cl_main.c). So the CA_ACTIVE
++ * 3D-frame gate AND the cross-machine deterministic timestep are inherited from
++ * quake3e's proven `video` path -- this hook only swaps the transport, so frame N
++ * is the same demo moment on host and Pi. Launch still needs `+video ... +stopvideo`
++ * (it engages the timestep); scr_capture_host just redirects the transport.
++ */
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++#include <stdint.h>
++
++static int q3cap_sock = -1;
++
++static int Q3Cap_SendAll( int s, const void *buf, size_t len )
++{
++	const char *p = (const char *)buf;
++	size_t off = 0;
++	while ( off < len ) {
++		int r = send( s, p + off, len - off, 0 );
++		if ( r <= 0 )
++			return -1;
++		off += (size_t)r;
++	}
++	return 0;
++}
++
++static int Q3Cap_Connect( const char *host, int port )
++{
++	struct sockaddr_in sa;
++	int s = socket( AF_INET, SOCK_STREAM, 0 );
++	if ( s < 0 )
++		return -1;
++	Com_Memset( &sa, 0, sizeof( sa ) );
++	sa.sin_family = AF_INET;
++	sa.sin_port = htons( (unsigned short)port );
++	sa.sin_addr.s_addr = inet_addr( host );
++	if ( connect( s, (struct sockaddr *)&sa, sizeof( sa ) ) != 0 ) {
++		close( s );
++		return -1;
++	}
++	return s;
++}
++
++/* Returns qtrue if it handled the frame (capture active); qfalse => caller runs
++ * the normal AVI writer. */
++static qboolean Q3Cap_Stream( int w, int h )
++{
++	static cvar_t *cap = NULL, *cap_max = NULL, *cap_dir = NULL;
++	static cvar_t *cap_host = NULL, *cap_port = NULL;
++	static int frames = 0, shots = 0;
++	byte *pix, hdr[18];
++	int step, i, n = w * h;
++
++	if ( cap == NULL ) {
++		cap      = ri.Cvar_Get( "scr_capture", "0", 0 );
++		cap_max  = ri.Cvar_Get( "scr_capture_max", "0", 0 );
++		cap_dir  = ri.Cvar_Get( "scr_capture_dir", ".", 0 );
++		cap_host = ri.Cvar_Get( "scr_capture_host", "", 0 );
++		cap_port = ri.Cvar_Get( "scr_capture_port", "5599", 0 );
++	}
++
++	/* scr_capture is the "every Nth video frame" step; <1 disables the hook and
++	 * leaves the stock AVI writer in charge. */
++	step = (int)cap->value;
++	if ( step < 1 )
++		return qfalse;
++	if ( ( frames++ % step ) != 0 )
++		return qtrue;	/* capture active, but this frame is skipped */
++
++	pix = ri.Hunk_AllocateTempMemory( (size_t)n * 3 );
++	if ( pix == NULL )
++		return qtrue;
++
++	{
++		int got = 0;
++#ifdef Q3CAP_PHOENIX
++		/* Phoenix/V3D renders into a scanout-backed FBO (sdl_phoenix_glctx.c), not
++		 * FB0; a plain glReadPixels there returns noise. phxgl_capture_gl blits the
++		 * just-rendered scanout FBO to a normal FBO on the GPU and reads that back,
++		 * filling pix with exactly w*h*3 RGB bytes bottom-up (it forces
++		 * GL_PACK_ALIGNMENT=1 internally), matching the TGA writer. Same path as
++		 * Q1/Q2 -- runtime-unverified on q3 (see the q3 visual-harness doc). */
++		extern int phxgl_capture_gl( void *pix, int w, int h );
++		got = phxgl_capture_gl( pix, w, h );
++#endif
++		if ( !got ) {
++			/* Plain readback (native host FB0, or Phoenix fallback). glReadPixels
++			 * honors GL_PACK_ALIGNMENT (default 4), padding each row up to that
++			 * boundary; quake3e's qgl layer exposes no PixelStorei, so read into a
++			 * padded scratch and compact to a tight w*h*3 buffer. For the harness
++			 * resolutions (width % 4 == 0) there is no padding and this is a plain
++			 * per-row copy. */
++			GLint packAlign = 4;
++			int linelen = w * 3, padwidth, padlen, row;
++			qglGetIntegerv( GL_PACK_ALIGNMENT, &packAlign );
++			if ( packAlign < 1 )
++				packAlign = 1;
++			padwidth = PAD( linelen, packAlign );
++			padlen = padwidth - linelen;
++			qglFinish();
++			if ( padlen == 0 ) {
++				qglReadPixels( 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, pix );
++			} else {
++				byte *scratch = ri.Hunk_AllocateTempMemory( (size_t)padwidth * h );
++				if ( scratch == NULL ) {
++					ri.Hunk_FreeTempMemory( pix );
++					return qtrue;
++				}
++				qglReadPixels( 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, scratch );
++				for ( row = 0; row < h; row++ )
++					Com_Memcpy( pix + (size_t)row * linelen, scratch + (size_t)row * padwidth, linelen );
++				ri.Hunk_FreeTempMemory( scratch );
++			}
++		}
++	}
++
++	for ( i = 0; i < n; i++ ) {	/* RGB -> BGR in place */
++		byte t = pix[i * 3]; pix[i * 3] = pix[i * 3 + 2]; pix[i * 3 + 2] = t;
++	}
++
++	Com_Memset( hdr, 0, sizeof( hdr ) );
++	hdr[2]  = 2;			/* uncompressed true-color */
++	hdr[12] = w & 0xff; hdr[13] = ( w >> 8 ) & 0xff;
++	hdr[14] = h & 0xff; hdr[15] = ( h >> 8 ) & 0xff;
++	hdr[16] = 24;			/* bpp; descriptor 0 => bottom-up, matches glReadPixels */
++
++	if ( cap_host->string && cap_host->string[0] ) {
++		uint32_t rec[2];
++		uint32_t tgalen = (uint32_t)( sizeof( hdr ) + (size_t)n * 3 );
++		if ( q3cap_sock < 0 ) {
++			q3cap_sock = Q3Cap_Connect( cap_host->string, (int)cap_port->value );
++			ri.Printf( PRINT_ALL, "CAPTURE: tcp %s:%d %s\n", cap_host->string,
++				(int)cap_port->value, ( q3cap_sock >= 0 ) ? "connected" : "FAILED" );
++		}
++		if ( q3cap_sock >= 0 ) {
++			rec[0] = htonl( (uint32_t)shots );
++			rec[1] = htonl( tgalen );
++			if ( Q3Cap_SendAll( q3cap_sock, rec, sizeof( rec ) ) != 0 ||
++			     Q3Cap_SendAll( q3cap_sock, hdr, sizeof( hdr ) ) != 0 ||
++			     Q3Cap_SendAll( q3cap_sock, pix, (size_t)n * 3 ) != 0 ) {
++				ri.Printf( PRINT_ALL, "CAPTURE: tcp send failed at idx=%d\n", shots );
++				close( q3cap_sock );
++				q3cap_sock = -1;
++			}
++		}
++	} else {
++		/* File fallback (host reference run): write cap_NNNN.tga to scr_capture_dir. */
++		const char *dir = ( cap_dir->string && cap_dir->string[0] ) ? cap_dir->string : ".";
++		char path[MAX_OSPATH];
++		FILE *f;
++		Com_sprintf( path, sizeof( path ), "%s/cap_%04d.tga", dir, shots );
++		f = fopen( path, "wb" );
++		if ( f != NULL ) {
++			fwrite( hdr, 1, sizeof( hdr ), f );
++			fwrite( pix, 1, (size_t)n * 3, f );
++			fclose( f );
++		}
++		ri.Printf( PRINT_ALL, "CAPTURE: cap_%04d.tga %s\n", shots, ( f != NULL ) ? "OK" : "FAILED" );
++	}
++
++	ri.Hunk_FreeTempMemory( pix );
++	shots++;
++
++	if ( (int)cap_max->value > 0 && shots >= (int)cap_max->value ) {
++		ri.Printf( PRINT_ALL, "CAPTURE: done (%d shots), quitting\n", shots );
++		ri.Cmd_ExecuteText( EXEC_APPEND, "quit\n" );
++	}
++	return qtrue;
++}
++
+ /*
+ ==================
+ RB_TakeVideoFrameCmd
+@@ -1200,6 +1382,13 @@ const void *RB_TakeVideoFrameCmd( const void *data )
+ 
+ 	cmd = (const videoFrameCommand_t *)data;
+ 
++	/* Visual-regression capture (scr_capture>0): stream/write a per-frame TGA and
++	 * skip the built-in AVI writer. When scr_capture<1 this is a no-op and the
++	 * stock AVI path below runs unchanged (host uses the AVI path only if the
++	 * capture cvars are absent). */
++	if ( Q3Cap_Stream( cmd->width, cmd->height ) )
++		return (const void *)(cmd + 1);
++
+ 	qglGetIntegerv(GL_PACK_ALIGNMENT, &packAlign);
+ 
+ 	linelen = cmd->width * 3;
