@@ -247,10 +247,19 @@ p_build() {
 	# which we bypass), so ld's `-o bin/supertuxkart` fails with "cannot open output
 	# file ... No such file or directory". (An incremental build masked this because a
 	# prior partial link had already created bin/.)
+	# libcurl is listed by CMake as a raw path, and on a CLEAN build it is
+	# configured WITH the mbedTLS backend (the mbedtls port is built before curl,
+	# so curl's configure finds it). It then references mbedtls_ssl_* and
+	# mbedtls_x509_*, which live in libmbedtls.a / libmbedx509.a -- neither of
+	# which CMake knows about: the recipe passes only -DMBEDCRYPTO_LIBRARY, which
+	# covers STK's OWN crypto use, not curl's TLS use. An incremental tree hid
+	# this because its curl predated the mbedtls port and had no TLS backend at
+	# all. All three go in the group so curl <-> mbedtls back-references resolve.
 	( cd "${build}" && mkdir -p bin && eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
 		-Wl,--start-group '${sdllib}' '${gllib}' '${v3dlib}' \
 		'${pfx}/lib/libz.a' '${pfx}/lib/libogg.a' '${pfx}/lib/libvorbis.a' \
 		'${pfx}/lib/libvorbisfile.a' '${pfx}/lib/libvorbisenc.a' \
+		'${pfx}/lib/libmbedtls.a' '${pfx}/lib/libmbedx509.a' '${pfx}/lib/libmbedcrypto.a' \
 		-Wl,--end-group -Wl,-z,stack-size=8388608" )
 
 	local elf="${build}/bin/supertuxkart"
