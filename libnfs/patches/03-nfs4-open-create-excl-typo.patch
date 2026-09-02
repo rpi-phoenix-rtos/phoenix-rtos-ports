@@ -1,0 +1,31 @@
+OPEN-with-create always took the EXCLUSIVE4 path (| instead of &).
+
+nfs4_op_open_cb() tested `data->filler.flags|O_EXCL` -- a bitwise OR, which is
+non-zero for every value of flags -- so EVERY create was sent as an NFSv4
+EXCLUSIVE4 open, whether or not the caller asked for O_EXCL.
+
+Two visible consequences, both of which we had been living with:
+
+  * EXCLUSIVE4 carries a random 8-byte VERIFIER instead of an attribute list,
+    and the server stores that verifier in the file's time attributes. Every
+    file created over NFSv4 therefore came back with a garbage atime -- measured
+    on a Pi 4: atime 2147411476 and 2147467079 (random, just under 2^31) against
+    a correct mtime/ctime. That is the verifier, not a clock bug.
+  * EXCLUSIVE4 carries no mode either, which is why a freshly created file was
+    left mode 000 on the server and every caller had to chmod() afterwards.
+
+Use a bitwise AND so an ordinary create is UNCHECKED4 and carries its attribute
+list (mode) as intended; O_EXCL creates still get EXCLUSIVE4.
+
+diff --git a/lib/nfs_v4.c b/lib/nfs_v4.c
+--- a/lib/nfs_v4.c
++++ b/lib/nfs_v4.c
+@@ -2350,7 +2350,7 @@
+                 fa = &ch->createhow4_u.createattrs;
+ 
+                 oargs->openhow.opentype = OPEN4_CREATE;
+-                if (data->filler.flags|O_EXCL) {
++                if ((data->filler.flags & O_EXCL) != 0) {
+                         ch->mode = EXCLUSIVE4;
+ 
+                         nfs4_init_random_verifier(&verifier[0]);
