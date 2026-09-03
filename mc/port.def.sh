@@ -35,9 +35,11 @@
 #   --with-screen=ncurses     ncurses is ported; slang is not
 #   NCURSES_WIDECHAR=0         our ncurses is NARROW; forces mc off the widec
 #                              getcchar/setcchar path (only loss: dialog shadows)
-#   mc-support/ (libmcsupport.a + headers)  Phoenix lacks getmntent (empty
-#                              <mntent.h>) and nl_langinfo (<langinfo.h>): the
-#                              stub reports no mounts + CODESET="UTF-8"
+#   (no mc-support stub any more)  Phoenix used to lack getmntent and
+#                              nl_langinfo, so this port staged glibc-shaped
+#                              headers into the SHARED PREFIX_H and linked a stub
+#                              libmcsupport.a. libphoenix implements both now, so
+#                              the stub is gone -- see p_prepare().
 #   mc.cache                  cross AC_TRY_RUN answers (getmntent method, realpath,
 #                              mktime) configure cannot probe when cross-compiling
 #   fake-pkg-config.sh        answers configure's glib/gmodule pkg-config queries
@@ -58,19 +60,30 @@ p_prepare() {
 			cp "$(dirname "${donor}")/config.guess" "${PREFIX_PORT_WORKDIR}/config.guess"
 	fi
 
-	# Phoenix lacks the mntent + langinfo APIs. Stage glibc-compatible headers into
-	# the shared PREFIX_H (these -I ahead of the target sysroot's empty <mntent.h>)
-	# and build the stub libmcsupport.a into PREFIX_A so mc's mountlist.c (no mounts)
-	# and strutil.c (nl_langinfo(CODESET) -> "UTF-8") build + link.
-	cp "${PREFIX_PORT}/mc-support/mntent.h"   "${PREFIX_H}/mntent.h"
-	cp "${PREFIX_PORT}/mc-support/langinfo.h" "${PREFIX_H}/langinfo.h"
-
-	"${CROSS}gcc" ${CFLAGS} -O2 -I"${PREFIX_PORT}/mc-support" -I"${PREFIX_H}" \
-		-c "${PREFIX_PORT}/mc-support/mntent-stub.c" -o "${PREFIX_PORT_WORKDIR}/mc-mntent.o"
-	"${CROSS}gcc" ${CFLAGS} -O2 -I"${PREFIX_PORT}/mc-support" -I"${PREFIX_H}" \
-		-c "${PREFIX_PORT}/mc-support/langinfo-stub.c" -o "${PREFIX_PORT_WORKDIR}/mc-langinfo.o"
-	"${CROSS}ar" rcs "${PREFIX_A}/libmcsupport.a" \
-		"${PREFIX_PORT_WORKDIR}/mc-mntent.o" "${PREFIX_PORT_WORKDIR}/mc-langinfo.o"
+	# The mc-support stub is retired: libphoenix implements the whole mntent family
+	# (setmntent/getmntent/getmntent_r/addmntent/endmntent/hasmntopt) and
+	# nl_langinfo, so mc's mountlist.c and strutil.c build against the real libc.
+	#
+	# Retiring it fixes two bugs beyond the obvious dead weight:
+	#  - It staged its own <mntent.h> and <langinfo.h> into the SHARED PREFIX_H,
+	#    i.e. one port mutated headers every other port sees. Since libphoenix's
+	#    real <mntent.h> declares hasmntopt and the stub's did not, a consumer that
+	#    picked up the stub copy got a configure/compile mismatch -- exactly the
+	#    failure that broke tools/ports/build-mc.sh (coord 8d722cb3a).
+	#  - mc now goes through real plumbing instead of a hardcoded answer: it
+	#    setmntent()s MOUNTED ("/etc/mtab"). Be precise about the payoff -- Phoenix
+	#    does not maintain /etc/mtab by default and libphoenix's setmntent is a
+	#    plain fopen, so TODAY mc still lists no mounts. The difference is that it
+	#    will list them the moment anything writes that file, whereas the stub
+	#    could never report a mount at all.
+	#
+	# Note the deliberate behaviour change: the stub answered CODESET="UTF-8",
+	# which sent mc down str_utf8_init(). libphoenix answers "ANSI_X3.4-1968"
+	# on purpose (locale/langinfo.c) because its multibyte layer maps bytes 1:1
+	# with no UTF-8 decoder -- so mc takes the 8-bit str_ascii_init() path, which
+	# is the correct one for this libc and matches what ncurses does. Needs an
+	# on-hardware look at box-drawing before the framework port replaces the
+	# tools/ one.
 
 	# Pre-seeded autoconf cache (configure loads it via --cache-file=mc.cache).
 	cp "${PREFIX_PORT}/mc.cache" "${PREFIX_PORT_WORKDIR}/mc.cache"
@@ -80,7 +93,7 @@ p_build() {
 	# glib headers: PREFIX_H/glib-2.0 + glibconfig.h under PREFIX_A/glib-2.0/include
 	# (the glib2 port's install layout).
 	local ginc="-I${PREFIX_H}/glib-2.0 -I${PREFIX_A}/glib-2.0/include"
-	local gliblibs="-L${PREFIX_A} -lglib-2.0 -lgmodule-2.0 -lmcsupport -lpthread -liconv -lresolv -lm"
+	local gliblibs="-L${PREFIX_A} -lglib-2.0 -lgmodule-2.0 -lpthread -liconv -lresolv -lm"
 
 	# Force NCURSES_WIDECHAR=0 (narrow ncurses), force-include the shim (P_tmpdir),
 	# and add the glib + ncurses include dirs. -static is load-bearing.
