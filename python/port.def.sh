@@ -36,7 +36,13 @@
 	supports="phoenix>=3.3"
 }
 
-# Framework migration of tools/python-port/build.sh — the CPython 3.14.4 cross
+# Framework migration of the ad-hoc build script that used to live at
+# tools/python-port/build.sh in the coordination repo. That directory was DELETED
+# 2026-09-03 once this port was proven to be its complete replacement, so the
+# paths named below and further down are historical provenance, not files you can
+# open. This recipe is now the only way python3 is built.
+#
+# The CPython 3.14.4 cross
 # recipe HW-verified on the Pi 4 (a full static `python3`). The hard-won pieces
 # (config.site ac_cv_* cache, phoenix-py-compat.h -include shim, curated static
 # Setup.local, and the two configure MACHDEP patches teaching CPython about
