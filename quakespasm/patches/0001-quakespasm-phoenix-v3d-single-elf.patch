@@ -18,6 +18,54 @@ index 0000000..6094f63
 +# Runtime artifacts written by the game itself
 +Quake/history.txt
 +Quake/config.cfg
+diff --git a/Quake/common.c b/Quake/common.c
+index 3776752..029431f 100644
+--- a/Quake/common.c
++++ b/Quake/common.c
+@@ -1361,6 +1361,29 @@ static void COM_CheckRegistered (void)
+ 	unsigned short	check[128];
+ 	int		i;
+ 
++	/* Publish the command line BEFORE the shareware early-return below.
++	 *
++	 * cmd.c Cmd_StuffCmds_f() iterates cmdline.string, so this cvar is what turns
++	 * `+map start` on the command line into an actual console command. Upstream
++	 * sets it only on the registered path (further down, after the pop.lmp
++	 * checksum), which means that with SHAREWARE data every `+command` is
++	 * silently ignored -- no warning, no diagnostic, the engine just proceeds to
++	 * quake.rc's `startdemos` and plays the attract-mode demo loop.
++	 *
++	 * That matters here because all Quake I testing on Phoenix runs on the free
++	 * shareware pak. `quakespasm +map start` looked accepted (argc and
++	 * "Command line:" both echoed it) and did nothing, so every visual check
++	 * compared screenshots taken at wherever the demo happened to be -- which is
++	 * how the wall-torch bug survived five re-diagnoses. Setting it here costs
++	 * nothing on registered data: the assignment below is now redundant and
++	 * removed. */
++	for (i = 0; com_cmdline[i]; i++)
++	{
++		if (com_cmdline[i] != ' ')
++			break;
++	}
++	Cvar_SetROM ("cmdline", &com_cmdline[i]);
++
+ 	COM_OpenFile("gfx/pop.lmp", &h, NULL);
+ 
+ 	if (h == -1)
+@@ -1389,13 +1412,6 @@ static void COM_CheckRegistered (void)
+ 		}
+ 	}
+ 
+-	for (i = 0; com_cmdline[i]; i++)
+-	{
+-		if (com_cmdline[i]!= ' ')
+-			break;
+-	}
+-
+-	Cvar_SetROM ("cmdline", &com_cmdline[i]);
+ 	Cvar_SetROM ("registered", "1");
+ 	Con_Printf ("Playing registered version.\n");
+ }
 diff --git a/Quake/gl_mesh.c b/Quake/gl_mesh.c
 index 03b79ef..e4638f7 100644
 --- a/Quake/gl_mesh.c
