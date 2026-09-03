@@ -6,7 +6,7 @@
 
 	name="python"
 	version="3.14.4"
-	desc="CPython 3.14 interpreter (static python3 + curated static C extension modules)"
+	desc="CPython 3.14 interpreter (static python3 + curated static C extension modules + the dlopen'd _curses)"
 	cpe23="cpe:2.3:a:python:python:${version}:*:*:*:*:*:*:*"
 
 	source="https://www.python.org/ftp/python/${version}"
@@ -26,7 +26,12 @@
 	# PREFIX_A/PREFIX_H, so python (also non-conflicting, same shared prefix) links
 	# them via -I${PREFIX_H} -L${PREFIX_A}. openssl (1.1.1a) is conflictable ->
 	# installs to a versioned dir, resolved at build time via b_dependency_dir.
-	depends="zlib openssl>=1.1.1a sqlite3 libffi bzip2 xz"
+	#
+	# ncurses is needed for _curses (see p_build). It is listed here rather than
+	# left to a standalone script so that `import curses` exists in any plain
+	# --with-ports image; ncurses itself needs no ports.yaml entry, being pulled
+	# transitively (same as glib2/fltk for the X11 ports).
+	depends="zlib openssl>=1.1.1a sqlite3 libffi bzip2 xz ncurses"
 
 	supports="phoenix>=3.3"
 }
@@ -38,6 +43,15 @@
 # Phoenix) live next to this file and are applied verbatim; only the external-lib
 # module link lines are re-pointed from the ad-hoc private builds to the framework
 # ports (zlib/sqlite3/libffi in the shared prefix, openssl via b_dependency_dir).
+#
+# The _curses step at the end of p_build is likewise a migration, of
+# tools/python-port/build-curses.sh (its curses_shim.h is copied verbatim next to
+# this file). NOT carried over from that script: the parts that restaged the
+# interpreter and the whole stdlib — the port already installs both, and a second
+# writer of the same files is exactly the drift this migration removes.
+# _curses_panel is deliberately absent: build-curses.sh never built it either, so
+# `import curses.panel` fails now as it did before. Adding it is a one-liner
+# (Modules/_curses_panel.c) if a consumer ever needs it.
 #
 # CPython cross-build REQUIRES a matching-version (3.14.x) host python for the
 # freeze/sysconfig build steps; --with-build-python=/usr/bin/python3 uses the
@@ -191,4 +205,61 @@ p_build() {
 	# would target the build host.
 	mkdir -p "${PREFIX_FS}/root/usr/local/lib/python3.14"
 	cp -a "${PREFIX_PORT_WORKDIR}/Lib/." "${PREFIX_FS}/root/usr/local/lib/python3.14/"
+
+	# _curses — the ONE extension module built as a dlopen-able .so instead of
+	# being folded statically into the interpreter like the step-4 modules.
+	#
+	# Why it is the exception to "Phoenix avoids runtime .so loading":
+	#   * this is the shape HW-proven on the Pi 4 (curses.wrapper() draws on the
+	#     console). Folding libncurses.a into the `python` link instead would
+	#     change the proven interpreter link for everyone, for one optional module.
+	#   * the port ALREADY commits to the dlopen seam — /bin/python3 is installed
+	#     NON-stripped precisely so a plugin's undefined Py C-API + libc symbols
+	#     resolve against its .symtab at load time. No new mechanism is introduced.
+	# It lives here, in the port, rather than in a hand-run script: a script that
+	# is not part of the port cannot make `import curses` true for a plain
+	# --with-ports image, and one that also restages the interpreter silently wins
+	# over the port simply by running later.
+	#
+	# Two Phoenix-specific facts make it link and run. Neither may be dropped:
+	#   1. libncurses.a has to be PIC to be folded into a shared object. The
+	#      ncurses port already configures with -fPIC, so nothing changes there —
+	#      but a "-fPIC is pointless for a static-only library" cleanup over there
+	#      would silently break this link.
+	#   2. pyconfig.h falsely advertises HAVE_NCURSESW=1 although the ncurses port
+	#      is NARROW. curses_shim.h undefs it; see that file for why it must be a
+	#      force-include and cannot be a -U on the command line.
+	#
+	# Flags: PY_CFLAGS so this TU sees the same sysroot/arch/compat-shim setup as
+	# every other CPython TU (curses_shim.h must come AFTER phoenix-py-compat.h,
+	# hence the append). Deliberately NO ${LDFLAGS}: it carries --gc-sections,
+	# which the proven link did not use. -O2 because EXPORT_CFLAGS carries no
+	# optimization level. libc and the Py C-API are left UNDEFINED on purpose —
+	# linking them in would embed a second copy of the interpreter's state.
+	local ext curses_so
+	ext="$(awk '/^EXT_SUFFIX=/ { print $2 }' "${PREFIX_PORT_WORKDIR}/Makefile")"
+	[ -n "${ext}" ] || b_die "EXT_SUFFIX not found in the configured Makefile"
+	curses_so="${PREFIX_PORT_WORKDIR}/_curses${ext}"
+
+	[ -f "${PREFIX_A}/libncurses.a" ] || b_die "ncurses port did not install ${PREFIX_A}/libncurses.a"
+
+	# shellcheck disable=2086 # PY_CFLAGS must word-split
+	"${CROSS}gcc" -shared -fPIC -nostartfiles -O2 ${PY_CFLAGS} \
+		-include "${PREFIX_PORT}/curses_shim.h" \
+		-I "${PREFIX_PORT_WORKDIR}/Include" -I "${PREFIX_PORT_WORKDIR}/Include/internal" \
+		-I "${PREFIX_PORT_WORKDIR}" -I "${PREFIX_H}/ncurses" \
+		-DPy_BUILD_CORE_MODULE -DHAVE_NCURSES_H -DHAVE_TERM_H \
+		"${PREFIX_PORT_WORKDIR}/Modules/_cursesmodule.c" "${PREFIX_A}/libncurses.a" \
+		-o "${curses_so}"
+
+	# -D queries the DYNAMIC symbol table — the one dlopen resolves the module
+	# through. A .so whose PyInit_ is only in .symtab would import as "not found".
+	"${CROSS}nm" -D "${curses_so}" | grep -q PyInit__curses || \
+		b_die "PyInit__curses missing from $(basename "${curses_so}")"
+
+	# Onto sys.path (the stdlib dir is the prefix the interpreter was configured
+	# with). Installed AFTER the stdlib copy above on purpose: should that copy
+	# ever gain delete semantics, an earlier install would be wiped without a
+	# word. NOT stripped — the dynamic symbols are the module's whole ABI.
+	b_install "${curses_so}" /usr/local/lib/python3.14
 }
