@@ -4,24 +4,23 @@
 # Copyright 2026 Phoenix Systems
 # Author: Witold Bołt
 
-# mc's mountlist detection runs AC_TRY_RUN-ish probes + requires a getmntent-style
-# API. Phoenix has none; we seed the glibc getmntent1 method and supply a
-# getmntent stub (mc-support stub lib) that reports no mounts. The mc filesystem
-# free-space panel then shows an empty mount list, which is acceptable for a
-# first console MC.
+# mc's mountlist detection needs a getmntent-style API and probes for it with
+# AC_TRY_RUN-ish tests configure cannot run when cross-compiling, so the answers
+# are seeded here. libphoenix implements the whole mntent family in libc
+# (mntent/mntent.c, 29f5373), so these say "yes" because it is TRUE -- they are
+# no longer standing in for the retired mc-support stub.
 fu_cv_sys_mounted_getmntent1=${fu_cv_sys_mounted_getmntent1=yes}
 
-# getmntent/setmntent/endmntent come from the mc-support stub.
+# In libc, so no extra -l is needed: hence search=no, func=yes.
 ac_cv_func_getmntent=${ac_cv_func_getmntent=yes}
 ac_cv_search_getmntent=${ac_cv_search_getmntent=no}
 
-# hasmntopt is NOT provided by the mc-support stub. The cross link probe
-# false-positives it (reporting "yes"), which #defines HAVE_HASMNTOPT and makes
-# mountlist.c call an undeclared hasmntopt (a hard error under GCC 14). Force it
-# to "no": mountlist.c then supplies its own no-op `hasmntopt(mnt,opt)->NULL`
-# macro, which matches the stub's "report no mounts" behavior (bind-mount
-# detection is moot when there are no mounts).
-ac_cv_func_hasmntopt=${ac_cv_func_hasmntopt=no}
+# hasmntopt was forced to "no" while the mc-support stub supplied the family
+# without it: HAVE_HASMNTOPT would have made mountlist.c call an undeclared
+# function, a hard error under GCC 14. libphoenix declares AND implements
+# hasmntopt now, so "no" is actively wrong -- it makes mountlist.c define its own
+# no-op `hasmntopt(mnt,opt)->NULL` and silently lose bind-mount detection.
+ac_cv_func_hasmntopt=${ac_cv_func_hasmntopt=yes}
 
 # Cross-compile run-probe answers (canonical aarch64).
 ac_cv_func_realpath_works=${ac_cv_func_realpath_works=yes}
