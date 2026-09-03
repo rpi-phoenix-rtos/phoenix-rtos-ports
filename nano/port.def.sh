@@ -25,6 +25,13 @@
 	supports="phoenix>=3.3"
 }
 
+# patches/0001-nano-bool-init-not-null.patch fixes `bool edit_refresh_needed =
+# NULL;` (global.c). nano 2.2.6 predates C99 <stdbool.h> being the norm, and its
+# `bool` here resolves to ncurses' NCURSES_BOOL (an int), so a NULL initializer
+# is an int-from-pointer conversion. That was a warning for a decade; GCC 14+
+# makes -Wint-conversion an error, so the build stops on it. Upstream nano
+# corrected this in later releases.
+#
 # nano 2.2.x is used deliberately: it bundles NO gnulib, so it sidesteps the
 # gnulib-vs-Phoenix namespace collisions (gettime/getprogname/...) that block the
 # modern (6.x) nano. The only Phoenix gaps are P_tmpdir + the passwd-enumeration
