@@ -90,6 +90,28 @@ p_prepare() {
 	#    mimalloc needs madvise/rusage Phoenix lacks -> pymalloc. --disable-shared:
 	#    static interpreter.
 	if [ ! -f "${cfg}/config.status" ]; then
+		# LDFLAGS is passed EXPLICITLY with --gc-sections stripped. configure
+		# otherwise inherits the framework's LDFLAGS from the environment, and
+		# --gc-sections then prunes every CPython C-API function the static
+		# interpreter does not itself call -- including the ones dlopen'd
+		# extension modules need. That is not a curses problem, it breaks any
+		# extension using a private API:
+		#
+		#   ImportError: dlopen: unresolved symbol: _PyLong_UnsignedInt_Converter
+		#
+		# _PyLong_UnsignedInt_Converter is defined in libpython3.14.a(longobject.o)
+		# and longobject.o IS linked, but with -ffunction-sections the unreferenced
+		# function lands in its own section and --gc-sections drops it, so the
+		# symbol is absent from the interpreter's symtab (Phoenix resolves dlopen
+		# against the symtab -- python3 is installed non-stripped for exactly this
+		# reason, and a fully static ELF has no .dynsym at all).
+		#
+		# Upstream solves the same problem with LINKFORSHARED=-Xlinker
+		# -export-dynamic. Keeping the API is the right trade: the alternative is
+		# a growing list of -u flags, one per symbol, discovered one crash at a
+		# time on hardware.
+		local py_ldflags="${LDFLAGS//-Wl,--gc-sections/}"
+
 		(cd "${cfg}" && CONFIG_SITE="${PREFIX_PORT}/config.site" "./configure" \
 			--host=aarch64-phoenix --build=x86_64-pc-linux-gnu \
 			--with-build-python="${HOST_PYTHON}" \
@@ -98,7 +120,7 @@ p_prepare() {
 			--without-mimalloc \
 			CC="${CROSS}gcc" CXX="${CROSS}g++" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
 			READELF="${CROSS}readelf" \
-			CFLAGS="${PY_CFLAGS}")
+			CFLAGS="${PY_CFLAGS}" LDFLAGS="${py_ldflags}")
 	fi
 
 	# 3. The .so extension linker defaults to the host `ld` (wrong arch). Point it
@@ -187,7 +209,16 @@ p_build() {
 	# Build JUST the interpreter (not `all`): `make all` would try to link the
 	# remaining stdlib extensions as .so with the wrong linker; `make python`
 	# links the static interpreter + the Setup.local modules.
-	make -C "${PREFIX_PORT_WORKDIR}" python
+	# LDFLAGS must be overridden HERE as well as at configure time. CPython's
+	# generated Makefile computes PY_LDFLAGS = $(CONFIGURE_LDFLAGS) $(LDFLAGS),
+	# and $(LDFLAGS) is taken from the ENVIRONMENT at make time -- which still
+	# carries the framework's --gc-sections. Fixing only configure left the flag
+	# on the final link, and the interpreter was still missing the C-API
+	# functions dlopen'd extensions need (see the configure comment above:
+	# _PyLong_UnsignedInt_Converter, _PyLong_Size_t_Converter, _PyLong_UInt8_Converter
+	# were pruned while their referenced neighbours in the SAME object survived).
+	# A make command-line assignment overrides the environment.
+	make -C "${PREFIX_PORT_WORKDIR}" python LDFLAGS="${LDFLAGS//-Wl,--gc-sections/}"
 
 	"${CROSS}readelf" -h "${PREFIX_PORT_WORKDIR}/python" | grep Machine
 
