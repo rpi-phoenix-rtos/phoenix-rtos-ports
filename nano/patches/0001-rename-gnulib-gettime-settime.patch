@@ -1,0 +1,55 @@
+--- a/lib/timespec.h	2026-09-03 21:16:47.319484840 +0200
++++ b/lib/timespec.h	2026-09-03 21:16:47.327963563 +0200
+@@ -90,8 +90,8 @@
+ 
+ long int gettime_res (void);
+ struct timespec current_timespec (void);
+-void gettime (struct timespec *) _GL_ARG_NONNULL ((1));
+-int settime (struct timespec const *) _GL_ARG_NONNULL ((1));
++void gl_gettime (struct timespec *) _GL_ARG_NONNULL ((1));
++int gl_settime (struct timespec const *) _GL_ARG_NONNULL ((1));
+ 
+ #ifdef __cplusplus
+ }
+--- a/lib/gettime.c	2026-09-03 21:16:47.322549505 +0200
++++ b/lib/gettime.c	2026-09-03 21:16:47.328107112 +0200
+@@ -1,4 +1,4 @@
+-/* gettime -- get the system clock
++/* gl_gettime -- get the system clock
+ 
+    Copyright (C) 2002, 2004-2007, 2009-2026 Free Software Foundation, Inc.
+ 
+@@ -26,7 +26,7 @@
+ /* Get the system time into *TS.  */
+ 
+ void
+-gettime (struct timespec *ts)
++gl_gettime (struct timespec *ts)
+ {
+ #if defined CLOCK_REALTIME && HAVE_CLOCK_GETTIME
+   clock_gettime (CLOCK_REALTIME, ts);
+@@ -46,6 +46,6 @@
+ current_timespec (void)
+ {
+   struct timespec ts;
+-  gettime (&ts);
++  gl_gettime (&ts);
+   return ts;
+ }
+--- a/lib/utimens.c	2026-09-03 21:16:47.325035044 +0200
++++ b/lib/utimens.c	2026-09-03 21:16:47.328196780 +0200
+@@ -158,12 +158,12 @@
+   if (timespec[0].tv_nsec == UTIME_OMIT)
+     timespec[0] = get_stat_atime (statbuf);
+   else if (timespec[0].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[0]);
++    gl_gettime (&timespec[0]);
+ 
+   if (timespec[1].tv_nsec == UTIME_OMIT)
+     timespec[1] = get_stat_mtime (statbuf);
+   else if (timespec[1].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[1]);
++    gl_gettime (&timespec[1]);
+ 
+   return false;
+ }

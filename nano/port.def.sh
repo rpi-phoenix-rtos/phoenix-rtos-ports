@@ -5,16 +5,16 @@
 	ports_api=1
 
 	name="nano"
-	version="2.2.6"
+	version="9.2"
 	desc="GNU nano — small console text editor (static, links the ncurses port)"
 	cpe23="cpe:2.3:a:gnu:nano:${version}:*:*:*:*:*:*:*"
 
-	source="https://www.nano-editor.org/dist/v2.2"
-	archive_filename="${name}-${version}.tar.gz"
+	source="https://www.nano-editor.org/dist/v9"
+	archive_filename="${name}-${version}.tar.xz"
 	src_path="${name}-${version}/"
 
-	size="1572388"
-	sha256="be68e133b5e81df41873d32c517b3e5950770c00fc5f4dd23810cd635abce67a"
+	size="1760684"
+	sha256="05ecb99247b782e8a5b3a25ed4101dd034b0236902f7449bc9795b717642f7e9"
 
 	license="GPL-3.0-or-later"
 	license_file="COPYING"
@@ -25,50 +25,72 @@
 	supports="phoenix>=3.3"
 }
 
-# patches/0001-nano-bool-init-not-null.patch fixes `bool edit_refresh_needed =
-# NULL;` (global.c). nano 2.2.6 predates C99 <stdbool.h> being the norm, and its
-# `bool` here resolves to ncurses' NCURSES_BOOL (an int), so a NULL initializer
-# is an int-from-pointer conversion. That was a warning for a decade; GCC 14+
-# makes -Wint-conversion an error, so the build stops on it. Upstream nano
-# corrected this in later releases.
+# Was pinned to 2.2.6 (2010) on the grounds that 2.2.x bundles NO gnulib and so
+# avoids the gnulib-vs-libphoenix namespace collisions. That rationale is
+# OBSOLETE: the coreutils port later shipped a fully gnulib-based program on
+# Phoenix by renaming the colliding functions inside gnulib's own sources, and
+# the same technique carries nano. Measured collision surface in 9.2 is exactly
+# TWO symbols, both from the `gettime` module:
 #
-# nano 2.2.x is used deliberately: it bundles NO gnulib, so it sidesteps the
-# gnulib-vs-Phoenix namespace collisions (gettime/getprogname/...) that block the
-# modern (6.x) nano. The only Phoenix gaps are P_tmpdir + the passwd-enumeration
-# API — the former is supplied by the force-included nano-phoenix-shim.h, the
-# latter by libphoenix's own getpwent/setpwent/endpwent.
+#   libphoenix  int  gettime(time_t *raw, time_t *offs)     (sys/time.h:34)
+#   gnulib      void gettime(struct timespec *)             (lib/timespec.h:93)
+#   libphoenix  int  settime(time_t offs)                   (sys/time.h:37)
+#   gnulib      int  settime(struct timespec const *)        (lib/timespec.h:94)
+#
+# Same names, different types, both visible => conflicting declarations. Note a
+# -D rename CANNOT fix this: -Dgettime=gl_gettime rewrites libphoenix's
+# declaration too and reproduces the clash under the new name. So patch 0001
+# renames the five gnulib sites (timespec.h decls, gettime.c definition + its
+# use in current_timespec, two utimens.c calls), exactly as coreutils does.
+#
+# `getprogname` is NOT a collision any more: libphoenix declares it with
+# gnulib's own signature (stdlib.h:126), so that module self-disables.
+#
+# Patch 0002 is unrelated to collisions and is required regardless: gnulib's
+# lib/fseterr.c is a hard `#error` for unknown platforms, and it is compiled
+# whenever ac_cv_func___fseterr=no — i.e. on Phoenix. It adds a Phoenix branch
+# writing libphoenix's FILE error bit directly (F_ERROR == 1<<3), which is what
+# every other platform branch in that file does.
+#
+# Dropped along with the version bump:
+#   - the `bool edit_refresh_needed = NULL` patch: that variable no longer
+#     exists in 9.2.
+#   - the config.sub/config.guess donor-copy: 9.2's own config.sub knows
+#     `phoenix*`, so the aarch64-phoenix triplet is accepted as shipped.
+#   - nano-phoenix-shim.h: it existed only for P_tmpdir, which libphoenix now
+#     defines (stdio.h:50). Keeping the force-include would be actively harmful
+#     — it pulls <pwd.h> ahead of config.h, and gnulib headers #error on that.
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
-
-	# nano 2.2.6 (2010) ships a config.sub/guess that predates the `phoenix`
-	# triplet, so ./configure would reject `aarch64-phoenix`. Copy a phoenix-aware
-	# pair from an already-extracted dependency under port-sources (ncurses is a
-	# dep, built + extracted first). Same donor-copy idiom as the glib2 port.
-	local psrc donor
-	psrc="$(dirname "${PREFIX_PORT_BUILD}")"
-	donor="$(grep -l phoenix "${psrc}"/*/*/config.sub 2>/dev/null | grep -v nano | head -1)"
-	if [ -n "${donor}" ]; then
-		cp "${donor}" "${PREFIX_PORT_WORKDIR}/config.sub"
-		[ -f "$(dirname "${donor}")/config.guess" ] && \
-			cp "$(dirname "${donor}")/config.guess" "${PREFIX_PORT_WORKDIR}/config.guess"
-	fi
 }
 
 p_build() {
-	# ncurses (headers + libncurses.a) live in the shared PREFIX_H/PREFIX_A. Force
-	# -include the shim (P_tmpdir). ac_cv_lib_* answers steer nano's configure at
-	# the NARROW ncurses (no ncursesw). -static is load-bearing: the deliverable is
-	# a static aarch64-phoenix ELF with zero undefined symbols.
-	local xcflags="${CFLAGS} -O2 -I${PREFIX_H} -I${PREFIX_H}/ncurses -include ${PREFIX_PORT}/nano-phoenix-shim.h"
+	# ncurses (headers + libncurses.a) live in the shared PREFIX_H/PREFIX_A. The
+	# ac_cv_lib_* answers steer nano at the NARROW ncurses (no ncursesw).
+	# -static is load-bearing: the deliverable is a static aarch64-phoenix ELF
+	# with zero undefined symbols.
+	local xcflags="${CFLAGS} -O2 -I${PREFIX_H} -I${PREFIX_H}/ncurses"
 
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/config.status" ]; then
-		(cd "${PREFIX_PORT_WORKDIR}" && ./configure \
-			--host="${HOST}" --build=x86_64-pc-linux-gnu --disable-nls --disable-utf8 \
+		# NCURSES_CFLAGS/NCURSES_LIBS are preset deliberately. nano 9.x tries
+		# PKG_CHECK_MODULES([NCURSES],[ncurses]) FIRST, and on a dev host that
+		# query succeeds against the HOST's ncurses and silently injects host
+		# include/lib paths into a cross build. Presetting both makes the macro
+		# skip the pkg-config query entirely.
+		#
+		# --disable-libmagic: the libmagic block is on-unless-disabled and its
+		# AC_CHECK_LIB(z, inflate) would pull the sysroot zlib in as an
+		# undeclared dependency. --disable-maintainer-mode: 9.2 ships
+		# AM_MAINTAINER_MODE([enable]), and we must never re-run autotools here.
+		(cd "${PREFIX_PORT_WORKDIR}" && CONFIG_SITE="${PREFIX_PORT}/config.site" ./configure \
+			--host="${HOST}" --build=x86_64-pc-linux-gnu \
+			--disable-nls --disable-utf8 --disable-libmagic --disable-maintainer-mode \
 			CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
 			CPPFLAGS="${CFLAGS} -I${PREFIX_H} -I${PREFIX_H}/ncurses" \
 			CFLAGS="${xcflags}" \
 			LDFLAGS="${LDFLAGS} -static -L${PREFIX_A}" LIBS="-lncurses" \
+			NCURSES_CFLAGS="-I${PREFIX_H}/ncurses" NCURSES_LIBS="-L${PREFIX_A} -lncurses" \
 			ac_cv_lib_ncursesw_initscr=no ac_cv_lib_ncurses_initscr=yes)
 	fi
 

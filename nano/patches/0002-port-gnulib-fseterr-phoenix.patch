@@ -1,0 +1,18 @@
+--- a/lib/fseterr.c	2026-09-03 21:17:21.429323293 +0200
++++ b/lib/fseterr.c	2026-09-03 21:17:21.442311228 +0200
+@@ -74,6 +74,15 @@
+       close (fd2);
+     }
+   errno = saved_errno;
++#elif defined __phoenix__            /* Phoenix-RTOS */
++  /* libphoenix's FILE is a plain struct whose second member is `unsigned flags`,
++     and its error bit is F_ERROR == (1 << 3) (libphoenix stdio/file.c). There is
++     no public macro for it in <stdio.h>, so write the bit directly -- which is
++     what every other branch in this file does with its platform's private
++     field. Without this branch the #error below fires: gnulib compiles this
++     translation unit whenever ac_cv_func___fseterr=no, which is the case on
++     Phoenix, so nano does not build at all without it. */
++  fp->flags |= (1u << 3);
+ #else
+  #error "Please port gnulib fseterr.c to your platform! Look at the definitions of ferror and clearerr on your system, then report this to bug-gnulib."
+ #endif
