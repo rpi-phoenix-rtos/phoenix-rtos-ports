@@ -42,6 +42,12 @@
 # is a RUNTIME concern staged separately under /usr/share/quake; the port builds only
 # the engine binary.
 #
+# SHIPPING STATE: this port is registered `if: true` in the rpi4b project's ports.yaml,
+# so an image build installs /usr/bin/quakespasm INTO THE ROOTFS and it ships on the SD
+# image. No game binary goes into loader.disk any more — the _user/rpi4-quake wrapper
+# that used to be bundled there, and the ad-hoc libquakespasm.a archive step that fed
+# it, are both deleted.
+#
 # The clone-local diagnostic scaffolding (the gl_screen.c deterministic frame-capture +
 # TCP sink harness, the gl_rmain.c "#67 model gallery" test harness, and the
 # r_alias_lerpmode bisection cvar) is intentionally NOT part of this port: those are

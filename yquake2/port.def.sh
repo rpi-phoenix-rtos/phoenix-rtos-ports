@@ -43,6 +43,11 @@
 # baseq2 game data (paks) are RUNTIME concerns staged separately (the port builds only
 # the engine binary), matching how tools/yquake2-port/quake2-launcher.c execs it.
 #
+# SHIPPING STATE: this port is registered `if: true` in the rpi4b project's ports.yaml,
+# so an image build installs /usr/bin/yquake2 INTO THE ROOTFS and it ships on the SD
+# image (no game binary goes into loader.disk). The gl3/GLES3 default below is the
+# configuration HW-verified rendering full textured 3D on V3D 4.2 from the clean image.
+#
 # The diagnostic capture harness (-DYQ2CAP_PHOENIX + the per-frame TGA/TCP capture
 # hooks that live as local commits on the external/yquake2 clone) is intentionally
 # NOT part of this port: it is a visual-regression debugging aid, not engine

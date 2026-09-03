@@ -43,6 +43,12 @@
 # data (pak0.pak …) is a RUNTIME concern staged separately under /usr/share/quake; the
 # port builds only the engine binary (with a small base pak embedded so it boots).
 #
+# SHIPPING STATE: this port is registered `if: true` in the rpi4b project's ports.yaml,
+# so an image build installs /usr/bin/vkquake INTO THE ROOTFS and it ships on the SD
+# image ALONGSIDE the GL engines — the old "loader.disk fits only one large GL/VK
+# binary, so ship either quakespasm or vkquake" constraint is gone, together with the
+# _user/rpi4-vkquake wrapper and the ad-hoc libvkquake.a archive step.
+#
 # HOW vkQuake DIFFERS from the GL game ports (quake3 / quakespasm / yquake2):
 #   * It renders via VULKAN on the ported V3DV ICD (SPIR-V -> NIR -> QPU), NOT the
 #     Mesa/V3D *GL* stack. So it links libv3dv-phoenix.a (the V3DV Vulkan ICD, which

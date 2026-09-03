@@ -57,6 +57,14 @@
 # exec /usr/bin/quake3e) and the demoq3 game data (pak0.pk3 …) are RUNTIME concerns
 # staged separately under /usr/share/quake3; the port builds only the engine binary.
 #
+# SHIPPING STATE: this port is registered `if: true` in the rpi4b project's ports.yaml,
+# so an image build installs /usr/bin/quake3e INTO THE ROOTFS and it ships on the SD
+# image (no game binary goes into loader.disk). The game runs on the FREE DEMO data —
+# no retail content and no retail CD key. Besides the demo pak0.pk3 it needs a pak1.pk3
+# holding three QVMs built from ioquake3 (the demo's 1999 QVMs report UI API 3 while
+# this engine's UI_API_VERSION is 6) and a q3key whose FORMAT alone is checked; both are
+# staged by the coordination repo's scripts/stage-game-data.sh from assets/quake3-qvm/.
+#
 # The diagnostic capture harness — the -DQ3CAP_PHOENIX per-frame readback hook in
 # tr_init.c, which lives as a clone-local commit on the external/quake3e clone (on
 # top of the pinned upstream commit) — is intentionally NOT part of this port: it is
