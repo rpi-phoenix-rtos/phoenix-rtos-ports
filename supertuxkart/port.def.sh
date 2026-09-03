@@ -188,6 +188,10 @@ p_build() {
 	# we let `make` compile everything and reach — and fail — its link step, then
 	# relink ourselves. `make -k` keeps going so every real compile error surfaces
 	# in one pass; a genuine compile failure is caught by the object check below.
+	echo ">> [supertuxkart] NOTE: CMake's own link of bin/supertuxkart is EXPECTED"
+	echo ">> [supertuxkart]   to fail below with undefined GL/zlib/mbedtls symbols."
+	echo ">> [supertuxkart]   That is by design -- stage 4 relinks with an archive"
+	echo ">> [supertuxkart]   group. A REAL failure is the 'no ELF' b_die after it."
 	(cd "${build}" && make -k -j"$(nproc)" supertuxkart) || true
 
 	# ----- Prerequisite check: GL stack artifacts (fail loud) -------------------
