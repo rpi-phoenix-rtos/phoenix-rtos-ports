@@ -15,13 +15,13 @@
 	# as a content-addressed commit-archive at /archive/<sha>.tar.gz, so the fetched
 	# bytes are reproducible (same pattern as the yquake2 / llama2 ports). Bump
 	# `commit` + size/sha256 together if the pin moves.
-	commit="6baceeac51cbbb368912267da071abe69b1f30de"
+	commit="f5fe17864918239d443fe4c0d6bfb980e44d19e6"
 	source="https://github.com/sezero/quakespasm/archive"
 	archive_filename="${commit}.tar.gz"
 	src_path="quakespasm-${commit}/"
 
-	size="11520209"
-	sha256="c540596d464bb1bea1dfdb79dce0799233a0664c357bc16437f8f9e58ec9f8aa"
+	size="11519219"
+	sha256="1ca8ad2f190f9ab0aecd06d854c92637b62a3bd3f298dd877799dee0a300abd4"
 
 	license="GPL-2.0-or-later"
 	license_file="LICENSE.txt"

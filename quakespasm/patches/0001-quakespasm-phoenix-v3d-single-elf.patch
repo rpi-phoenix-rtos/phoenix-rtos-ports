@@ -19,7 +19,7 @@ index 0000000..6094f63
 +Quake/history.txt
 +Quake/config.cfg
 diff --git a/Quake/common.c b/Quake/common.c
-index 3776752..029431f 100644
+index 567ad3b..e764d0d 100644
 --- a/Quake/common.c
 +++ b/Quake/common.c
 @@ -1361,6 +1361,29 @@ static void COM_CheckRegistered (void)
@@ -356,7 +356,7 @@ index 963d55e..d001693 100644
  	Cvar_SetCallback (&r_nolerp_list, R_Model_ExtraFlags_List_f);
  	Cvar_RegisterVariable (&r_noshadow_list);
 diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
-index cf7c7ce..193dfa5 100644
+index 92579ec..944368e 100644
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
 @@ -25,6 +25,14 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
@@ -392,7 +392,7 @@ index cf7c7ce..193dfa5 100644
  cvar_t		gl_triplebuffer = {"gl_triplebuffer", "1", CVAR_ARCHIVE};
  
  cvar_t		cl_gun_fovscale = {"cl_gun_fovscale","1",CVAR_ARCHIVE}; // Qrack
-@@ -407,6 +426,11 @@ void SCR_Init (void)
+@@ -408,6 +427,11 @@ void SCR_Init (void)
  	Cvar_RegisterVariable (&scr_crosshairscale);
  	Cvar_RegisterVariable (&scr_showfps);
  	Cvar_RegisterVariable (&scr_clock);
@@ -404,7 +404,7 @@ index cf7c7ce..193dfa5 100644
  	//johnfitz
  	Cvar_RegisterVariable (&scr_usekfont); // 2021 re-release
  	Cvar_SetCallback (&scr_fov, SCR_Callback_refdef);
-@@ -833,6 +857,172 @@ void SCR_ScreenShot_f (void)
+@@ -834,6 +858,172 @@ void SCR_ScreenShot_f (void)
  }
  
  
@@ -577,7 +577,7 @@ index cf7c7ce..193dfa5 100644
  //=============================================================================
  
  
-@@ -1069,6 +1259,9 @@ void SCR_UpdateScreen (void)
+@@ -1070,6 +1260,9 @@ void SCR_UpdateScreen (void)
  	//FIXME: only call this when needed
  	SCR_TileClear ();
  
@@ -587,7 +587,7 @@ index cf7c7ce..193dfa5 100644
  	if (scr_drawdialog) //new game confirm
  	{
  		if (con_forcedup)
-@@ -1111,6 +1304,8 @@ void SCR_UpdateScreen (void)
+@@ -1112,6 +1305,8 @@ void SCR_UpdateScreen (void)
  
  	GLSLGamma_GammaCorrect ();
  
