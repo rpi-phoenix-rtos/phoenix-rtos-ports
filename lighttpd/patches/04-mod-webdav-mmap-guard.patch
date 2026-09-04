@@ -1,0 +1,24 @@
+--- a/src/mod_webdav.c
++++ b/src/mod_webdav.c
+@@ -772,6 +772,7 @@
+             len = buffer_clen(c->mem) - (uint32_t)c->offset;
+             break;
+           case FILE_CHUNK:
++          #if defined(HAVE_MMAP) || defined(_WIN32) /*(see local sys-mmap.h)*/
+             /*(safe to mmap tempfiles from response XML)*/
+             /*(response body provided in temporary file, so ok to mmap().
+              * Otherwise, must access through sys_setjmp_eval3()) */
+@@ -788,6 +789,13 @@
+             }
+             if (s == NULL) continue;
+             break;
++          #else
++            /* chunkqueue_chunk_file_viewadj() is defined only under HAVE_MMAP
++             * (chunk.c), and chunk.h guards its own inline caller the same way.
++             * Without mmap there is no way to view the tempfile here, so skip
++             * this chunk: this function only logs the response XML. */
++            continue;
++          #endif
+           default:
+             continue;
+         }
