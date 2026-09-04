@@ -93,7 +93,7 @@ p_build() {
 	# glib headers: PREFIX_H/glib-2.0 + glibconfig.h under PREFIX_A/glib-2.0/include
 	# (the glib2 port's install layout).
 	local ginc="-I${PREFIX_H}/glib-2.0 -I${PREFIX_A}/glib-2.0/include"
-	local gliblibs="-L${PREFIX_A} -lglib-2.0 -lgmodule-2.0 -lpthread -liconv -lresolv -lm"
+	local gliblibs="-L${PREFIX_A} -lglib-2.0 -lgmodule-2.0 -lpthread -liconv -lm"
 
 	# Force NCURSES_WIDECHAR=0 (narrow ncurses), force-include the shim (P_tmpdir),
 	# and add the glib + ncurses include dirs. -static is load-bearing.

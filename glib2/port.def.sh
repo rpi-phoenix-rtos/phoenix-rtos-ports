@@ -58,16 +58,33 @@ p_prepare() {
 	#   <resolv.h> + libresolv.a — res_query() link probe (gio gresolver only; not
 	#                        built for the mc-critical libglib-2.0). Stub fails
 	#                        cleanly at runtime.
-	cp "${PREFIX_PORT}/libintl-stub/libintl.h" "${PREFIX_H}/libintl.h"
-	mkdir -p "${PREFIX_H}/arpa"
-	cp "${PREFIX_PORT}/nameser-stub/arpa/nameser.h" "${PREFIX_H}/arpa/nameser.h"
-	cp "${PREFIX_PORT}/resolv-stub/resolv.h" "${PREFIX_H}/resolv.h"
+	# PORT-PRIVATE, not the shared prefix (2026-09-04). These are STUBS -- identity
+	# gettext macros, DNS constants, and a resolver whose own comment says it "fails
+	# cleanly at runtime". Staged into PREFIX_H/PREFIX_A they became visible to every
+	# port configured afterwards, so an unrelated recipe's AC_CHECK_HEADER(resolv.h)
+	# or gettext probe SUCCEEDED against a stub -- order-dependent on a clean build,
+	# universal on an incremental one. Nothing outside glib2 needs them: no other
+	# recipe mentions libintl, glib's gettext references (g_dgettext, glib_gettext,
+	# ...) are its own wrappers satisfied inside libglib-2.0.a, and libglib has ZERO
+	# undefined res_query/res_ninit references (checked with nm).
+	# docs/misc/2026-09-04-port-determinism-audit.md finding 4.
+	local stubs="${PREFIX_PORT_WORKDIR}/phoenix-stubs"
+	mkdir -p "${stubs}/include/arpa" "${stubs}/lib"
+	cp "${PREFIX_PORT}/libintl-stub/libintl.h" "${stubs}/include/libintl.h"
+	cp "${PREFIX_PORT}/nameser-stub/arpa/nameser.h" "${stubs}/include/arpa/nameser.h"
+	cp "${PREFIX_PORT}/resolv-stub/resolv.h" "${stubs}/include/resolv.h"
 
-	if [ ! -f "${PREFIX_A}/libresolv.a" ]; then
+	if [ ! -f "${stubs}/lib/libresolv.a" ]; then
 		"${CROSS}gcc" ${CFLAGS} -I"${PREFIX_PORT}/resolv-stub" \
 			-c "${PREFIX_PORT}/resolv-stub/resolv-stub.c" -o "${PREFIX_PORT_WORKDIR}/resolv-stub.o"
-		"${CROSS}ar" rcs "${PREFIX_A}/libresolv.a" "${PREFIX_PORT_WORKDIR}/resolv-stub.o"
+		"${CROSS}ar" rcs "${stubs}/lib/libresolv.a" "${PREFIX_PORT_WORKDIR}/resolv-stub.o"
 	fi
+
+	# Retire copies an earlier build of this recipe left in the SHARED prefix, so the
+	# fix takes effect on an existing tree instead of only on a clean one. Only files
+	# this port put there are removed.
+	rm -f "${PREFIX_H}/libintl.h" "${PREFIX_H}/arpa/nameser.h" \
+		"${PREFIX_H}/resolv.h" "${PREFIX_A}/libresolv.a"
 
 	# Fresh copy of the pre-seeded autoconf cache (AC_TRY_RUN cross probes) into the
 	# workdir; configure loads it via --cache-file=glib2.cache (relative).
@@ -79,9 +96,14 @@ p_build() {
 	# framework CFLAGS do NOT auto-add -I${PREFIX_H}, so add it (+ the force-included
 	# shim: P_tmpdir, LC_MESSAGES, NLS identity fallbacks). CPPFLAGS mirrors it for
 	# configure's preprocessor probes; LDFLAGS gains -L${PREFIX_A}.
-	local xcflags="${CFLAGS} -I${PREFIX_H} -O2 -include ${PREFIX_PORT}/glib-phoenix-shim.h"
-	local xcppflags="${CFLAGS} -I${PREFIX_H}"
-	local xldflags="${LDFLAGS} -L${PREFIX_A}"
+	# Same path as p_prepare's staging: `stubs` is local to that function, so it must
+	# be recomputed here or the -I expands to "/include" (which is how this fix
+	# failed the first time -- glib2's own nameser probe then could not find the
+	# stub it had just staged).
+	local stubs="${PREFIX_PORT_WORKDIR}/phoenix-stubs"
+	local xcflags="${CFLAGS} -I${PREFIX_H} -I${stubs}/include -O2 -include ${PREFIX_PORT}/glib-phoenix-shim.h"
+	local xcppflags="${CFLAGS} -I${PREFIX_H} -I${stubs}/include"
+	local xldflags="${LDFLAGS} -L${PREFIX_A} -L${stubs}/lib"
 
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/config.status" ]; then
 		(cd "${PREFIX_PORT_WORKDIR}" && ./configure \
