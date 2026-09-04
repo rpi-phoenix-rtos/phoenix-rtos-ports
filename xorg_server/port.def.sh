@@ -62,6 +62,15 @@ p_build() {
 		echo "xorg-server: libmd OK"
 	fi
 
+	# --with-default-font-path: xorg-server derives DEFAULT_FONT_PATH from ${datadir}
+	# and passes it through WITHOUT expanding it, so the linked server carried the
+	# LITERAL string "${prefix}/share/fonts/X11/misc/,${prefix}/.../TTF/,..." and
+	# complained about six impossible paths on every start:
+	#     _FontTransOpen: Unable to Parse address ${prefix}/share/fonts/X11/misc/
+	# Passing an absolute path removes both the unexpanded variable and the five
+	# directories this rootfs never had. Noise reduction, not new capability: the
+	# desktop renders through fontconfig/Xft (verified 2026-09-04), and no X11 core
+	# bitmap fonts are shipped at all -- that gap is tracked separately.
 	# --- 2. configure + build the kdrive CORE archives ---
 	if [ ! -f "$KD/dix/.libs/libdix.a" ]; then
 		( cd "$KD" \
@@ -69,6 +78,7 @@ p_build() {
 		     PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig" \
 		     ./configure --host="$XHOST" --prefix="$PREFIX" \
 		       --enable-kdrive --disable-xephyr --with-sha1=libmd \
+		       --with-default-font-path=/usr/share/fonts/X11/misc \
 		       --disable-xorg --disable-xwayland --disable-xnest --disable-xvfb --disable-dmx \
 		       --disable-glamor --disable-dri --disable-dri2 --disable-dri3 --disable-glx \
 		       --disable-int10-module --disable-vgahw --disable-vbe --disable-xdmcp \

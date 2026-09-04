@@ -59,6 +59,13 @@ p_build() {
 	# defines the four termios input flags IUCLC/IXANY/IMAXBEL/XCASE). -k is kept
 	# defensively so a future single-tool break still ships the rest; install is
 	# from src/ below (not `make install`, whose install-am wants the full `all`).
+	# Marker taken BEFORE make so the install loop below can tell "linked in this
+	# run" from "left over from a previous one". With `make -k ... || true` a broken
+	# tool does not fail the build, and the install loop takes every AArch64 ELF in
+	# src/, so on an incremental build after a partial failure stale binaries ship
+	# silently -- and 102 of them still satisfy the >= 100 count check.
+	touch "${PREFIX_PORT_WORKDIR}/.build-start"
+
 	make -k -C "${PREFIX_PORT_WORKDIR}" || true
 
 	# Install the built tools straight from src/. Filter to aarch64 ELF executables:
@@ -68,6 +75,7 @@ p_build() {
 		[ -f "${f}" ] || continue
 		case "${f}" in *.o | *.a | *.so | *.c | *.h | *.py | *.sh | *.x) continue ;; esac
 		"${CROSS}readelf" -h "${f}" 2>/dev/null | grep -q 'AArch64' || continue
+		[ "${f}" -nt "${PREFIX_PORT_WORKDIR}/.build-start" ] || continue
 		name="$(basename "${f}")"
 		cp -a "${f}" "${PREFIX_PROG}/${name}"
 		${STRIP} -o "${PREFIX_PROG_STRIPPED}/${name}" "${PREFIX_PROG}/${name}"
