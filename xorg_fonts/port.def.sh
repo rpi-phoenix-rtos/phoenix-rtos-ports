@@ -85,6 +85,18 @@ p_build() {
 			[ -s "$SRC/$fname" ] || b_die "xorg-fonts: $nv download failed (tried: $*)"
 			cp "$SRC/$fname" "$DISTFILES/$fname"
 		fi
+		# Verify BEFORE extracting, so the check covers the $DISTFILES cache path as
+		# well as a fresh download -- the cache is outside the buildroot, keyed by
+		# basename and reused forever, and nothing validated it until now.
+		local _want _have
+		_want="$(awk -v f="$fname" '$1 !~ /^#/ && $2 == f { print $1; exit }' \
+			"${PREFIX_PORT}/distfiles.sha256" 2>/dev/null || true)"
+		if [ -n "$_want" ]; then
+			_have="$(sha256sum "$SRC/$fname" | cut -d" " -f1)"
+			[ "$_want" = "$_have" ] || b_die "xorg-fonts: $fname sha256 MISMATCH (want $_want, got $_have) -- refusing to extract; delete the cached copy in $DISTFILES and retry"
+		else
+			echo "xorg-fonts: WARNING $fname has no recorded sha256 (add it to distfiles.sha256)" >&2
+		fi
 		tar xf "$SRC/$fname" || b_die "xorg-fonts: $nv extract failed"
 	}
 

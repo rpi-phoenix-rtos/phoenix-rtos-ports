@@ -102,6 +102,18 @@ p_build() {
 			done
 		done
 		[ -s "$nv.tar.gz" ] || b_die "xorg_apps: $nv download failed from all bases ($XBASE_RELEASES, $XBASE_ARCHIVE)"
+		# Verify BEFORE extracting, so the check covers the $DISTFILES cache path as
+		# well as a fresh download: that cache lives outside the buildroot, is keyed by
+		# basename and was reused forever with nothing validating it.
+		local _want _have
+		_want="$(awk -v f="$nv.tar.gz" '$1 !~ /^#/ && $2 == f { print $1; exit }' \
+			"${PREFIX_PORT}/distfiles.sha256" 2>/dev/null || true)"
+		if [ -n "$_want" ]; then
+			_have="$(sha256sum "$nv.tar.gz" | cut -d" " -f1)"
+			[ "$_want" = "$_have" ] || b_die "xorg_apps: $nv.tar.gz sha256 MISMATCH (want $_want, got $_have) -- refusing to extract; delete the cached copy and retry"
+		else
+			echo "xorg_apps: WARNING $nv.tar.gz has no recorded sha256 (add it to distfiles.sha256)" >&2
+		fi
 		tar xf "$nv.tar.gz" || b_die "xorg_apps: $nv extract failed"
 	}
 

@@ -1,0 +1,54 @@
+# sha256 of every tarball this port fetches at build time, one per line:
+#     <sha256>  <filename>
+#
+# WHY: these tarballs are pulled with curl from a third-party mirror and cached in
+# $PHOENIX_DISTFILES (default ~/.phoenix-distfiles/xorg) OUTSIDE the buildroot,
+# keyed by basename and reused forever. Nothing verified them, unlike every
+# framework-fetched anchor, which pins sha256= -- so this host built from a cache
+# nothing checked while a clean room re-downloaded whatever the mirror served that
+# day. _fetch_extract now verifies against this list before extracting and b_die's
+# on a mismatch.
+#
+# The recorded values were cross-checked on 2026-09-04: two tarballs re-fetched
+# from the recipe's own mirror agreed byte-for-byte with the cache, and several
+# sums match widely published values. Mirror agreement is NOT a signature check.
+#
+# Adding a tarball: fetch it, `sha256sum` it, add the line. A file with no entry
+# builds with a loud warning rather than failing, so a new fetch is visible but not
+# blocked.
+5e7b29b3f113ef870d1e3ecf8adf21f923396401604bda16d44be45e66052331  cairo-1.16.0.tar.xz
+6f0e6e01f7b30025fa05c85fdad1e5d0ec7fd35d9f61b22f34998de11969ff67  expat-2.5.0.tar.bz2
+dba695b57bce15023d2ceedef82062c2b925e51f5d4cc4aef736cf13f60a468b  fontconfig-2.14.2.tar.xz
+1ac27e16c134a7f2ccea177faba19801131116fd682efc1f5737037c5db224b5  freetype-2.13.2.tar.gz
+4077d6a6a75aeb01884f708919d25934c93305e49f7e3f36db9129320e6f4f3d  jpegsrc.v9e.tar.gz
+04fbd34a11ba08b9df2e3cdb2055c2e3c1c51b3257f683d7fcf42dabcf8e1210  libICE-1.1.1.tar.gz
+51464ce1abce323d5b6707ceecf8468617106e1a8a98522f8342db06fd024c15  libSM-1.2.4.tar.gz
+793ebebf569f12c864b77401798d38814b51790fce206e01a431e5feb982e20b  libX11-1.8.7.tar.gz
+3a321aaceb803577a4776a5efe78836eb095a9e44bbc7a465d29463e1a14f189  libXau-1.0.11.tar.gz
+012f90adf8739f2f023d63a5fee1528949cf2aba92ef7ac1abcfc2ae9cf28798  libXaw-1.0.16.tar.gz
+31a7abc4f129dcf6f27ae912c3eedcb94d25ad2e8f317f69df6eda0bc4e4f2f3  libXdmcp-1.1.5.tar.gz
+1a3dcda154f803be0285b46c9338515804b874b5ccc7a2b769ab7fd76f1035bd  libXext-1.3.5.tar.gz
+a944df7b6837c8fa2067f6a5fc25d89b0acc4011cd0bc085106a03557fb502fc  libXfont2-2.0.6.tar.gz
+32e48fe2d844422e64809e4e99b9d8aed26c1b541a5acf837c5037b8d9f278a8  libXft-2.3.8.tar.gz
+bf0902583dd1123856c11e0a5085bd3c6e9886fbbd44954464975fd7d52eb599  libXmu-1.2.1.tar.gz
+959466c7dfcfcaa8a65055bfc311f74d4c43d9257900f85ab042604d286df0c6  libXpm-3.5.17.tar.gz
+c72c94dc3373512ceb67f578952c5d10915b38cc9ebb0fd176a49857b8048e22  libXrandr-1.5.4.tar.gz
+6aec3ca02e4273a8cbabf811ff22106f641438eb194a12c0ae93c7e08474b667  libXrender-0.9.11.tar.gz
+de4a80c4cc7785b9620e572de71026805f68e85a2bf16c386009ef0e50be3f77  libXt-1.3.0.tar.gz
+cf2212189869adb94ffd58c7d9a545a369b83d2274930bfbe148da354030b355  libXt-1.3.1.tar.gz
+b55039f70959a1b2f02f4ec8db071e5170528d2c9180b30575dccf7510d7fb9f  libfontenc-1.1.8.tar.gz
+8f720b363aa08683c9bf2a563236f45313af2c55d542b5481ae17dd8d183bb42  libpng-1.6.40.tar.gz
+59da566decceba7c2a7970a4a03b48d9905f1262ff94410a649224e33d2442bc  libpthread-stubs-0.5.tar.gz
+4348566aa0fbf196db5e0a576321c65966189210cb51328ea2bb2be39c711d71  libxcb-1.16.tar.gz
+c4c2687729d1f920f165ebb96557a1ead2ef655809ab5eaa66a1ad36dc31050d  libxkbfile-1.1.3.tar.gz
+ea1480efada2fd948bc75366f7c349e1c96d3297d09a3fe62626e38e234a625e  pixman-0.42.2.tar.gz
+a75a1848ad2a89a82d841a51be56ce988ff3c63a8d6bf4383ae3219d8d915119  xcb-proto-1.16.0.tar.gz
+21c6e720162858f15fe686cef833cf96a3e2a79875f84007d76f6d00417f593a  xcb-util-0.4.1.tar.gz
+0ebd4cf809043fdeb4f980d58cdcf2b527035018924f8c14da76d1c81001293b  xcb-util-image-0.4.1.tar.gz
+1fa21c0cea3060caee7612b6577c1730da470b88cbdf846fa4e3e0ff78948e54  xcb-util-keysyms-0.4.1.tar.gz
+e04143c48e1644c5e074243fa293d88f99005b3c50d1d54358954404e635128a  xcb-util-renderutil-0.3.10.tar.gz
+dcecaaa535802fd57c84cceeff50c64efe7f2326bf752e16d2b77945649c8cd7  xcb-util-wm-0.4.2.tar.gz
+be0f90645b0fe21d2cbfdd77102cc3168f01cb794663fd8db2b305fed261e4c3  xclock-1.1.1.tar.gz
+7e2dacbc2caed81d462ee028e108866893217d55e35e4b860b09be2b409ee18f  xedit-1.2.2.tar.gz
+806f0b640245627ec97178bc872f9714e338bb9a56f1c5584c71d7d638c3ac79  xlogo-1.0.7.tar.gz
+a806f8a92f879dcd0146f3f1153fdffe845f2fc0df9b1a26c19312b7b0a29c86  xtrans-1.5.0.tar.gz
