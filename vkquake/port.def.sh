@@ -16,13 +16,13 @@
 	# /archive/<sha>.tar.gz, so the fetched bytes are reproducible (same pattern as the
 	# quake3 / quakespasm / yquake2 ports). The archive's top-level directory is the
 	# repo-name-cased "vkQuake-<sha>/". Bump `commit` + size/sha256 together if the pin moves.
-	commit="9be3a5addeb3023396299efd588627e39345f451"
+	commit="1aa13a56cdf1b8c18a556e8e48a71a559b925d5a"
 	source="https://github.com/Novum/vkQuake/archive"
 	archive_filename="${commit}.tar.gz"
 	src_path="vkQuake-${commit}/"
 
-	size="22885227"
-	sha256="8b913a17066d85904c53788bbdfd681f626b235caa27711a315f56356b7895f8"
+	size="23941364"
+	sha256="3e1a3bc4e8059cffc6246736e1d07f8656b8eba1619233e480010658ee3f3701"
 
 	license="GPL-2.0-or-later"
 	license_file="LICENSE.txt"
@@ -178,7 +178,7 @@ p_build() {
 		r_world sbar snd_codec snd_dma snd_mem snd_mix snd_umx
 		snd_wave strlcat strlcpy sv_main sv_move sv_phys sv_user
 		tasks view wad world hash_map quakedef lodepng
-		sys_sdl
+		sys_sdl json
 		embedded_pak
 	)
 	# Phoenix platform shims (glue/): replace the EXCLUDEd SDL/platform TUs. The tools build's

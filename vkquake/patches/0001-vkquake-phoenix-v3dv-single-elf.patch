@@ -1,8 +1,8 @@
 diff --git a/Quake/common.c b/Quake/common.c
-index d29b04f..99819e6 100644
+index 4ce114f..1012560 100644
 --- a/Quake/common.c
 +++ b/Quake/common.c
-@@ -1633,6 +1633,27 @@ static void COM_CheckRegistered (void)
+@@ -1852,6 +1852,27 @@ static void COM_CheckRegistered (void)
  	int h;
  	int i;
  
@@ -30,7 +30,7 @@ index d29b04f..99819e6 100644
  	COM_OpenFile ("gfx/pop.lmp", &h, NULL);
  
  	if (h == -1)
-@@ -1651,13 +1672,6 @@ static void COM_CheckRegistered (void)
+@@ -1870,13 +1891,6 @@ static void COM_CheckRegistered (void)
  
  	COM_CloseFile (h);
  
@@ -45,7 +45,7 @@ index d29b04f..99819e6 100644
  	Con_Printf ("Playing registered version.\n");
  }
 diff --git a/Quake/gl_rmisc.c b/Quake/gl_rmisc.c
-index 9444f07..fb7b306 100644
+index 7d7fc65..8632439 100644
 --- a/Quake/gl_rmisc.c
 +++ b/Quake/gl_rmisc.c
 @@ -27,6 +27,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
@@ -64,7 +64,7 @@ index 9444f07..fb7b306 100644
  cvar_t r_lodbias = {"r_lodbias", "1", CVAR_ARCHIVE};
  cvar_t gl_lodbias = {"gl_lodbias", "0", CVAR_ARCHIVE};
  
-@@ -2144,10 +2153,18 @@ static VkShaderModule R_CreateShaderModule (const byte *code, const int size, co
+@@ -2426,10 +2435,18 @@ static VkShaderModule R_CreateShaderModule (const byte *code, const int size, co
  	module_create_info.codeSize = size;
  	module_create_info.pCode = (const uint32_t *)code;
  
@@ -84,7 +84,7 @@ index 9444f07..fb7b306 100644
  
  	GL_SetObjectName ((uint64_t)module, VK_OBJECT_TYPE_SHADER_MODULE, name);
  
-@@ -2191,12 +2208,15 @@ static VkVertexInputBindingDescription	 md5_vertex_binding_description;
+@@ -2476,12 +2493,15 @@ static VkVertexInputBindingDescription	 md5_8_vertex_binding_description;
  	{                                                                                                      \
  		name##_module = cond ? R_CreateShaderModule (name##_spv, name##_spv_size, #name) : VK_NULL_HANDLE; \
  	} while (0)
@@ -106,7 +106,7 @@ index 9444f07..fb7b306 100644
  	} while (0)
  
  DECLARE_SHADER_MODULE (basic_vert);
-@@ -2281,7 +2301,7 @@ static void R_SetWBOITBlend (VkPipelineColorBlendAttachmentState *blend_attachme
+@@ -2622,7 +2642,7 @@ static void R_SetMBOITCompositeBlend (VkPipelineColorBlendAttachmentState *blend
  R_InitVertexAttributes
  ===============
  */
@@ -115,7 +115,7 @@ index 9444f07..fb7b306 100644
  {
  	{
  		basic_vertex_input_attribute_descriptions[0].binding = 0;
-@@ -2422,6 +2442,10 @@ static void R_InitDefaultStates (pipeline_create_infos_t *infos)
+@@ -2847,6 +2867,10 @@ static void R_InitDefaultStates (pipeline_create_infos_t *infos)
  
  	infos->rasterization_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
  	infos->rasterization_state.polygonMode = VK_POLYGON_MODE_FILL;
@@ -126,16 +126,15 @@ index 9444f07..fb7b306 100644
  	infos->rasterization_state.cullMode = VK_CULL_MODE_BACK_BIT;
  	infos->rasterization_state.frontFace = VK_FRONT_FACE_CLOCKWISE;
  	infos->rasterization_state.depthClampEnable = VK_FALSE;
-@@ -2484,12 +2508,23 @@ static void R_InitDefaultStates (pipeline_create_infos_t *infos)
+@@ -2980,11 +3004,22 @@ static void R_CreateComputePipeline (
  R_CreateBasicPipelines
  ===============
  */
 -static void R_CreateBasicPipelines ()
 +void R_CreateBasicPipelines () /* was static: Phoenix no-WSI fb0 path builds only the UI-variant basic pipelines (pl_phoenix_vk_vid.c) */
  {
- 	VkResult				err;
- 	pipeline_create_infos_t infos;
- 	R_InitDefaultStates (&infos);
+ 	pipeline_create_infos_t base;
+ 	R_InitDefaultStates (&base);
  
 +	/* Phoenix no-WSI fb0 path: disable back-face culling for the 2D/UI basic pipelines.
 +	 * R_InitDefaultStates sets cullMode=BACK_BIT + frontFace=CLOCKWISE. The fb0 scanout present
@@ -146,39 +145,39 @@ index 9444f07..fb7b306 100644
 +	 * CULL_MODE_NONE is the correct fix; it is scoped HERE to the basic 2D pipelines only (the
 +	 * world/3D pipelines build their own infos and keep BACK-face culling). Same class as the
 +	 * GLQuake-on-V3D back-face-cull fix. TODO(vkquake-port): if 3D later needs it, revisit frontFace. */
-+	infos.rasterization_state.cullMode = VK_CULL_MODE_NONE;
++	base.rasterization_state.cullMode = VK_CULL_MODE_NONE;
 +
  	const VkRenderPass main_render_pass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_STANDARD][MAIN_RENDER_PASS_STENCIL_CLEAR];
  	const VkRenderPass main_oit_render_pass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_OIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
- 	VkRenderPass	   ui_render_pass = vulkan_globals.secondary_cb_contexts[SCBX_GUI]->render_pass;
-@@ -2511,6 +2546,8 @@ static void R_CreateBasicPipelines ()
+ 	const VkRenderPass main_mboit_render_pass = vulkan_globals.main_render_pass[MAIN_RENDER_PASS_MBOIT][MAIN_RENDER_PASS_STENCIL_CLEAR];
+@@ -3010,6 +3045,8 @@ static void R_CreateBasicPipelines ()
  	for (int render_pass = 0; render_pass < countof (render_pass_variants); ++render_pass)
  	{
  		const int index = render_pass_variants[render_pass].index;
 +		if (render_pass_variants[render_pass].render_pass == VK_NULL_HANDLE)
 +			continue; /* Phoenix no-WSI: only RENDER_PASS_INDEX_UI has a render pass; MAIN/OIT/WBOIT are skipped */
+ 		R_CopyPipelineCreateInfos (&infos, &base);
  		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
  		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
- 		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
-@@ -2531,6 +2568,8 @@ static void R_CreateBasicPipelines ()
+@@ -3039,6 +3076,8 @@ static void R_CreateBasicPipelines ()
  	for (int render_pass = 0; render_pass < countof (render_pass_variants); ++render_pass)
  	{
  		const int index = render_pass_variants[render_pass].index;
 +		if (render_pass_variants[render_pass].render_pass == VK_NULL_HANDLE)
 +			continue; /* Phoenix no-WSI: see above */
+ 		R_CopyPipelineCreateInfos (&infos, &base);
  		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
  		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
- 		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
-@@ -2555,6 +2594,8 @@ static void R_CreateBasicPipelines ()
+@@ -3053,6 +3092,8 @@ static void R_CreateBasicPipelines ()
  	{
  		const int	   index = render_pass_variants[render_pass].index;
  		const qboolean wboit_pass = (index == RENDER_PASS_INDEX_WBOIT);
 +		if (render_pass_variants[render_pass].render_pass == VK_NULL_HANDLE)
 +			continue; /* Phoenix no-WSI: see above */
- 		infos.graphics_pipeline.renderPass = render_pass_variants[render_pass].render_pass;
- 		infos.graphics_pipeline.subpass = render_pass_variants[render_pass].subpass;
- 		infos.multisample_state.rasterizationSamples = render_pass_variants[render_pass].rasterization_samples;
-@@ -3953,7 +3994,7 @@ static void R_CreateIndirectComputePipelines ()
+ 		const qboolean mboit_moment_pass = (index == RENDER_PASS_INDEX_MBOIT_MOMENTS);
+ 		const qboolean mboit_composite_pass = (index == RENDER_PASS_INDEX_MBOIT_COMPOSITE);
+ 		R_CopyPipelineCreateInfos (&infos, &base);
+@@ -4011,7 +4052,7 @@ static void R_CreateIndirectComputePipelines ()
  R_CreateShaderModules
  ===============
  */
@@ -187,7 +186,7 @@ index 9444f07..fb7b306 100644
  {
  	CREATE_SHADER_MODULE (basic_vert);
  	CREATE_SHADER_MODULE (basic_frag);
-@@ -3968,6 +4009,10 @@ static void R_CreateShaderModules ()
+@@ -4037,6 +4078,10 @@ static void R_CreateShaderModules ()
  	CREATE_SHADER_MODULE (alias_alphatest_frag);
  	CREATE_SHADER_MODULE (alias_oit_frag);
  	CREATE_SHADER_MODULE (alias_alphatest_oit_frag);
@@ -195,10 +194,10 @@ index 9444f07..fb7b306 100644
 +	 * libphoenix-malloc allocator and was gated off. With the mmap-backed PL_VkHostAllocator()
 +	 * now passed as pAllocator (see R_CreateShaderModule), the >page allocation bypasses the
 +	 * failing malloc path, so md5_vert is re-enabled — all shader modules are created again. */
- 	CREATE_SHADER_MODULE (md5_vert);
- 	CREATE_SHADER_MODULE (sky_layer_vert);
- 	CREATE_SHADER_MODULE (sky_layer_frag);
-@@ -4005,7 +4050,7 @@ static void R_CreateShaderModules ()
+ 	CREATE_SHADER_MODULE (alias_mboit_moment_frag);
+ 	CREATE_SHADER_MODULE (alias_mboit_composite_frag);
+ 	CREATE_SHADER_MODULE_COND (alias_mboit_composite_msaa_frag, vulkan_globals.sample_count != VK_SAMPLE_COUNT_1_BIT);
+@@ -4089,7 +4134,7 @@ static void R_CreateShaderModules ()
  R_DestroyShaderModules
  ===============
  */
@@ -208,10 +207,10 @@ index 9444f07..fb7b306 100644
  	DESTROY_SHADER_MODULE (basic_vert);
  	DESTROY_SHADER_MODULE (basic_frag);
 diff --git a/Quake/gl_screen.c b/Quake/gl_screen.c
-index 83a8c67..cd06f65 100644
+index e297f5e..088ae11 100644
 --- a/Quake/gl_screen.c
 +++ b/Quake/gl_screen.c
-@@ -1107,9 +1107,6 @@ static void SCR_DrawGUI (void *unused)
+@@ -1397,9 +1397,6 @@ static void SCR_DrawGUI (void *unused)
  {
  	cb_context_t *cbx = vulkan_globals.secondary_cb_contexts[SCBX_GUI];
  
@@ -221,7 +220,7 @@ index 83a8c67..cd06f65 100644
  	// FIXME: only call this when needed
  	R_BeginDebugUtilsLabel (cbx, "2D");
  	SCR_TileClear (cbx);
-@@ -1201,6 +1198,27 @@ needs almost the entire 256k of stack space!
+@@ -1493,6 +1490,27 @@ needs almost the entire 256k of stack space!
  */
  void SCR_UpdateScreen (qboolean use_tasks)
  {
@@ -250,10 +249,10 @@ index 83a8c67..cd06f65 100644
  		return; // not initialized yet
  
 diff --git a/Quake/gl_texmgr.c b/Quake/gl_texmgr.c
-index a1f471c..a082585 100644
+index 8757ae3..2fed41a 100644
 --- a/Quake/gl_texmgr.c
 +++ b/Quake/gl_texmgr.c
-@@ -1229,6 +1229,35 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
+@@ -1315,6 +1315,35 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
  	image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
  	vkCmdPipelineBarrier (command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
  
@@ -290,10 +289,10 @@ index a1f471c..a082585 100644
  
  	image_memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 diff --git a/Quake/glquake.h b/Quake/glquake.h
-index 0aaaca9..0b42ab3 100644
+index 6ffa1dd..6247d31 100644
 --- a/Quake/glquake.h
 +++ b/Quake/glquake.h
-@@ -719,6 +719,13 @@ void R_InitSamplers ();
+@@ -853,6 +853,13 @@ void R_InitSamplers ();
  void R_CreatePipelineLayouts ();
  void R_CreatePipelines ();
  void R_DestroyPipelines ();
@@ -308,10 +307,10 @@ index 0aaaca9..0b42ab3 100644
  #define MAX_PUSH_CONSTANT_SIZE 128 // Vulkan guaranteed minimum maxPushConstantsSize
  
 diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
-index 159a6ad..7572dbd 100644
+index a8de19d..90fd798 100644
 --- a/Quake/host_cmd.c
 +++ b/Quake/host_cmd.c
-@@ -2637,6 +2637,19 @@ static void Host_Startdemos_f (void)
+@@ -3208,6 +3208,19 @@ static void Host_Startdemos_f (void)
  	if (!sv.active && cls.demonum != -1 && !cls.demoplayback)
  	{
  		cls.demonum = 0;
@@ -328,14 +327,14 @@ index 159a6ad..7572dbd 100644
 +			Cbuf_InsertText ("menu_main\n");
 +			return;
 +		}
- 		if (!fitzmode && !cl_startdemos.value)
+ 		if (!cl_startdemos.value)
  		{ /* QuakeSpasm customization: */
  			/* go straight to menu, no CL_NextDemo */
 diff --git a/Quake/r_alias.c b/Quake/r_alias.c
-index 54593cd..b200cbf 100644
+index 9791d4f..29f10bf 100644
 --- a/Quake/r_alias.c
 +++ b/Quake/r_alias.c
-@@ -198,6 +198,13 @@ static void GL_DrawAliasFrame (
+@@ -161,6 +161,13 @@ static void GL_DrawAliasFrame (
  		if (paliashdr->poseverttype == PV_QUAKE3)
  			ubo->flags |= 0x4;
  
@@ -349,19 +348,44 @@ index 54593cd..b200cbf 100644
  		ubo->entalpha = entity_alpha;
  
  		VkDescriptorSet descriptor_sets[3] = {tx->descriptor_set, (fb != NULL) ? fb->descriptor_set : tx->descriptor_set, ubo_set};
-@@ -205,6 +212,7 @@ static void GL_DrawAliasFrame (
+@@ -168,8 +175,31 @@ static void GL_DrawAliasFrame (
  			cbx->cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout.handle, 0, 3, descriptor_sets, 1, &uniform_offset);
  
  		VkBuffer	 vertex_buffers[3] = {paliashdr->vertex_buffer, paliashdr->vertex_buffer, paliashdr->vertex_buffer};
 +
++		/* #67 SINGLE-POSE FIX (Phoenix/V3D). When pose1 == pose2 the blend above is
++		 * forced to 0, and both position bindings then resolve to the SAME buffer
++		 * offset. V3D mishandles that draw: nothing is rasterised at all. It is the
++		 * same hardware defect quakespasm hit (fork 4ef0a42), where the cure was to
++		 * leave the Pose2 vertex ATTRIBUTE unbound -- not an option in Vulkan, where
++		 * attributes are fixed by the pipeline's vertex-input state, so the binding
++		 * has to point somewhere valid.
++		 *
++		 * Point it at a DIFFERENT pose instead. At blend == 0 the shader computes
++		 * mix(Pose1, Pose2, 0.0) == Pose1, so whichever pose slot 2 names contributes
++		 * exactly nothing to the result -- only the offsets differ, which is what the
++		 * hardware needs. Measured on HW: with the offsets equal the start-map torch
++		 * flames score 0 lit pixels in both ROIs across 7 frames; forcing a real
++		 * two-pose lerp (r_lerpmodels 2, i.e. distinct offsets) scores 397-599.
++		 *
++		 * numposes <= 1 cannot produce a distinct offset, so those models are left
++		 * as they were. Nothing in the start map exercises that case -- the flames
++		 * are multi-pose -- so it stays UNVERIFIED rather than silently "fixed". */
++		int pose2bind = lerpdata.pose2;
++		if (blend == 0 && paliashdr->numposes > 1)
++			pose2bind = (lerpdata.pose1 + 1) % paliashdr->numposes;
++
  		VkDeviceSize vertex_offsets[3] = {
- 			(unsigned)paliashdr->vbostofs, GLARB_GetXYZOffset (e, paliashdr, lerpdata.pose1), GLARB_GetXYZOffset (e, paliashdr, lerpdata.pose2)};
+-			(unsigned)paliashdr->vbostofs, GLARB_GetXYZOffset (e, paliashdr, lerpdata.pose1), GLARB_GetXYZOffset (e, paliashdr, lerpdata.pose2)};
++			(unsigned)paliashdr->vbostofs, GLARB_GetXYZOffset (e, paliashdr, lerpdata.pose1), GLARB_GetXYZOffset (e, paliashdr, pose2bind)};
  		vulkan_globals.vk_cmd_bind_vertex_buffers (cbx->cb, 0, 3, vertex_buffers, vertex_offsets);
+ 		vulkan_globals.vk_cmd_bind_index_buffer (cbx->cb, paliashdr->index_buffer, 0, VK_INDEX_TYPE_UINT16);
+ 
 diff --git a/Quake/sv_main.c b/Quake/sv_main.c
-index 3b5c4ca..273bf2f 100644
+index 9800142..9ad8186 100644
 --- a/Quake/sv_main.c
 +++ b/Quake/sv_main.c
-@@ -1381,6 +1381,16 @@ void SV_LocalSound (client_t *client, const char *sample)
+@@ -1383,6 +1383,16 @@ void SV_LocalSound (client_t *client, const char *sample)
  {
  	int sound_num, field_mask;
  
@@ -379,37 +403,88 @@ index 3b5c4ca..273bf2f 100644
  	{
  		if (!strcmp (sample, sv.sound_precache[sound_num]))
 diff --git a/Quake/sys_sdl.c b/Quake/sys_sdl.c
-index 487713f..836754e 100644
+index b9281c7..54bb42e 100644
 --- a/Quake/sys_sdl.c
 +++ b/Quake/sys_sdl.c
-@@ -30,6 +30,7 @@ typedef struct file_handle_s
+@@ -26,12 +26,47 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ 
+ #include <errno.h>
+ 
++/*
++ * Phoenix: the slurping Sys_FileOpenRead below hands the handle a malloc'd buffer
++ * (see the comment there), and upstream's COM_FindFile duplicates a pak's handle on
++ * EVERY file it opens out of that pak, so one buffer is reachable from many handles.
++ * Reference-count it in a header word just below the pointer the handle carries:
++ * duplicating a handle retains, closing one releases, and the last release frees.
++ * Without this, the second close of any pak-backed handle is a double free (and the
++ * reads after it a use-after-free) -- which is exactly what a 2026-09-04 run showed.
++ */
++#define SLURP_HDR sizeof (size_t)
++
++static size_t *slurp_refs (const byte *memory)
++{
++	return (size_t *)(void *)((char *)(void *)(uintptr_t)memory - SLURP_HDR);
++}
++
++static void slurp_retain (const byte *memory)
++{
++	if (memory)
++		(*slurp_refs (memory))++;
++}
++
++static void slurp_release (const byte *memory)
++{
++	size_t *refs;
++
++	if (!memory)
++		return;
++
++	refs = slurp_refs (memory);
++	if (--(*refs) == 0)
++		free (refs);
++}
++
+ typedef struct file_handle_s
  {
+ 	bool		free;
+ 	char	   *file_path;
  	FILE	   *file;
  	const byte *memory;
 +	int			owns_memory; /* memory[] was malloc'd by a slurping Sys_FileOpenRead -> free() on close */
- 	int			pos;
- 	int			size;
- } file_handle_t;
-@@ -65,24 +66,54 @@ qfileofs_t Sys_filelength (FILE *f)
- qfileofs_t Sys_FileOpenRead (const char *path, int *hndl)
+ 	qfileofs_t	pos;
+ 	qfilesize_t size;
+ 	bool		eof_condition;
+@@ -104,7 +139,9 @@ qfilesize_t Sys_FileOpenRead (const char *path, int *hndl)
  {
- 	FILE *f;
--	int	  i, retval;
-+	int	  i;
-+	long  len;
-+	byte *buf;
+ 	FILE	   *f;
+ 	int			i;
+-	qfilesize_t retval;
++	long		len;
++	byte	   *buf;
++	void	   *raw;
  
- 	i = findhandle ();
- 	f = fopen (path, "rb");
--
- 	if (!f)
+ 	i = allocHandle ();
+ 	f = Sys_fopen (path, "rb");
+@@ -113,24 +150,47 @@ qfilesize_t Sys_FileOpenRead (const char *path, int *hndl)
  	{
+ 		freeHandle (i);
  		*hndl = -1;
 -		retval = -1;
 +		return -1;
  	}
 -	else
-+
+-	{
+-		sys_handles[i].memory = NULL;
+-
+-		sys_handles[i].file_path = (char *)Mem_Alloc (strlen (path) + 1);
+-		q_strlcpy (sys_handles[i].file_path, (const char *)path, strlen (path) + 1);
+ 
+-		sys_handles[i].file = f;
+-		sys_handles[i].pos = 0;
+-		sys_handles[i].eof_condition = false;
+-		*hndl = i;
+-		retval = Sys_filelength (f);
+-		sys_handles[i].size = retval;
 +	/* Slurp the whole file into RAM and CLOSE it immediately, then serve reads/seeks
 +	 * from the buffer (via the memory[] handle path below). Two reasons:
 +	 *   1. pak0.pak over NFS is otherwise read per-lump (hundreds of slow random reads).
@@ -423,65 +498,62 @@ index 487713f..836754e 100644
 +	fseek (f, 0, SEEK_SET);
 +	if (len < 0)
 +		len = 0;
-+	buf = (byte *) malloc ((size_t) (len > 0 ? len : 1)); /* >=1 byte so memory[]!=NULL marks the handle used */
-+	if (!buf)
- 	{
--		sys_handles[i].file = f;
--		*hndl = i;
--		retval = Sys_filelength (f);
-+		fclose (f);
-+		*hndl = -1;
-+		return -1;
- 	}
-+	if (len > 0 && fread (buf, 1, (size_t) len, f) != (size_t) len)
++	raw = malloc (SLURP_HDR + (size_t) (len > 0 ? len : 1)); /* >=1 byte so memory[]!=NULL marks the handle used */
++	if (!raw)
 +	{
-+		free (buf);
 +		fclose (f);
 +		*hndl = -1;
 +		return -1;
 +	}
++	*(size_t *)raw = 1; /* one reference: this handle */
++	buf = (byte *)raw + SLURP_HDR;
++	if (len > 0 && fread (buf, 1, (size_t) len, f) != (size_t) len)
++	{
++		free (raw);
++		fclose (f);
++		*hndl = -1;
++		return -1;
+ 	}
 +	fclose (f);
  
 -	return retval;
 +	sys_handles[i].file = NULL;
 +	sys_handles[i].memory = buf;
 +	sys_handles[i].owns_memory = 1;
-+	sys_handles[i].size = (int) len;
++	sys_handles[i].size = (qfilesize_t) len;
 +	sys_handles[i].pos = 0;
 +	*hndl = i;
-+	return (qfileofs_t) len;
++	return (qfilesize_t) len;
  }
  
- void Sys_MemFileOpenRead (const byte *memory, int size, int *hndl)
-@@ -117,8 +148,14 @@ void Sys_FileClose (int handle)
+ void Sys_MemFileOpenRead (const byte *memory, qfilesize_t size, int *hndl)
+@@ -164,6 +224,11 @@ int Sys_DuplicateHandle (int handle)
+ 	// duplicate all data
+ 	sys_handles[new_handle] = sys_handles[handle];
+ 
++	/* Phoenix: the copy carries the same owned buffer -- retain it so the first
++	 * close does not pull it out from under the other handle. */
++	if (sys_handles[handle].owns_memory)
++		slurp_retain (sys_handles[handle].memory);
++
+ 	// replace with the new file
+ 	if (sys_handles[handle].file)
+ 	{
+@@ -220,6 +285,14 @@ void Sys_FileClose (int handle)
  		fclose (sys_handles[handle].file);
- 		sys_handles[handle].file = NULL;
+ 		Mem_Free (sys_handles[handle].file_path);
  	}
--	else
--		sys_handles[handle].memory = NULL;
 +	else if (sys_handles[handle].owns_memory && sys_handles[handle].memory)
 +	{
-+		free ((void *) sys_handles[handle].memory); /* slurped read buffer (NOT the static embedded pak) */
++		slurp_release (sys_handles[handle].memory); /* slurped read buffer (NOT the static embedded pak) */
 +	}
 +	sys_handles[handle].memory = NULL;
 +	sys_handles[handle].owns_memory = 0;
 +	sys_handles[handle].size = 0;
 +	sys_handles[handle].pos = 0;
- }
  
- void Sys_FileSeek (int handle, int position)
-@@ -135,6 +172,11 @@ int Sys_FileRead (int handle, void *dest, int count)
- 		return fread (dest, 1, count, sys_handles[handle].file);
- 	else
- 	{
-+		int avail = sys_handles[handle].size - sys_handles[handle].pos;
-+		if (count > avail)
-+			count = avail;
-+		if (count <= 0)
-+			return 0;
- 		memcpy (dest, sys_handles[handle].memory + sys_handles[handle].pos, count);
- 		sys_handles[handle].pos += count;
- 		return count;
+ 	freeHandle (handle);
+ }
 diff --git a/Shaders/alias_common.inc b/Shaders/alias_common.inc
 index 90b102c..6fed31a 100644
 --- a/Shaders/alias_common.inc

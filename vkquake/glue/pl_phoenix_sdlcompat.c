@@ -375,6 +375,39 @@ void SDL_free(void *mem)
 }
 
 /*
+ * Clipboard. Upstream reaches SDL_SetClipboardText directly from cl_main.c and
+ * console.c (not through a platform TU), so the shim has to provide it. Phoenix
+ * has no window system on the fb0 path and therefore no system clipboard; keep the
+ * text in the process so a copy is at least readable back by SDL_GetClipboardText,
+ * which follows the SDL contract of returning a malloc'd string ("" when empty)
+ * that the caller releases with SDL_free.
+ */
+static char *sdl_clipboard;
+
+int SDL_SetClipboardText(const char *text)
+{
+	char *copy = NULL;
+
+	if (text != NULL) {
+		copy = strdup(text);
+		if (copy == NULL)
+			return -1;
+	}
+
+	free(sdl_clipboard);
+	sdl_clipboard = copy;
+
+	return 0;
+}
+
+char *SDL_GetClipboardText(void)
+{
+	char *out = strdup(sdl_clipboard != NULL ? sdl_clipboard : "");
+
+	return out; /* NULL on OOM; SDL callers null-check before use */
+}
+
+/*
  * SDL_GetPrefPath: SDL contract is a malloc'd, '/'-terminated, writable user directory
  * (the caller frees it with SDL_free). vkQuake uses it for config.cfg + savegames. On
  * Phoenix we have a single (NFS/dummyfs) rootfs; return "<basedir>/" under /. We keep it

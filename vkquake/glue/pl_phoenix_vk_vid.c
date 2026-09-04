@@ -1257,3 +1257,10 @@ void SCR_ScreenShot_f (void)
 	 * for first-light; the harness already proves scanout readback works. */
 	Sys_Printf ("vkvid: screenshot not implemented\n");
 }
+
+/* Cursor shape for the menu's hover states (upstream 2026-09-04). The fb0 path
+ * draws its own software pointer and has no window-system cursor to swap. */
+void VID_SetMouseCursor(mousecursor_t cursor)
+{
+	(void)cursor;
+}

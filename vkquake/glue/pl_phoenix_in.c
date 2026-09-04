@@ -463,7 +463,7 @@ void IN_Deactivate(qboolean free_cursor)
 	(void)free_cursor;
 }
 
-void IN_MouseMotion(int dx, int dy)
+void IN_MouseMotion(float dx, float dy)
 {
 	(void)dx;
 	(void)dy;
@@ -490,4 +490,21 @@ Uint32 SDL_GetMouseState(int *x, int *y)
 	if (mouse_cur_btn & 0x02)
 		m |= 0x4;                       /* right  -> SDL_BUTTON(3) */
 	return m;
+}
+
+/* --- input additions from the 2026-09-04 upstream sync ---
+ * Both are console/menu conveniences on a desktop: release the captured mouse
+ * while the console is down, and report the pointer for hover testing. We never
+ * capture the pointer (no window system on the fb0 path), and the absolute
+ * position is already tracked from the HID deltas for SDL_GetMouseState, so
+ * report it from the same source rather than inventing a second one.
+ */
+
+void IN_DeactivateForConsole(void)
+{
+}
+
+void IN_GetMousePos(int *outx, int *outy)
+{
+	SDL_GetMouseState(outx, outy);
 }

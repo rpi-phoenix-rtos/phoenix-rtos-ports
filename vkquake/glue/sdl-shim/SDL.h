@@ -105,6 +105,12 @@ void       SDL_Delay(Uint32 ms);
  * body lives in the Phoenix input shim (pl_phoenix_in.c). */
 Uint32     SDL_GetMouseState(int *x, int *y);   /* SDL2 form (USE_SDL2) */
 
+/* ---- clipboard (cl_main.c copies a demo/map name, console.c copies the selection) ----
+ * There is no window system on the fb0 path, so the shim keeps a process-local
+ * clipboard: a copy within one vkQuake session works, and nothing is silently lost. */
+int        SDL_SetClipboardText(const char *text);
+char      *SDL_GetClipboardText(void);
+
 /* ---- pref/user path (host.c, cmd.c, menu.c, cfgfile.c, host_cmd.c) ---- */
 char      *SDL_GetPrefPath(const char *org, const char *app);
 void       SDL_free(void *mem);

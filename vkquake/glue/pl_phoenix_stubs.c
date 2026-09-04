@@ -21,6 +21,7 @@
  */
 #include "quakedef.h"
 typedef int sys_socket_t;       /* normally from net_sys.h (platform-gated) */
+#include "steam.h"
 #include "net_defs.h"
 #include "net_loop.h"
 
@@ -107,4 +108,91 @@ void *_mesa_get_astc_decoder_partition_table(uint32_t block_width, uint32_t bloc
 const char *util_get_process_name(void)
 {
 	return "vkquake-phoenix";
+}
+
+/* --- Steam / Epic integration (Quake/steam.c, which this port does NOT compile) ---
+ *
+ * The 2026-09-04 upstream sync added a store-detection layer: common.c looks for a
+ * Quake installed by Steam, GOG or Epic before falling back to the basedir, and
+ * host_cmd.c reports achievements and rich-presence status. Upstream implements it
+ * in steam.c, which loads libsteam_api at runtime through SDL_LoadObject and asks
+ * the user to pick between the original and remastered data with an SDL message
+ * box. Neither exists on this target -- the binary is a static ELF with no dynamic
+ * loader in play and no window system on the fb0 path -- so compiling steam.c would
+ * mean shimming SDL's dynamic-loading AND message-box APIs to make ~880 lines of
+ * unreachable code link.
+ *
+ * These answer the way steam.c answers on a machine with no store client: nothing
+ * found, nothing to report. common.c then uses the basedir we ship, which is what
+ * every run on this port has always done. json.c IS compiled -- host_cmd.c uses it
+ * independently of Steam.
+ */
+
+qboolean Steam_FindGame(steamgame_t *game, int appid)
+{
+	if (game != NULL) {
+		game->appid = appid;
+		game->library[0] = '\0';
+	}
+
+	return false;
+}
+
+qboolean Steam_ResolvePath(char *path, size_t pathsize, const steamgame_t *game)
+{
+	(void)game;
+
+	if (path != NULL && pathsize > 0) {
+		path[0] = '\0';
+	}
+
+	return false;
+}
+
+qboolean Steam_Init(const steamgame_t *game)
+{
+	(void)game;
+	return false;
+}
+
+qboolean Steam_SetAchievement(const char *name)
+{
+	(void)name;
+	return false;
+}
+
+void Steam_SetStatus_Menu(void)
+{
+}
+
+void Steam_SetStatus_SinglePlayer(const char *map)
+{
+	(void)map;
+}
+
+void Steam_SetStatus_Multiplayer(int players, int maxplayers, const char *map)
+{
+	(void)players;
+	(void)maxplayers;
+	(void)map;
+}
+
+qboolean EGS_FindGame(char *path, size_t pathsize, const char *nspace, const char *itemid, const char *appname)
+{
+	(void)nspace;
+	(void)itemid;
+	(void)appname;
+
+	if (path != NULL && pathsize > 0) {
+		path[0] = '\0';
+	}
+
+	return false;
+}
+
+quakeflavor_t ChooseQuakeFlavor(void)
+{
+	/* Upstream asks the user via an SDL message box. With no store install found
+	 * there is nothing to choose between, and the data we ship is the original. */
+	return QUAKE_FLAVOR_ORIGINAL;
 }
