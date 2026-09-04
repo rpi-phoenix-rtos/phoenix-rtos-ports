@@ -378,10 +378,10 @@ index 9800142..9ad8186 100644
  	{
  		if (!strcmp (sample, sv.sound_precache[sound_num]))
 diff --git a/Quake/sys_sdl.c b/Quake/sys_sdl.c
-index b9281c7..54bb42e 100644
+index b9281c7..ff72696 100644
 --- a/Quake/sys_sdl.c
 +++ b/Quake/sys_sdl.c
-@@ -26,12 +26,47 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+@@ -26,12 +26,55 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  
  #include <errno.h>
  
@@ -393,6 +393,14 @@ index b9281c7..54bb42e 100644
 + * duplicating a handle retains, closing one releases, and the last release frees.
 + * Without this, the second close of any pak-backed handle is a double free (and the
 + * reads after it a use-after-free) -- which is exactly what a 2026-09-04 run showed.
++ *
++ * The count is ATOMIC because the duplication is concurrent by design: the comment
++ * at COM_FindFile says "we can have concurrent reads to the pack", and vkQuake's
++ * loader runs those from its task workers. With a plain ++/-- two retains can both
++ * read 1 and store 2, leaving a count one short of the handles holding it -- and
++ * then a live pak handle reading freed memory. That is a timing race no torch bench
++ * would ever show, in a port whose history is intermittent corruption misattributed
++ * for weeks.
 + */
 +#define SLURP_HDR sizeof (size_t)
 +
@@ -404,7 +412,7 @@ index b9281c7..54bb42e 100644
 +static void slurp_retain (const byte *memory)
 +{
 +	if (memory)
-+		(*slurp_refs (memory))++;
++		__atomic_add_fetch (slurp_refs (memory), 1, __ATOMIC_ACQ_REL);
 +}
 +
 +static void slurp_release (const byte *memory)
@@ -415,7 +423,7 @@ index b9281c7..54bb42e 100644
 +		return;
 +
 +	refs = slurp_refs (memory);
-+	if (--(*refs) == 0)
++	if (__atomic_sub_fetch (refs, 1, __ATOMIC_ACQ_REL) == 0)
 +		free (refs);
 +}
 +
@@ -429,7 +437,7 @@ index b9281c7..54bb42e 100644
  	qfileofs_t	pos;
  	qfilesize_t size;
  	bool		eof_condition;
-@@ -104,7 +139,9 @@ qfilesize_t Sys_FileOpenRead (const char *path, int *hndl)
+@@ -104,7 +147,9 @@ qfilesize_t Sys_FileOpenRead (const char *path, int *hndl)
  {
  	FILE	   *f;
  	int			i;
@@ -440,7 +448,7 @@ index b9281c7..54bb42e 100644
  
  	i = allocHandle ();
  	f = Sys_fopen (path, "rb");
-@@ -113,24 +150,47 @@ qfilesize_t Sys_FileOpenRead (const char *path, int *hndl)
+@@ -113,24 +158,47 @@ qfilesize_t Sys_FileOpenRead (const char *path, int *hndl)
  	{
  		freeHandle (i);
  		*hndl = -1;
@@ -480,7 +488,7 @@ index b9281c7..54bb42e 100644
 +		*hndl = -1;
 +		return -1;
 +	}
-+	*(size_t *)raw = 1; /* one reference: this handle */
++	__atomic_store_n ((size_t *)raw, (size_t)1, __ATOMIC_RELAXED); /* one reference: this handle */
 +	buf = (byte *)raw + SLURP_HDR;
 +	if (len > 0 && fread (buf, 1, (size_t) len, f) != (size_t) len)
 +	{
@@ -502,7 +510,7 @@ index b9281c7..54bb42e 100644
  }
  
  void Sys_MemFileOpenRead (const byte *memory, qfilesize_t size, int *hndl)
-@@ -164,6 +224,11 @@ int Sys_DuplicateHandle (int handle)
+@@ -164,6 +232,11 @@ int Sys_DuplicateHandle (int handle)
  	// duplicate all data
  	sys_handles[new_handle] = sys_handles[handle];
  
@@ -514,7 +522,7 @@ index b9281c7..54bb42e 100644
  	// replace with the new file
  	if (sys_handles[handle].file)
  	{
-@@ -220,6 +285,14 @@ void Sys_FileClose (int handle)
+@@ -220,6 +293,14 @@ void Sys_FileClose (int handle)
  		fclose (sys_handles[handle].file);
  		Mem_Free (sys_handles[handle].file_path);
  	}

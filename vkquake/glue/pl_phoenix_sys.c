@@ -250,11 +250,13 @@ static findfile_t *Sys_FindStep(phoenix_find_t *f)
 		if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
 			continue;
 		}
-		if (f->ext[0] != '\0') {
-			const char *dot = strrchr(e->d_name, '.');
-			if (dot == NULL || q_strcasecmp(dot + 1, f->ext) != 0) {
-				continue;
-			}
+		/* Filter exactly as sys_sdl_unix.c's readdir_filtered does: "*" matches
+		 * everything, otherwise compare case-insensitively against the entry's
+		 * extension. Upstream does NOT skip "." and "..", and its callers filter
+		 * them (Modlist_AddRoot), so neither do we -- diverging here would mean a
+		 * caller's own guard silently stops matching what it guards against. */
+		if (f->ext[0] != '*' && q_strcasecmp(f->ext, COM_FileGetExtension(e->d_name)) != 0) {
+			continue;
 		}
 
 		q_strlcpy(f->pub.name, e->d_name, sizeof(f->pub.name));
@@ -289,9 +291,17 @@ findfile_t *Sys_FindFirst(const char *dir, const char *ext)
 	}
 
 	f->dir = d;
-	if (ext != NULL) {
-		q_strlcpy(f->ext, ext, sizeof(f->ext));
+	/* Upstream's contract: a NULL extension means "everything", and a leading dot
+	 * is optional. Getting the dot wrong is invisible -- host_cmd.c passes "bsp"
+	 * and "ext" bare today, but a caller passing ".sav" would just get an empty
+	 * savegame list, with nothing to indicate why. */
+	if (ext == NULL) {
+		ext = "*";
 	}
+	else if (*ext == '.') {
+		ext++;
+	}
+	q_strlcpy(f->ext, ext, sizeof(f->ext));
 	/* Keep the directory for the stat() in Sys_FindStep. */
 	q_strlcpy(f->path, dir, sizeof(f->path));
 
