@@ -12,7 +12,7 @@
 	# staged into $PREFIX_BUILD/{lib,include}. Owner decision E4 paused the GTK
 	# desktop environments, so the glib-gated text-shaping stack (harfbuzz/pango/
 	# fribidi + glib2) is DEFERRED — this port carries only what the current
-	# WindowMaker + Xft stack needs: libpng, jpeg, freetype, expat, fontconfig,
+	# WindowMaker + Xft stack needs: libpng, freetype, expat, fontconfig,
 	# libXft, cairo. Anchor source = freetype (the tier leaf); the rest are fetched
 	# in p_build. See docs/inprogress/x11-ports-migration-spec.md.
 	# Anchor = freetype (the tier leaf). Served from the SourceForge CDN mirror:
@@ -25,7 +25,7 @@
 	size="3875020"
 	sha256="1ac27e16c134a7f2ccea177faba19801131116fd682efc1f5737037c5db224b5"
 
-	license="MIT"   # FreeType(FTL/GPL), fontconfig(MIT), cairo(LGPL/MPL), libpng, jpeg(IJG), expat(MIT)
+	license="MIT"   # FreeType(FTL/GPL), fontconfig(MIT), cairo(LGPL/MPL), libpng, expat(MIT)
 	license_file="LICENSE.TXT"
 
 	conflicts=""
@@ -100,15 +100,21 @@ p_build() {
 		echo "xorg-fonts: libpng-1.6.40 OK"
 	fi
 
-	# --- jpeg (IJG) ---
-	if [ ! -f "$PREFIX/lib/libjpeg.a" ] || [ ! -f "$PREFIX/include/jpeglib.h" ]; then
-		_fetch_extract jpeg-9e "https://www.ijg.org/files/jpegsrc.v9e.tar.gz"
-		( cd "$SRC/jpeg-9e" \
-		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
-		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" CFLAGS="--sysroot=$SYSROOT" \
-		  && make -j4 && make install ) || b_die "xorg-fonts: jpeg failed"
-		echo "xorg-fonts: jpeg-9e OK"
-	fi
+	# --- jpeg: DELIBERATELY NOT BUILT HERE (2026-09-04) ---
+	# This port used to build IJG jpeg-9e into $PREFIX/lib/libjpeg.a +
+	# $PREFIX/include/jpeglib.h -- the SAME two paths the `libjpeg` port fills with
+	# libjpeg-turbo 3.0.4, with no dependency edge between them, so which
+	# implementation a consumer got depended on build order. They are not
+	# ABI-compatible (turbo defaults to the libjpeg 6.2 ABI, IJG 9e is 90, and
+	# jpeg_decompress_struct grew fields across 7/8/9), so a consumer could compile
+	# against one header and link the other archive: silent corruption, not a link
+	# error.
+	#
+	# Nothing here uses jpeg -- it was built for the downstream Xft/WindowMaker
+	# stack -- and every real consumer already depends on the libjpeg port
+	# (fltk:27, supertuxkart:36, dillo via fltk), so removing it leaves turbo as
+	# the single producer and needs no `depends` change. See
+	# docs/misc/2026-09-04-port-determinism-audit.md finding 1.
 
 	# --- freetype (minimal: break the freetype<->harfbuzz cycle) ---
 	if [ ! -f "$PREFIX/lib/libfreetype.a" ]; then
