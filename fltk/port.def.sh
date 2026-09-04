@@ -32,16 +32,13 @@
 p_prepare() {
 	# No source patches: FLTK 1.3.10 ships a phoenix-aware config.sub and
 	# cross-compiles cleanly. configure lives in p_build (CROSS available there,
-	# matching the sdl2 port). The rint/rintf compat shim is force-included there.
+	# matching the sdl2 port). 
 	:
 }
 
 p_build() {
 	# FLTK is a C++ X11 client toolkit. Link against the framework X client stack
 	# + image libs installed in the target prefix (PREFIX_H/PREFIX_A). The shim
-	# aliases C99 rint()/rintf() (used in FLTK's pixel-rounding) onto round()/
-	# roundf(); it is force-included so no FLTK source is patched. (TODO: drop the
-	# shim once libphoenix libm's rint-family lands in the sysroot libm.a.)
 	#
 	# DISABLED: gl (no GLX on the fbdev X stack yet), xft/xinerama/xcursor/xfixes/
 	# xdbe (those X extension libs are not in the stack; FLTK falls back to core
@@ -49,8 +46,7 @@ p_build() {
 	# framework ones for a consistent image stack). The ac_cv_lib_png_* cache vars
 	# defeat FLTK's png probe, which links `-lpng` without `-lz` and thus gets a
 	# static-link false negative against the prefix libpng16.
-	local shim="${PREFIX_PORT}/fltk-phoenix-shim.h"
-	local xcflags="${CFLAGS} -I${PREFIX_H} -include ${shim}"
+	local xcflags="${CFLAGS} -I${PREFIX_H}"
 	# Fold CFLAGS into LDFLAGS so configure's cross link probes carry sysroot/-mcpu.
 	local xldflags="${CFLAGS} ${LDFLAGS} -L${PREFIX_A}"
 

@@ -47,8 +47,6 @@
 #   committed to libphoenix proper (so future builds need no gap-fill):
 #     - _SC_LINE_MAX added to sysconf() (libphoenix commit) — WINGs/error.c
 #   build-time defines against the current sysroot:
-#     - -Drint=round         : libphoenix libm has no rint(); round() suffices
-#       for wmaker's UI coordinate/colour rounding (wcolorpanel.c, wbrowser.c)
 #     - -DWMAKER_SHELL="/bin/sh": retained compile-time hook for wmaker's shell.
 #       No source patch is carried: WindowMaker's src/main.c hardcodes "/bin/sh"
 #       which is exactly the Pi's shell path, so stock wmaker is correct as-is.
@@ -93,10 +91,9 @@ p_build() {
 		echo "windowmaker: libftw.a + ftw.h + wmaker-phoenix-compat.h staged into ${WMAKER_DEPS}"
 	fi
 
-	# -Drint=round: libphoenix libm has no rint(); round() suffices for wmaker's UI
-	#   coordinate/colour rounding. -include wmaker-phoenix-compat.h: declares
+	# -include wmaker-phoenix-compat.h: declares
 	#   nice/scandir/alphasort (defined in libftw.a) at every call site.
-	local gapdefs="-Drint=round -include wmaker-phoenix-compat.h"
+	local gapdefs="-include wmaker-phoenix-compat.h"
 	local pwddefs="-DMAXHOSTNAMELEN=256 -DO_NOFOLLOW=0 -DXOS_USE_MTSAFE_PWDAPI -D_POSIX_THREAD_SAFE_FUNCTIONS=200809L"
 	# The \\\" quoting on -DWMAKER_SHELL survives the extra /bin/sh hop that
 	# `make CFLAGS=...` performs before invoking gcc (a bare \" would be stripped,

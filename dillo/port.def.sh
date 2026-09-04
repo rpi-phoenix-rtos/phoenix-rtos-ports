@@ -85,7 +85,7 @@ WRAPEOF
 
 	# GCC 14 promotes -Wincompatible-pointer-types / -Wint-conversion to hard
 	# errors; demote to warnings so the build completes. Force-include the shim
-	# (rint/rintf + AI_* getaddrinfo hint macros). All headers/libs (fltk, X, image
+	# (AI_* getaddrinfo hint macros). All headers/libs (fltk, X, image
 	# codecs, mbedtls) live in PREFIX_H/PREFIX_A.
 	local xcflags="${CFLAGS} -I${PREFIX_H} -include ${PREFIX_PORT}/dillo-phoenix-shim.h -O2 -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
 	local xldflags="${CFLAGS} ${LDFLAGS} -L${PREFIX_A}"

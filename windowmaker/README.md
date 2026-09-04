@@ -38,7 +38,7 @@ The build needed several libphoenix additions / gap-fills:
 | `nftw()` / `ftw()`            | WINGs/proplist.c      | gap-fill lib (no `<ftw.h>` in libphoenix)                           |
 | `scandir()` / `alphasort()`   | util/wmiv, wmgenmenu  | gap-fill lib (absent from libphoenix `<dirent.h>`)                  |
 | `nice()`                      | util/wmsetbg          | gap-fill no-op stub (no process-priority API)                       |
-| `rint()`                      | wcolorpanel, wbrowser | build define `-Drint=round` (libphoenix libm has no `rint`)         |
+| `rint()`                      | wcolorpanel, wbrowser | none needed — libphoenix libm implements `rint`/`rintf` (2026-09-04) |
 
 The gap-fill lib sources are in the coordination repo at
 `tools/x11-port/ftw-phoenix/` (`ftw.c`, `ftw.h`, `wmaker-phoenix-compat.h`).

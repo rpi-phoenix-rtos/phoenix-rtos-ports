@@ -17,20 +17,6 @@
 #ifndef DILLO_PHOENIX_SHIM_H
 #define DILLO_PHOENIX_SHIM_H
 
-/*
- * Phoenix libm provides round()/roundf() but NOT the C99 rint()/rintf().
- * Dillo's dw/style.cc border-drawing calls rint() for pixel rounding. Alias it
- * to round() (the one-ULP difference at exact .5 boundaries is irrelevant for
- * integer pixel coordinates) — same approach as the FLTK shim. This must come
- * before the standard headers so it patches every translation unit.
- */
-#include <math.h>
-#ifndef rint
-#define rint(x) round(x)
-#endif
-#ifndef rintf
-#define rintf(x) roundf(x)
-#endif
 
 /*
  * Dillo's dpip/IO layer and dns.c expect the BSD/glibc socket + resolver macros.
