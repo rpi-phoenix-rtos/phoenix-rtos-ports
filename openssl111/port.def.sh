@@ -5,16 +5,19 @@
 	ports_api=1
 
 	name="openssl"
-	version="1.1.1a"
+	version="1.1.1w"
 	desc="TLSv1.3 capable SSL and crypto library"
 	cpe23="cpe:2.3:a:openssl:openssl:${version}:-:*:*:*:*:*:*"
 
-	source="https://www.openssl.org/source/"
+	# 1.1.1 is EOL, so www.openssl.org/source/ serves only the CURRENT release of
+	# each supported branch; every 1.1.1 tarball lives under old/1.1.1/. This URL
+	# must move with version= or the fetch 404s.
+	source="https://www.openssl.org/source/old/1.1.1/"
 	archive_filename="${name}-${version}.tar.gz"
 	src_path="${name}-${version}/"
 
-	sha256="fc20130f8b7cbd2fb918b2f14e2f429e109c31ddd0fb38fc5d71d9ffed3f9f41"
-	size="8350547"
+	sha256="cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8"
+	size="9893384"
 
 	license="OpenSSL"
 	license_file="LICENSE"

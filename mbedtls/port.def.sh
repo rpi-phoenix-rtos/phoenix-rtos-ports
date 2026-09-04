@@ -5,7 +5,7 @@
 	ports_api=1
 
 	name="mbedtls"
-	version="2.28.0"
+	version="2.28.10"
 	desc="SSL/TLS and cryptography library suitable for embedded systems"
 	cpe23="cpe:2.3:a:trustedfirmware:mbed_tls:${version}:*:*:*:*:*:*:*"
 
@@ -13,8 +13,8 @@
 	archive_filename=("${name}-${version}.tar.gz" "v${version}.tar.gz")
 	src_path="${name}-${version}/"
 
-	size="3711231"
-	sha256="6519579b836ed78cc549375c7c18b111df5717e86ca0eeff4cb64b2674f424cc"
+	size="4369619"
+	sha256="0f2e0525903a89ae1d39ce439d858be66933bda54c5b6102b72a29ed8fe7c088"
 
 	license="Apache-2.0 OR GPL-2.0-or-later"
 	license_file="LICENSE"
