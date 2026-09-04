@@ -29,21 +29,27 @@
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 
+	# Generated OUTSIDE the config.h guard on purpose. Its input -- lighttpd.conf --
+	# lives outside the port workdir, while that guard keys on a file INSIDE it, and
+	# b_port_invalidate_stale_configure only fires on a libphoenix API change. Kept
+	# inside, editing lighttpd.conf could not change the linked plugin table on any
+	# incremental build; the anchored grep below would have been correct and inert.
+	# lighttpd.conf lists the enabled mod_* plugins, which drive the static
+	# plugin table (plugin-static.h). Prefer the staged rootfs copy, but fall
+	# back to the root-skel SOURCE: ports may run before the fs stage has
+	# populated $PREFIX_ROOTFS/etc (e.g. an incremental --with-ports), and the
+	# original hard find then aborted the whole ports build.
+	CONFIGFILE=$(find "${PREFIX_ROOTFS:-}/etc" -name "lighttpd.conf" 2>/dev/null | head -1)
+	[ -n "$CONFIGFILE" ] || CONFIGFILE=$(find "${PREFIX_PROJECT:?PREFIX_PROJECT not set!}/_fs/root-skel/etc" -name "lighttpd.conf" 2>/dev/null | head -1)
+	[ -n "$CONFIGFILE" ] || b_die "lighttpd: lighttpd.conf not found in rootfs or root-skel"
+	# Anchor on the quote, not on the bare string: a plain `grep mod_` also
+	# matches lines the operator COMMENTED OUT, and `cut -d'"' -f2` then
+	# happily extracts the name out of `#  "mod_auth",`. That silently
+	# compiled 13 plugins into the static table where lighttpd.conf enables
+	# 9 -- registering modules the config deliberately disabled.
+	grep -E '^[[:space:]]*"mod_' "$CONFIGFILE" | cut -d'"' -f2 | xargs -L1 -I{} echo "PLUGIN_INIT({})" >"$PREFIX_PORT_WORKDIR"/src/plugin-static.h
+
 	if [ ! -f "$PREFIX_PORT_WORKDIR/config.h" ]; then
-		# lighttpd.conf lists the enabled mod_* plugins, which drive the static
-		# plugin table (plugin-static.h). Prefer the staged rootfs copy, but fall
-		# back to the root-skel SOURCE: ports may run before the fs stage has
-		# populated $PREFIX_ROOTFS/etc (e.g. an incremental --with-ports), and the
-		# original hard find then aborted the whole ports build.
-		CONFIGFILE=$(find "${PREFIX_ROOTFS:-}/etc" -name "lighttpd.conf" 2>/dev/null | head -1)
-		[ -n "$CONFIGFILE" ] || CONFIGFILE=$(find "${PREFIX_PROJECT:?PREFIX_PROJECT not set!}/_fs/root-skel/etc" -name "lighttpd.conf" 2>/dev/null | head -1)
-		[ -n "$CONFIGFILE" ] || b_die "lighttpd: lighttpd.conf not found in rootfs or root-skel"
-		# Anchor on the quote, not on the bare string: a plain `grep mod_` also
-		# matches lines the operator COMMENTED OUT, and `cut -d'"' -f2` then
-		# happily extracts the name out of `#  "mod_auth",`. That silently
-		# compiled 13 plugins into the static table where lighttpd.conf enables
-		# 9 -- registering modules the config deliberately disabled.
-		grep -E '^[[:space:]]*"mod_' "$CONFIGFILE" | cut -d'"' -f2 | xargs -L1 -I{} echo "PLUGIN_INIT({})" >"$PREFIX_PORT_WORKDIR"/src/plugin-static.h
 
 		LIGHTTPD_CFLAGS="-DLIGHTTPD_STATIC -DPHOENIX"
 
