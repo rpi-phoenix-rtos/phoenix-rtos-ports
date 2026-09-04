@@ -59,12 +59,37 @@ p_build() {
 	# defines the four termios input flags IUCLC/IXANY/IMAXBEL/XCASE). -k is kept
 	# defensively so a future single-tool break still ships the rest; install is
 	# from src/ below (not `make install`, whose install-am wants the full `all`).
-	# Marker taken BEFORE make so the install loop below can tell "linked in this
-	# run" from "left over from a previous one". With `make -k ... || true` a broken
-	# tool does not fail the build, and the install loop takes every AArch64 ELF in
-	# src/, so on an incremental build after a partial failure stale binaries ship
-	# silently -- and 102 of them still satisfy the >= 100 count check.
-	touch "${PREFIX_PORT_WORKDIR}/.build-start"
+	#
+	# STALENESS, done by the ABI contract rather than by "was it relinked just now".
+	# An earlier version of this recipe touched a marker before make and installed
+	# only tools newer than it. That conflates two different things, and on
+	# 2026-09-04 it broke a build: an incremental pass where make had nothing to do
+	# relinked nothing, so ZERO tools were newer than the marker and the count check
+	# below killed the build with "only 0 tools built - build broke" although every
+	# tool was present and correct.
+	#
+	# A tool is stale iff it is OLDER THAN THE LIBC IT LINKS -- the same test
+	# scripts/check-no-stale-binaries.sh uses, and the one that matters (a binary
+	# linked against a previous libphoenix calls renumbered syscalls silently).
+	# coreutils' Makefile does not know about libphoenix.a, so a core rebuild leaves
+	# the tools untouched and older; delete those and let make relink them. Their
+	# objects are still current, so the relink is cheap, and afterwards everything in
+	# src/ is installable.
+	local libc_ref="${PREFIX_SYSROOT}/lib/libphoenix.a" dropped=0
+	if [ -f "${libc_ref}" ]; then
+		for f in "${PREFIX_PORT_WORKDIR}/src/"*; do
+			[ -f "${f}" ] || continue
+			case "${f}" in *.o | *.a | *.so | *.c | *.h | *.py | *.sh | *.x) continue ;; esac
+			"${CROSS}readelf" -h "${f}" 2>/dev/null | grep -q 'AArch64' || continue
+			if [ "${libc_ref}" -nt "${f}" ]; then
+				rm -f "${f}"
+				dropped=$((dropped + 1))
+			fi
+		done
+		[ "${dropped}" -eq 0 ] ||
+			echo "coreutils: dropped ${dropped} tool(s) older than libphoenix.a; relinking"
+	fi
+	rm -f "${PREFIX_PORT_WORKDIR}/.build-start"
 
 	make -k -C "${PREFIX_PORT_WORKDIR}" || true
 
@@ -75,7 +100,6 @@ p_build() {
 		[ -f "${f}" ] || continue
 		case "${f}" in *.o | *.a | *.so | *.c | *.h | *.py | *.sh | *.x) continue ;; esac
 		"${CROSS}readelf" -h "${f}" 2>/dev/null | grep -q 'AArch64' || continue
-		[ "${f}" -nt "${PREFIX_PORT_WORKDIR}/.build-start" ] || continue
 		name="$(basename "${f}")"
 		cp -a "${f}" "${PREFIX_PROG}/${name}"
 		${STRIP} -o "${PREFIX_PROG_STRIPPED}/${name}" "${PREFIX_PROG}/${name}"
