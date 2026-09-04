@@ -122,6 +122,23 @@ p_build() {
 	cp -v "${PREFIX_PORT_WORKDIR}/src/wmaker" "${PREFIX_FS}/root/bin/wmaker"
 	cp -v "${PREFIX_PORT_WORKDIR}/src/wmaker" "${PREFIX_PROG}"
 
+	# wmaker SHELLS OUT for the root background: src/misc.c:953 does
+	# execlp("wmsetbg", "wmsetbg", "-helper", ...). Shipping only the wmaker
+	# binary therefore left the root window PURE BLACK even though the seeded
+	# defaults below set `WorkspaceBack = (solid, "rgb:50/50/75")` -- and a
+	# desktop that is 99% black reads as "nothing is running": on 2026-09-04 a
+	# healthy GPU-accelerated session (Dock, workspace button and cursor all
+	# drawn) was reported as "black screen, no wmaker running". wdwrite is the
+	# other helper wmaker execs, to persist defaults changes.
+	for _wmutil in wmsetbg wdwrite; do
+		if [ -x "${PREFIX_PORT_WORKDIR}/util/${_wmutil}" ]; then
+			cp -v "${PREFIX_PORT_WORKDIR}/util/${_wmutil}" "${PREFIX_FS}/root/bin/${_wmutil}"
+			cp -v "${PREFIX_PORT_WORKDIR}/util/${_wmutil}" "${PREFIX_PROG}"
+		else
+			b_die "windowmaker: util/${_wmutil} was not built (wmaker needs it on PATH)"
+		fi
+	done
+
 	# Install + stage WindowMaker's RUNTIME DATA so the on-target wmaker finds its
 	# compiled DATADIR (/usr/share/WindowMaker + /usr/share/WINGs) and SYSCONFDIR
 	# (/etc/WindowMaker) — set via --prefix=/usr --sysconfdir=/etc above. Without
@@ -154,5 +171,6 @@ p_build() {
 				"${PREFIX_FS}/root/root/GNUstep/Defaults/${_wmdef}"
 	done
 	true
+
 	echo "windowmaker: staged /usr/share/{WindowMaker,WINGs} + /etc/WindowMaker into the rootfs"
 }
