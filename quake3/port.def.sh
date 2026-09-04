@@ -18,13 +18,13 @@
 	# are reproducible (same pattern as the yquake2 / quakespasm / llama2 ports). The
 	# archive's top-level directory is capital-Q "Quake3e-<sha>/". Bump `commit` +
 	# size/sha256 together if the pin moves.
-	commit="623982900a132e5c812dcb5231a430f28fafabeb"
+	commit="8dd27a54b7655803aaa1828f5e3f9c6d4052ef78"
 	source="https://github.com/ec-/quake3e/archive"
 	archive_filename="${commit}.tar.gz"
 	src_path="Quake3e-${commit}/"
 
-	size="18298807"
-	sha256="2c8d8fddb1dff42a0e3b51dcf013109fe8aacfec4c695716ebf3a47e216be288"
+	size="18308517"
+	sha256="7a5967ebb8bff2adeda9c4114aa702edae3bfac82a1488884496b90e25a5bfb1"
 
 	license="GPL-2.0-or-later"
 	license_file="COPYING.txt"

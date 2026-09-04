@@ -53,7 +53,7 @@ index e4c18640..c1621eba 100644
  
  #if defined (__FreeBSD__) || defined (__NetBSD__) || defined (__OpenBSD__)
 diff --git a/code/qcommon/vm_aarch64.c b/code/qcommon/vm_aarch64.c
-index c1ab375d..f7688f54 100644
+index 26e77e10..eed4a812 100644
 --- a/code/qcommon/vm_aarch64.c
 +++ b/code/qcommon/vm_aarch64.c
 @@ -2287,7 +2287,9 @@ __recompile:
