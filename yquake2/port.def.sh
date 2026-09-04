@@ -16,13 +16,13 @@
 	# 2026-08-01). GitHub serves the tree as a content-addressed commit-archive at
 	# /archive/<sha>.tar.gz, so the fetched bytes are reproducible (same pattern as
 	# the llama2 port). Bump `commit` + size/sha256 together if the pin moves.
-	commit="e27fdcceb47769463b53b6d6f2e4c2ee572178b2"
+	commit="a9e88f6c555b017812ae348572ce7a6bf5677479"
 	source="https://github.com/yquake2/yquake2/archive"
 	archive_filename="${commit}.tar.gz"
 	src_path="yquake2-${commit}/"
 
-	size="2730313"
-	sha256="e811f2b6b5659d401fbff3c22995ddb9827361e1b158cbd384fbccbfa4dd0106"
+	size="2735399"
+	sha256="0cfc23f1127698a2a498bd480b381703eac6664be47e98a525357bd9a6c1e5fd"
 
 	license="GPL-2.0-or-later"
 	license_file="LICENSE"
