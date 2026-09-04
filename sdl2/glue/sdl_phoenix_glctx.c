@@ -100,6 +100,36 @@ void phxgl_bind_fbo(void)
 		glBindFramebuffer(GL_FRAMEBUFFER, g_render_fbo);
 }
 
+/* Is one of OUR scanout FBOs the framebuffer currently bound for drawing?
+ *
+ * Needed because phxgl_bind_fbo() redirects the client's "default framebuffer 0"
+ * to a real USER FBO. Operations that GLES defines only for the winsys
+ * framebuffer therefore stop being no-ops and start acting on live attachments.
+ * The one that bit us is glInvalidateFramebuffer: yQuake2's GLES3 renderer calls
+ * it pre-swap with {GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT,
+ * GL_STENCIL_ATTACHMENT} (gl3_draw.c, GL3_EndFrame). On a windowed GLES driver
+ * those enums are invalid on the winsys FB, so the call is a hint that does
+ * nothing; against a user FBO they are valid, Mesa reaches
+ * v3d_invalidate_resource, and the still-unflushed job LOSES its colour tile
+ * store -- the page flip then shows a buffer the GPU never wrote. Measured
+ * 2026-09-04: 100% black every frame, game running, no GL error.
+ * See PHOENIX_glInvalidateFramebuffer in the SDL2 video driver. */
+int phxgl_scanout_fbo_bound(void);
+int phxgl_scanout_fbo_bound(void)
+{
+	GLint cur = 0;
+	int i;
+
+	if (!g_resolve)
+		return 0;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &cur);
+	for (i = 0; i < g_nbuf; i++) {
+		if (g_scanout_fbo[i] != 0 && (GLuint)cur == g_scanout_fbo[i])
+			return 1;
+	}
+	return 0;
+}
+
 /* Present the just-rendered back buffer by page-flipping the display to it, then advance to the
  * next back buffer for the following frame. Returns 1 if it presented (scanout path), 0 if not
  * active (CPU-present fallback handles it). The caller has already glFinish()ed, so the frame is

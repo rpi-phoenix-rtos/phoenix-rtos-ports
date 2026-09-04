@@ -83,6 +83,39 @@ static void PHOENIX_glBindFramebuffer(GLenum target, GLuint framebuffer)
     }
 }
 
+/* GL 4.3 / GLES 3.0 entry point; SDL_opengl.h declares only GL 1.1 + selected
+ * extensions, so name it here. Provided by libGL-phoenix.a (Mesa's GLAPI). */
+extern void glInvalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum *attachments);
+
+/* Winsys: is one of the scanout FBOs currently bound? (GL-context glue.) */
+extern int phxgl_scanout_fbo_bound(void);
+
+/* Invalidating the framebuffer we are about to PRESENT would throw the frame away.
+ *
+ * Because FB 0 is redirected to a real user FBO (see PHOENIX_glBindFramebuffer),
+ * a GLES client's pre-swap `glInvalidateFramebuffer(GL_FRAMEBUFFER, 3,
+ * {GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT})` -- a hint
+ * that does nothing on a windowed driver, since those enums are invalid on the
+ * winsys FB -- becomes a REAL discard here: Mesa reaches v3d_invalidate_resource
+ * and the unflushed job loses its colour tile store, so the page flip shows a
+ * buffer the GPU never wrote. yQuake2's gl3/GLES3 renderer does exactly this, and
+ * it rendered a 100% BLACK screen every frame with no GL error until this filter
+ * (measured 2026-09-04; quakespasm/quake3e on desktop GL never compile that call).
+ *
+ * Drop the whole call while a scanout FBO is bound, not just its colour half: the
+ * depth/stencil discard is the change that was measured as a V3D binner wedge
+ * (ports b3fd585 -- our three scanout FBOs share one depth renderbuffer). On any
+ * other framebuffer -- a client's own FBO -- pass it through: there it means what
+ * the client thinks it means, and it is only ever a performance hint. */
+static void PHOENIX_glInvalidateFramebuffer(GLenum target, GLsizei numAttachments,
+                                            const GLenum *attachments)
+{
+    if (phxgl_scanout_fbo_bound()) {
+        return;
+    }
+    glInvalidateFramebuffer(target, numAttachments, attachments);
+}
+
 static const PHOENIX_GLProc phoenix_gl_procs[] = {
     /* --- GL 1.1 core --- */
     { "glClear", (void *)glClear },
@@ -199,6 +232,8 @@ static const PHOENIX_GLProc phoenix_gl_procs[] = {
     { "glFramebufferTexture2D", (void *)glFramebufferTexture2D },
     { "glCheckFramebufferStatus", (void *)glCheckFramebufferStatus },
     { "glBlitFramebuffer", (void *)glBlitFramebuffer },
+    /* maps away a pre-swap discard of the buffer we are about to flip */
+    { "glInvalidateFramebuffer", (void *)PHOENIX_glInvalidateFramebuffer },
     { "glGenerateMipmap", (void *)glGenerateMipmap },
     { "glGetFramebufferAttachmentParameteriv", (void *)glGetFramebufferAttachmentParameteriv },
     { "glGetRenderbufferParameteriv", (void *)glGetRenderbufferParameteriv },
