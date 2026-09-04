@@ -137,5 +137,25 @@ p_build() {
 	cp -a "$stage/usr/share/WindowMaker" "${PREFIX_FS}/root/usr/share/"
 	cp -a "$stage/usr/share/WINGs"       "${PREFIX_FS}/root/usr/share/"
 	cp -a "$stage/etc/WindowMaker"       "${PREFIX_FS}/root/etc/"
+
+	# Seed the per-user config that wmaker.inst would normally create.
+	#
+	# Window Maker refuses to come up without $HOME/GNUstep/Defaults: it warns
+	# "could not find user GNUstep directory (/root/GNUstep/Defaults/WindowMaker)",
+	# tries to run `wmaker.inst` to build it, gets "sh: wmaker.inst: not found"
+	# (the installer script is not shipped), and then never draws a desktop -- the X
+	# server takes over the screen and it stays black. Diagnosed on 2026-09-04 once
+	# startx's own diagnostics were visible.
+	#
+	# wmaker.inst just copies the system defaults into the user's tree, so do that
+	# here at build time instead of shipping a shell installer and running it on the
+	# target. HOME is /root (startx sets it), hence /root/GNUstep.
+	mkdir -p "${PREFIX_FS}/root/root/GNUstep/Defaults"
+	for _wmdef in WindowMaker WMRootMenu WMState WMWindowAttributes; do
+		[ -f "$stage/etc/WindowMaker/${_wmdef}" ] &&
+			cp -a "$stage/etc/WindowMaker/${_wmdef}" \
+				"${PREFIX_FS}/root/root/GNUstep/Defaults/${_wmdef}"
+	done
+	true
 	echo "windowmaker: staged /usr/share/{WindowMaker,WINGs} + /etc/WindowMaker into the rootfs"
 }
