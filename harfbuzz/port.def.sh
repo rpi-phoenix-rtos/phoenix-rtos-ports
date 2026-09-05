@@ -5,7 +5,7 @@
 	ports_api=1
 
 	name="harfbuzz"
-	version="2.6.7"
+	version="14.4.0"
 	desc="HarfBuzz text-shaping engine (static, freetype backend) — SuperTuxKart"
 	cpe23="cpe:2.3:a:harfbuzz:harfbuzz:${version}:*:*:*:*:*:*:*"
 
@@ -13,8 +13,8 @@
 	archive_filename="${name}-${version}.tar.xz"
 	src_path="${name}-${version}/"
 
-	size="9001936"
-	sha256="49e481d06cdff97bf68d99fa26bdf785331f411614485d892ea4c78eb479b218"
+	size="20107692"
+	sha256="2357ed966c6ced7bfa720b0640c0231065af01158fbea215093ffa15aed44371"
 
 	license="MIT"
 	license_file="COPYING"
@@ -30,8 +30,9 @@
 }
 
 p_prepare() {
-	# No patches. This is the same 2.6.7 release that tools/x11-port cross-builds
-	# via autotools; here we drive its CMake build instead (cleaner, no libtool).
+	# No patches. Upstream dropped autotools at 3.0, so CMake -- which this port
+	# already drove -- is now the only build system, and the 2.6.7 pin (kept only
+	# for parity with the old tools/x11-port autotools script) had no reason left.
 	# harfbuzz sets its own -fno-rtti -fno-exceptions -fno-threadsafe-statics for
 	# GNU and ships an amalgam C++ source, so no config header generation is
 	# needed; the check_funcs/check_cxx probes are cross-safe compile tests.
@@ -48,7 +49,8 @@ p_build() {
 	# Minimal shaping build for STK: freetype backend ON (STK's font manager is
 	# expected to use the hb-ft glyph bridge, hb_ft_font_create*), glib/icu/cairo
 	# OFF (harfbuzz's own unicode funcs suffice; STK uses harfbuzz standalone),
-	# subset lib OFF (STK does not need it). find_package(Freetype) is pinned via
+	# subset lib OFF (STK does not need it), and the raster/vector/GPU libraries
+	# 14.x adds -- all default ON, none of them wanted for shaping alone. find_package(Freetype) is pinned via
 	# its FindFreetype cache vars (FREETYPE_LIBRARY + the two include-dir vars)
 	# straight at the xorg_fonts-provided freetype in ${PORT_DEP_xorg_fonts};
 	# pinning them kills the Generic-mode fallthrough to a host /usr freetype.
@@ -75,6 +77,9 @@ p_build() {
 			-DHB_HAVE_GRAPHITE2=OFF \
 			-DHB_BUILD_SUBSET=OFF \
 			-DHB_BUILD_UTILS=OFF \
+			-DHB_BUILD_RASTER=OFF \
+			-DHB_BUILD_VECTOR=OFF \
+			-DHB_BUILD_GPU=OFF \
 			-DFREETYPE_LIBRARY="${ftroot}/lib/libfreetype.a" \
 			-DFREETYPE_INCLUDE_DIR_ft2build="${ftroot}/include/freetype2" \
 			-DFREETYPE_INCLUDE_DIR_freetype2="${ftroot}/include/freetype2" \
