@@ -5,11 +5,11 @@
 	ports_api=1
 
 	name="xorg_server"
-	version="1.20.14"
+	version="21.1.24"
 	desc="X.Org kdrive fbdev server (Xphoenix) for Phoenix-RTOS"
 
 	# Aggregate LAYER-3 port of the hybrid X11 migration. Builds the xorg-server
-	# 1.20.14 kdrive CORE archives, then hand-ld-links the Phoenix fbdev DDX
+	# kdrive CORE archives, then hand-ld-links the Phoenix fbdev DDX
 	# (Xphoenix) from them + the X libs staged by xorg-libs (L1) + xorg-fonts (L2).
 	# The DDX backend, the XKB compiled-in keymap, and libmd (SHA1) are carried in
 	# files/ (source-of-truth, migrated from tools/x11-port). This is the CURRENT
@@ -17,13 +17,13 @@
 	# path is the future goal G-XORG-MODERN. Recipe validated end-to-end
 	# (XPHOENIX-LINK-OK). See docs/inprogress/x11-ports-migration-spec.md + MASTER
 	# plan §J.
-	# artfiles.org mirror (x.org's own CDN xorg.freedesktop.org is frequently
-	# slow/unreachable); the byte-identical release, sha256-verified below.
-	source="https://artfiles.org/x.org/pub/xorg/individual/xserver/"
-	archive_filename="xorg-server-${version}.tar.gz"
+	# x.org's own release directory: the artfiles.org mirror this port used stops
+	# at 21.1.9 (checked 2026-09-05), and www.x.org served this tarball fine.
+	source="https://www.x.org/releases/individual/xserver/"
+	archive_filename="xorg-server-${version}.tar.xz"
 	src_path="xorg-server-${version}/"
-	size="9416754"
-	sha256="54b199c9280ff8bf0f73a54a759645bd0eeeda7255d1c99310d5b7595f3ac066"
+	size="5072780"
+	sha256="1a4eb36ca65cc3b1b936566d677a9786e13c11cd5806e951ac55f3f5ce3984af"
 
 	license="MIT"
 	license_file="COPYING"
@@ -79,9 +79,9 @@ p_build() {
 		     ./configure --host="$XHOST" --prefix="$PREFIX" \
 		       --enable-kdrive --disable-xephyr --with-sha1=libmd \
 		       --with-default-font-path=/usr/share/fonts/X11/misc,/usr/share/fonts/X11/75dpi \
-		       --disable-xorg --disable-xwayland --disable-xnest --disable-xvfb --disable-dmx \
+		       --disable-xorg --disable-xnest --disable-xvfb \
 		       --disable-glamor --disable-dri --disable-dri2 --disable-dri3 --disable-glx \
-		       --disable-int10-module --disable-vgahw --disable-vbe --disable-xdmcp \
+		       --disable-int10-module --disable-vgahw --disable-xdmcp \
 		       --disable-xinerama --without-dtrace --disable-systemd-logind --disable-secure-rpc \
 		       --disable-config-udev --disable-config-hal --without-systemd-daemon --disable-unit-tests \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
