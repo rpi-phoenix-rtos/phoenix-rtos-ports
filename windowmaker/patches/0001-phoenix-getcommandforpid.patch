@@ -1,0 +1,103 @@
+Implement GetCommandForPid() on Phoenix-RTOS.
+
+WindowMaker records a window's launch command so the Dock and the session can
+relaunch the application; without an osdep implementation it falls back to
+src/osdep_stub.c, which prints
+
+  wmaker: GetCommandForPid is not implemented on this platform; tell
+  wmaker-dev@googlegroups.com you are running Phoenix-RTOS ...
+
+on every session start and drops the feature.
+
+Phoenix has neither /proc (the Linux path) nor kvm/sysctl (the BSD path), but
+the kernel publishes a per-thread table through threadsinfo(), whose `name`
+field is the program the process was started from. That is enough for what the
+caller does with it, so report it as a single-element argv. The string lives in
+a static buffer, matching the ownership contract of the Linux implementation.
+
+Upstream-inclinable as a small osdep addition; kept as a port patch because it
+depends on <sys/threads.h>.
+
+--- a/src/osdep_stub.c	2026-09-05 06:20:28.339461639 +0200
++++ b/src/osdep_stub.c	2026-09-05 06:20:28.350077910 +0200
+@@ -6,6 +6,74 @@
+ #include "wconfig.h"
+ #include "osdep.h"
+ 
++#ifdef __phoenix__
++
++#include <stdlib.h>
++#include <string.h>
++#include <sys/threads.h>
++
++/*
++ * Phoenix-RTOS has neither /proc nor a sysctl to read another process's
++ * arguments, but the kernel publishes a per-thread table through threadsinfo(),
++ * and its `name` field is the program the process was started from. Window Maker
++ * only needs this to remember how to relaunch a window's application, so report
++ * that name as a single-element argv.
++ *
++ * Ownership matches the Linux implementation: the string lives in a static
++ * buffer owned here and is overwritten by the next call; only the vector is
++ * allocated.
++ */
++Bool GetCommandForPid(int pid, char ***argv, int *argc)
++{
++	static char buf[sizeof(((threadinfo_t *)0)->name)];
++	threadinfo_t *info, *rinfo;
++	int n = 32, cnt, i;
++
++	*argv = NULL;
++	*argc = 0;
++
++	info = malloc(n * sizeof(*info));
++	if (info == NULL)
++		return False;
++
++	while ((cnt = threadsinfo(n, info)) >= n) {
++		n *= 2;
++		rinfo = realloc(info, n * sizeof(*info));
++		if (rinfo == NULL) {
++			free(info);
++			return False;
++		}
++		info = rinfo;
++	}
++
++	if (cnt < 0) {
++		free(info);
++		return False;
++	}
++
++	for (i = 0; i < cnt; i++) {
++		if (info[i].pid != (pid_t)pid)
++			continue;
++
++		strncpy(buf, info[i].name, sizeof(buf) - 1);
++		buf[sizeof(buf) - 1] = '\0';
++		if (buf[0] == '\0')
++			break;
++
++		free(info);
++		*argv = (char **)wmalloc(sizeof(char *) * 2);
++		(*argv)[0] = buf;
++		(*argv)[1] = NULL;
++		*argc = 1;
++		return True;
++	}
++
++	free(info);
++	return False;
++}
++
++#else
++
+ Bool GetCommandForPid(int pid, char ***argv, int *argc)
+ {
+ 	static int notified = 0;
+@@ -34,3 +102,5 @@
+ 
+ 	return False;
+ }
++
++#endif /* __phoenix__ */
