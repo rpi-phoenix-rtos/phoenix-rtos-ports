@@ -251,5 +251,77 @@ p_build() {
 		echo "xorg-fonts: cairo-1.16.0 OK"
 	fi
 
+	# --- X11 CORE FONT DATA (noarch) ------------------------------------------
+	#
+	# Until 2026-09-05 the rootfs shipped NO X11 font files at all: this port
+	# builds the font LIBRARIES (freetype, fontconfig, libXft, libfontenc), and
+	# nothing installed font DATA. The desktop still rendered text, but only from
+	# libXfont2's built-in `fixed` compiled into Xphoenix -- i.e. the whole X
+	# server had exactly one font. Measured the same day: adding a fontconfig
+	# config alone changed nothing, because the clients take the CORE-font path,
+	# so what is missing is PCFs plus a fonts.dir, not a config.
+	#
+	# These two packages are ARCHITECTURE-INDEPENDENT data. They are built with
+	# the HOST toolchain on purpose (no --host): the build runs bdftopcf and
+	# mkfontdir/mkfontscale, which must execute here, and everything installed is
+	# .pcf.gz / .dir / .alias text consumed by the target at runtime.
+	local FONTSTAGE="$PREFIX_PORT_BUILD/fontdata"
+	if [ ! -f "$FONTSTAGE/usr/share/fonts/X11/misc/fonts.dir" ]; then
+		command -v bdftopcf >/dev/null 2>&1 ||
+			b_die "xorg-fonts: host 'bdftopcf' missing (X core fonts) — apt-get install xfonts-utils"
+		command -v mkfontdir >/dev/null 2>&1 ||
+			b_die "xorg-fonts: host 'mkfontdir' missing (X core fonts) — apt-get install xfonts-utils"
+
+		# encodings/: the .enc maps the server's font path already references
+		# (Xphoenix looks for .../fonts/X11/encodings/encodings.dir).
+		_fetch_extract encodings-1.0.7 "$XBASE/font/encodings-1.0.7.tar.gz"
+		( cd "$SRC/encodings-1.0.7" \
+		  && ./configure --prefix=/usr --with-fontrootdir=/usr/share/fonts/X11 \
+		  && make && make install DESTDIR="$FONTSTAGE" ) || b_die "xorg-fonts: encodings failed"
+
+		# misc-fixed: the classic X core bitmap family (6x13, 9x15, 10x20, ...),
+		# which is what an X client asking for "fixed" or a plain XLFD gets.
+		_fetch_extract font-misc-misc-1.1.3 "$XBASE/font/font-misc-misc-1.1.3.tar.gz"
+		( cd "$SRC/font-misc-misc-1.1.3" \
+		  && ./configure --prefix=/usr --with-fontrootdir=/usr/share/fonts/X11 \
+		  && make && make install DESTDIR="$FONTSTAGE" ) || b_die "xorg-fonts: font-misc-misc failed"
+
+		# font-alias: the fonts.alias files that map SHORT names to XLFDs. Without
+		# them the Xt apps fail with `Cannot convert string "8x13" to type
+		# FontStruct` even though 8x13.pcf.gz is installed -- the PCFs answer a
+		# full XLFD, the aliases answer the names applications actually ask for
+		# (fixed, 8x13, 9x15, ...). Measured on hardware 2026-09-05.
+		_fetch_extract font-alias-1.0.5 "$XBASE/font/font-alias-1.0.5.tar.gz"
+		( cd "$SRC/font-alias-1.0.5" \
+		  && ./configure --prefix=/usr --with-fontrootdir=/usr/share/fonts/X11 \
+		  && make && make install DESTDIR="$FONTSTAGE" ) || b_die "xorg-fonts: font-alias failed"
+
+		# adobe-75dpi: the -adobe-* XLFDs the Xaw/Xt widgets request by name --
+		# xcalc asks for "-adobe-symbol-*-*-*-*-*-120-*" and rendered nothing
+		# without it. Also gives Helvetica/Times/Courier at 75dpi for xterm, xedit
+		# and the rest of the app set.
+		# cursor-misc: the "cursor" font. Every X client that calls
+		# XCreateFontCursor (the WM for its root/resize cursors, xterm, ...) opens
+		# it by name, and it lives in its own package -- font-misc-misc does NOT
+		# contain it. Before this, the port's misc/ replaced the host-staged one
+		# and silently dropped cursor.pcf.gz, leaving a font path with no cursor
+		# font at all.
+		_fetch_extract font-cursor-misc-1.0.4 "$XBASE/font/font-cursor-misc-1.0.4.tar.gz"
+		( cd "$SRC/font-cursor-misc-1.0.4" \
+		  && ./configure --prefix=/usr --with-fontrootdir=/usr/share/fonts/X11 \
+		  && make && make install DESTDIR="$FONTSTAGE" ) || b_die "xorg-fonts: font-cursor-misc failed"
+
+		_fetch_extract font-adobe-75dpi-1.0.4 "$XBASE/font/font-adobe-75dpi-1.0.4.tar.gz"
+		( cd "$SRC/font-adobe-75dpi-1.0.4" \
+		  && ./configure --prefix=/usr --with-fontrootdir=/usr/share/fonts/X11 \
+		  && make && make install DESTDIR="$FONTSTAGE" ) || b_die "xorg-fonts: font-adobe-75dpi failed"
+	fi
+
+	if [ -d "$FONTSTAGE/usr/share/fonts/X11" ]; then
+		mkdir -p "${PREFIX_FS}/root/usr/share/fonts"
+		cp -a "$FONTSTAGE/usr/share/fonts/X11" "${PREFIX_FS}/root/usr/share/fonts/"
+		echo "xorg-fonts: staged X11 core fonts -> /usr/share/fonts/X11 ($(find "$FONTSTAGE/usr/share/fonts/X11" -name '*.pcf.gz' | wc -l) pcf, $(du -sh "$FONTSTAGE/usr/share/fonts/X11" | cut -f1))"
+	fi
+
 	echo "xorg-fonts: LAYER 2 (glib-free tier) complete -> $PREFIX/{lib,include}"
 }

@@ -78,7 +78,7 @@ p_build() {
 		     PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig" \
 		     ./configure --host="$XHOST" --prefix="$PREFIX" \
 		       --enable-kdrive --disable-xephyr --with-sha1=libmd \
-		       --with-default-font-path=/usr/share/fonts/X11/misc \
+		       --with-default-font-path=/usr/share/fonts/X11/misc,/usr/share/fonts/X11/75dpi \
 		       --disable-xorg --disable-xwayland --disable-xnest --disable-xvfb --disable-dmx \
 		       --disable-glamor --disable-dri --disable-dri2 --disable-dri3 --disable-glx \
 		       --disable-int10-module --disable-vgahw --disable-vbe --disable-xdmcp \
