@@ -133,7 +133,9 @@ p_build() {
 				LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" $extra \
 				|| b_die "xorg-libs: $nv configure failed"
 		fi
-		make install || b_die "xorg-libs: $nv build failed"
+		# shellcheck disable=2086 -- XMAKE_VARS holds make variable overrides, one
+		# word each, and must stay unquoted so make parses them as assignments.
+		make install ${XMAKE_VARS:-} || b_die "xorg-libs: $nv build failed"
 		echo "xorg-libs: $nv OK"
 	}
 	# _hostbuild <name-version> <url>  (native host tool, e.g. xcb-proto python codegen)
@@ -200,7 +202,13 @@ p_build() {
 		_xbuild libSM-1.2.4  "$XBASE/lib/libSM-1.2.4.tar.gz"  "xorg_cv_malloc0_returns_null=no --without-libuuid"
 	XCFLAGS_EXTRA="$PWD_DEFS" \
 		_xbuild libXt-1.3.1  "$XBASE/lib/libXt-1.3.1.tar.gz"  "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes"
+	# BITMAP_DEFINES override: libXmu bakes -DBITMAPDIR="$(includedir)/X11/bitmaps"
+	# into the library, and includedir is the HOST buildroot prefix -- a path that
+	# does not exist on the Pi, so XmuLocateBitmapFile never finds a pixmap and
+	# xlogo/xcalc warn `Cannot convert string "xlogo32" to type Pixmap`. Point it at
+	# the target path where the xbitmaps data above is staged (measured 2026-09-05).
 	XCFLAGS_EXTRA="$PWD_DEFS" \
+	XMAKE_VARS='BITMAP_DEFINES=-DBITMAPDIR=\"/usr/include/X11/bitmaps\"' \
 		_xbuild libXmu-1.2.1 "$XBASE/lib/libXmu-1.2.1.tar.gz" "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes"
 
 	# libXpm (lib-only: sxpm/cxpm tools need getpwuid_r)
@@ -224,6 +232,45 @@ p_build() {
 		       CFLAGS="--sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 $PWD_DEFS" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make install ) || b_die "xorg-libs: libXaw build failed"
 		[ -f "$PREFIX/lib/libXaw7.a" ] && echo "xorg-libs: libXaw-1.0.16 OK" || b_die "xorg-libs: libXaw did not install"
+	fi
+
+	# ---- runtime DATA the libraries need on the target ----
+	#
+	# Both of these are installed by the packages above into $PREFIX, and both are
+	# read at RUNTIME by path — so a rootfs with the libraries but without them
+	# produces warnings that look like missing fonts:
+	#
+	#   Warning: locale not supported by Xlib, locale set to C
+	#   Warning: X locale modifiers not supported, using default
+	#   Warning: Unable to load any usable fontset
+	#
+	# all three from libX11 failing to find its XLC database (XLOCALEDIR, which the
+	# launcher points at /usr/share/X11/locale). Measured on hardware 2026-09-05.
+	if [ -f "$PREFIX/share/X11/locale/locale.dir" ]; then
+		mkdir -p "${PREFIX_FS}/root/usr/share/X11"
+		# rm first: `cp -a src dst` with dst present NESTS as dst/locale/locale.
+		rm -rf "${PREFIX_FS}/root/usr/share/X11/locale"
+		cp -a "$PREFIX/share/X11/locale" "${PREFIX_FS}/root/usr/share/X11/locale"
+		echo "xorg-libs: staged XLC locale DB -> /usr/share/X11/locale ($(du -sh "$PREFIX/share/X11/locale" | cut -f1))"
+	else
+		echo "xorg-libs: WARN no XLC locale DB in $PREFIX/share/X11 — Xlib will fall back to C"
+	fi
+
+	# xbitmaps: the .xbm pixmaps Xt/Xmu apps load BY NAME at runtime through
+	# XmuLocateBitmapFile, which searches /usr/include/X11/bitmaps. Without them
+	# xlogo and xcalc warn `Cannot convert string "xlogo32"/"calculator" to type
+	# Pixmap` and run without their icon. Architecture-independent data.
+	if [ ! -f "$PREFIX/include/X11/bitmaps/xlogo32" ]; then
+		_fetch_extract xbitmaps-1.1.3 "$XARCHIVE/data/xbitmaps-1.1.3.tar.gz"
+		( cd "$SRC/xbitmaps-1.1.3" \
+		  && ./configure --prefix="$PREFIX" \
+		  && make install ) || b_die "xorg-libs: xbitmaps build failed"
+	fi
+	if [ -d "$PREFIX/include/X11/bitmaps" ]; then
+		mkdir -p "${PREFIX_FS}/root/usr/include/X11"
+		rm -rf "${PREFIX_FS}/root/usr/include/X11/bitmaps"
+		cp -a "$PREFIX/include/X11/bitmaps" "${PREFIX_FS}/root/usr/include/X11/bitmaps"
+		echo "xorg-libs: staged xbitmaps -> /usr/include/X11/bitmaps ($(ls -1 "$PREFIX/include/X11/bitmaps" | wc -l | tr -d ' ') pixmaps)"
 	fi
 
 	echo "xorg-libs: LAYER 1 complete (staged into $PREFIX/{lib,include})"
