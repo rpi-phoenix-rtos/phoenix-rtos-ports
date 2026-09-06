@@ -36,8 +36,16 @@ p_prepare() {
 	# --with-zlib: HTTP gzip/deflate content-encoding decode (Accept-Encoding).
 	# libz.a + zlib.h come from the framework zlib port in the shared sysroot,
 	# which the port CFLAGS (-I$PREFIX_H) / LDFLAGS (-L$PREFIX_A) already reference.
+	#
+	# --with-ca-bundle: curl's configure only PROBES the build host for a CA
+	# bundle when it is not cross-compiling, so a cross build silently ends up
+	# with CURL_CA_BUNDLE undefined (verified: lib/curl_config.h carried
+	# `/* #undef CURL_CA_BUNDLE */`) and every https:// transfer failed to verify
+	# with no default trust store at all. Point it at the path the ca_certificates
+	# port installs, which is also dillo's first-choice bundle.
 	CONFIGURE_PARAMS=(--host="${HOST}" --sbindir="$PREFIX_PROG" --disable-pthreads --disable-threaded-resolver
-		--disable-ipv6 --prefix="$PREFIX_CURL_INSTALL" --disable-ntlm-wb --with-zlib)
+		--disable-ipv6 --prefix="$PREFIX_CURL_INSTALL" --disable-ntlm-wb --with-zlib
+		--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt)
 
 	b_use "mbedtls" && CONFIGURE_PARAMS+=(--without-ssl --with-mbedtls)
 
