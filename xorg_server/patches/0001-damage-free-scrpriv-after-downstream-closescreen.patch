@@ -1,0 +1,47 @@
+damage: free the screen private after the downstream CloseScreen, not before
+
+damageCloseScreen() freed its screen private and then called the
+downstream CloseScreen, but layers wrapped BELOW damage still call back
+into it while they close. In particular the software cursor's
+miSpriteCloseScreen (mi/misprite.c) calls DamageUnregister, which does
+damageScrPriv(pScreen) and dereferences that freed allocation.
+
+On the Pi 4 glamor server this crashed every time the desktop session was
+closed: exiting the window manager ran xlaunch's teardown, and
+Xphoenix-glamor-daemon took a Data Abort reading at 0x60 -- x0, the
+privates address handed to dixGetPrivate, was &((base)NULL)->devPrivates,
+with the caller chain DamageUnregister -> dixLookupPrivate ->
+dixGetPrivate.
+
+Defer the free until the downstream chain has finished unwinding. Nothing
+else in this function depends on the private after the unwraps, so the
+ordering change is confined to the lifetime of the allocation itself.
+
+--- a/miext/damage/damage.c
++++ b/miext/damage/damage.c
+@@ -1595,14 +1595,24 @@
+ static Bool
+ damageCloseScreen(ScreenPtr pScreen)
+ {
++    Bool ret;
++
+     damageScrPriv(pScreen);
+ 
+     unwrap(pScrPriv, pScreen, DestroyPixmap);
+     unwrap(pScrPriv, pScreen, CreateGC);
+     unwrap(pScrPriv, pScreen, CopyWindow);
+     unwrap(pScrPriv, pScreen, CloseScreen);
++
++    /* Free the screen private only AFTER the downstream CloseScreen returns.
++     * Layers wrapped below damage still call back into it while they close: the
++     * software cursor's miSpriteCloseScreen calls DamageUnregister (mi/misprite.c),
++     * which does damageScrPriv(pScreen) and dereferences this very allocation.
++     * Freeing it first left that a use-after-free. */
++    ret = (*pScreen->CloseScreen) (pScreen);
+     free(pScrPriv);
+-    return (*pScreen->CloseScreen) (pScreen);
++
++    return ret;
+ }
+ 
+ /**
