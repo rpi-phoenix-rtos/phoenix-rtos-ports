@@ -1,0 +1,49 @@
+Move MusicOggStream's 44 KiB PCM staging buffer off the stack.
+
+streamIntoBuffer() declared `char pcm[m_buffer_size]` with m_buffer_size =
+11025*4 = 44100, i.e. a 44 KiB stack frame. It runs on the SFX thread, which
+SFXManager creates through std::thread and therefore with a NULL pthread
+attr, so it gets libphoenix's default stack: 4096 bytes
+(ALIGN(PTHREAD_STACK_MIN, PAGE_SIZE)) with guardsize 0, hence no guard page.
+
+ov_read then filled 44100 bytes upward starting ~40 KiB below the thread's
+own stack region, silently overwriting whatever was mapped there.
+
+Proven by byte-exact match, not inferred: a kernel dump of the faulting
+stack was located verbatim in decoded menutheme.ogg PCM, and two separate
+crashes' corrupted return addresses sat exactly 44100 bytes apart in that
+stream -- the same intra-chunk offset in consecutive streamIntoBuffer()
+calls, which is why the faulting address was reproducible across runs.
+
+Depending on what the excursion landed on this surfaced either as a jump to
+a garbage address (a neighbouring thread's saved LR, a different victim
+thread each run) or as a fault inside malloc (a smashed chunk header) -- two
+symptoms of one overflow.
+
+--- a/src/audio/music_ogg.cpp
++++ b/src/audio/music_ogg.cpp
+@@ -20,6 +20,8 @@
+ 
+ #include "audio/music_ogg.hpp"
+ 
++#include <vector>
++
+ #include <stdexcept>
+ 
+ #include "audio/music_manager.hpp"
+@@ -326,7 +328,14 @@
+ //-----------------------------------------------------------------------------
+ bool MusicOggStream::streamIntoBuffer(ALuint buffer)
+ {
+-    char pcm[m_buffer_size];
++    /* Phoenix: heap, not stack. m_buffer_size is 44,100 bytes and this runs on
++     * the SFX thread, which SFXManager creates via std::thread -- so with a NULL
++     * pthread attr, giving it libphoenix's default 4 KiB stack and guardsize 0
++     * (no guard page). ov_read below then wrote 44 KiB from ~40 KiB past the
++     * thread's own stack, silently corrupting neighbouring thread stacks and
++     * heap chunks. */
++    std::vector<char> pcmBuf(m_buffer_size);
++    char *const pcm = pcmBuf.data();
+     const int isBigEndian = (IS_LITTLE_ENDIAN ? 0 : 1);
+ 
+     int  size = 0;

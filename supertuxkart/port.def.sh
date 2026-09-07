@@ -41,7 +41,8 @@
 p_prepare() {
 	# Portability patches. 0001-0003 are M2 configure fallout (Generic/cmake-4);
 	# 0004-0010 are M3 build fallout (libc/libstdc++ gaps on the compile surface).
-	# None change renderer behaviour.
+	# None change renderer behaviour. 0011 is a real bug fix: a 44 KiB PCM buffer
+	# on a 4 KiB thread stack (see the patch header for the byte-exact proof).
 	#  0001 FindFreetype.cmake — its non-Win/Apple/SunOS branch calls
 	#       pkg_check_modules(freetype2), but under CMAKE_SYSTEM_NAME=Generic the
 	#       UNIX-gated include(FindPkgConfig) never ran, so that command is
