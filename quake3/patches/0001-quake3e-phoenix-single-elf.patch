@@ -329,3 +329,48 @@ index 76f1160f..ee88bdf0 100644
  	qglGetIntegerv(GL_PACK_ALIGNMENT, &packAlign);
  
  	linelen = cmd->width * 3;
+diff --git a/code/renderer/tr_shade.c b/code/renderer/tr_shade.c
+index 67a9cb0b..0c7d6330 100644
+--- a/code/renderer/tr_shade.c
++++ b/code/renderer/tr_shade.c
+@@ -304,6 +304,40 @@ static void DrawMultitextured( const shaderCommands_t *input, int stage ) {
+ 		GL_TexEnv( pStage->mtEnv );
+ 	}
+ 
++	/* TEMPORARY (Phoenix bug #3 triage): read the REAL GL state back and compare it
++	 * with glState's cache at the point a world surface is drawn.  Six A/Bs narrowed
++	 * the black-world bug to the two-texture combine, but every static hypothesis has
++	 * been eliminated -- so ask the driver what it actually has instead of guessing.
++	 * NOTE: glGetTexEnviv is not exposed by our GL, so the combine MODE cannot be read
++	 * back; bindings and enables can, and "unit 1 not bound" alone would explain black.
++	 * Printed rarely: the UART is the bottleneck. */
++	{
++		static int phx_diagCount = 0;
++
++		if ( ( phx_diagCount++ % 600 ) == 0 ) {
++			GLint act = -1, bind0 = -1, bind1 = -1;
++			GLboolean en0 = 0, en1 = 0;
++
++			qglGetIntegerv( GL_ACTIVE_TEXTURE_ARB, &act );
++			qglActiveTextureARB( GL_TEXTURE0_ARB );
++			qglGetIntegerv( GL_TEXTURE_BINDING_2D, &bind0 );
++			qglGetBooleanv( GL_TEXTURE_2D, &en0 );
++			qglActiveTextureARB( GL_TEXTURE1_ARB );
++			qglGetIntegerv( GL_TEXTURE_BINDING_2D, &bind1 );
++			qglGetBooleanv( GL_TEXTURE_2D, &en1 );
++			qglActiveTextureARB( GL_TEXTURE0_ARB + glState.currenttmu );
++
++			ri.Printf( PRINT_ALL, "PHXDIAG n=%i act=0x%x tmu=%i | GL bind0=%i bind1=%i "
++					"en0=%i en1=%i | cache tex0=%i tex1=%i env0=0x%x env1=0x%x | "
++					"mtEnv=0x%x arraysOnce=%i passes=%i\n",
++					phx_diagCount - 1, (unsigned)act, glState.currenttmu,
++					(int)bind0, (int)bind1, (int)en0, (int)en1,
++					glState.currenttextures[0], glState.currenttextures[1],
++					(unsigned)glState.texEnv[0], (unsigned)glState.texEnv[1],
++					(unsigned)pStage->mtEnv, setArraysOnce, tess.numPasses );
++		}
++	}
++
+ 	R_DrawElements( input->numIndexes, input->indexes );
+ 
+ 	//
