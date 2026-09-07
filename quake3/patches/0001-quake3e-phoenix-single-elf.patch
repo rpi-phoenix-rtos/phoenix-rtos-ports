@@ -330,10 +330,10 @@ index 76f1160f..ee88bdf0 100644
  
  	linelen = cmd->width * 3;
 diff --git a/code/renderer/tr_shade.c b/code/renderer/tr_shade.c
-index 67a9cb0b..0c7d6330 100644
+index 67a9cb0b..10066335 100644
 --- a/code/renderer/tr_shade.c
 +++ b/code/renderer/tr_shade.c
-@@ -304,6 +304,40 @@ static void DrawMultitextured( const shaderCommands_t *input, int stage ) {
+@@ -304,6 +304,48 @@ static void DrawMultitextured( const shaderCommands_t *input, int stage ) {
  		GL_TexEnv( pStage->mtEnv );
  	}
  
@@ -348,23 +348,31 @@ index 67a9cb0b..0c7d6330 100644
 +		static int phx_diagCount = 0;
 +
 +		if ( ( phx_diagCount++ % 600 ) == 0 ) {
-+			GLint act = -1, bind0 = -1, bind1 = -1;
++			/* glGetTexEnviv is absent from Phoenix's SDL proc table, so it has no
++			 * qgl pointer -- but libGL-phoenix.a does export it and this engine is
++			 * a single static ELF, so call it directly.  Reading the combine MODE
++			 * the driver actually holds is the one measurement still missing. */
++			extern void glGetTexEnviv( GLenum target, GLenum pname, GLint *params );
++			GLint act = -1, bind0 = -1, bind1 = -1, env0r = -1, env1r = -1;
 +			GLboolean en0 = 0, en1 = 0;
 +
 +			qglGetIntegerv( GL_ACTIVE_TEXTURE_ARB, &act );
 +			qglActiveTextureARB( GL_TEXTURE0_ARB );
 +			qglGetIntegerv( GL_TEXTURE_BINDING_2D, &bind0 );
 +			qglGetBooleanv( GL_TEXTURE_2D, &en0 );
++			glGetTexEnviv( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &env0r );
 +			qglActiveTextureARB( GL_TEXTURE1_ARB );
 +			qglGetIntegerv( GL_TEXTURE_BINDING_2D, &bind1 );
 +			qglGetBooleanv( GL_TEXTURE_2D, &en1 );
++			glGetTexEnviv( GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &env1r );
 +			qglActiveTextureARB( GL_TEXTURE0_ARB + glState.currenttmu );
 +
 +			ri.Printf( PRINT_ALL, "PHXDIAG n=%i act=0x%x tmu=%i | GL bind0=%i bind1=%i "
-+					"en0=%i en1=%i | cache tex0=%i tex1=%i env0=0x%x env1=0x%x | "
-+					"mtEnv=0x%x arraysOnce=%i passes=%i\n",
++					"en0=%i en1=%i | GLenv0=0x%x GLenv1=0x%x | cache tex0=%i tex1=%i "
++					"env0=0x%x env1=0x%x | mtEnv=0x%x arraysOnce=%i passes=%i\n",
 +					phx_diagCount - 1, (unsigned)act, glState.currenttmu,
 +					(int)bind0, (int)bind1, (int)en0, (int)en1,
++					(unsigned)env0r, (unsigned)env1r,
 +					glState.currenttextures[0], glState.currenttextures[1],
 +					(unsigned)glState.texEnv[0], (unsigned)glState.texEnv[1],
 +					(unsigned)pStage->mtEnv, setArraysOnce, tess.numPasses );
