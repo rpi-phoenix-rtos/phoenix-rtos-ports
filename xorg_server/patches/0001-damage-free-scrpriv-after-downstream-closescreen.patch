@@ -1,25 +1,37 @@
-damage: free the screen private after the downstream CloseScreen, not before
+damage: survive teardown — clear the screen-private slot and guard Unregister
 
-damageCloseScreen() freed its screen private and then called the
-downstream CloseScreen, but layers wrapped BELOW damage still call back
-into it while they close. In particular the software cursor's
-miSpriteCloseScreen (mi/misprite.c) calls DamageUnregister, which does
-damageScrPriv(pScreen) and dereferences that freed allocation.
+Exiting the desktop session crashed Xphoenix-glamor-daemon every time.
+Two mechanisms, one cause: damage's screen private outliving nothing.
 
-On the Pi 4 glamor server this crashed every time the desktop session was
-closed: exiting the window manager ran xlaunch's teardown, and
-Xphoenix-glamor-daemon took a Data Abort reading at 0x60 -- x0, the
-privates address handed to dixGetPrivate, was &((base)NULL)->devPrivates,
-with the caller chain DamageUnregister -> dixLookupPrivate ->
-dixGetPrivate.
+damageCloseScreen() freed pScrPriv and then called the downstream
+CloseScreen, leaving a DANGLING POINTER in the private slot. glamor
+destroys its GCs during that downstream chain, and
+glamor_invalidate_stipple() (glamor/glamor_core.c) calls DamageUnregister,
+which does damageScrPriv() and then an INDIRECT CALL through
+pScrPriv->funcs.Unregister. On this board that showed up first as a Data
+Abort reading 0x60 (the privates address handed to dixGetPrivate was
+&((base)NULL)->devPrivates) and, once the free was merely deferred, as a
+PC alignment fault at 0xaa1403e0aa1503e2 -- a jump through the stale
+function pointer, the value being two AArch64 instruction words.
 
-Defer the free until the downstream chain has finished unwinding. Nothing
-else in this function depends on the private after the unwraps, so the
-ordering change is confined to the lifetime of the allocation itself.
+Deferring the free alone is not enough, because a lookup on a freed-but-
+still-populated slot returns garbage rather than NULL and nothing
+downstream can tell the difference. So also clear the slot after freeing,
+which converts the use-after-free into a NULL that callers can check, and
+check it in DamageUnregister before the indirect call.
+
+Also guard DamageUnregister against a NULL pDrawable: it clears pDrawable
+on its way out, and glamor reaches it twice on GC teardown -- once from
+glamor_invalidate_stipple and once from the DamageDestroy callback -- so
+the second call dereferenced NULL.
+
+The Unregister call is scoped so pScrPriv does not outlive its check; the
+rest of the function does not use it (getDrawableDamageRef declares its
+own, and is unreachable once we return early).
 
 --- a/miext/damage/damage.c
 +++ b/miext/damage/damage.c
-@@ -1595,14 +1595,24 @@
+@@ -1595,14 +1595,31 @@
  static Bool
  damageCloseScreen(ScreenPtr pScreen)
  {
@@ -32,16 +44,55 @@ ordering change is confined to the lifetime of the allocation itself.
      unwrap(pScrPriv, pScreen, CopyWindow);
      unwrap(pScrPriv, pScreen, CloseScreen);
 +
-+    /* Free the screen private only AFTER the downstream CloseScreen returns.
-+     * Layers wrapped below damage still call back into it while they close: the
-+     * software cursor's miSpriteCloseScreen calls DamageUnregister (mi/misprite.c),
-+     * which does damageScrPriv(pScreen) and dereferences this very allocation.
-+     * Freeing it first left that a use-after-free. */
++    /* Free the screen private only after the downstream CloseScreen returns, and
++     * then CLEAR THE PRIVATE SLOT. Layers wrapped below damage still reach into
++     * it while they close -- glamor destroys its GCs, and glamor_invalidate_stipple
++     * (glamor/glamor_core.c) calls DamageUnregister, which does damageScrPriv()
++     * and then an INDIRECT CALL through pScrPriv->funcs.Unregister.
++     *
++     * Leaving a dangling pointer in the slot is what made that unrecoverable: a
++     * later lookup returned freed memory rather than NULL, so no amount of
++     * checking downstream could tell the difference, and the indirect call jumped
++     * through whatever the allocator had put there. Clearing the slot turns a
++     * use-after-free into a NULL the guard in DamageUnregister can act on. */
 +    ret = (*pScreen->CloseScreen) (pScreen);
      free(pScrPriv);
 -    return (*pScreen->CloseScreen) (pScreen);
++    dixSetPrivate(&pScreen->devPrivates, damageScrPrivateKey, NULL);
 +
 +    return ret;
  }
  
  /**
+@@ -1791,11 +1808,28 @@
+ DamageUnregister(DamagePtr pDamage)
+ {
+     DrawablePtr pDrawable = pDamage->pDrawable;
+-    ScreenPtr pScreen = pDrawable->pScreen;
++    ScreenPtr pScreen;
+ 
+-    damageScrPriv(pScreen);
++    /* Already unregistered: DamageUnregister clears pDrawable on its way out, so
++     * a second call (glamor reaches here twice on GC teardown -- once from
++     * glamor_invalidate_stipple, once from the DamageDestroy callback) would
++     * dereference NULL. */
++    if (pDrawable == NULL)
++        return;
++
++    pScreen = pDrawable->pScreen;
++
++    {
++        damageScrPriv(pScreen);
++
++        /* Screen already torn down (damageCloseScreen ran and cleared the slot).
++         * Nothing left to unregister from, and funcs.Unregister below is an
++         * indirect call that would jump through freed memory. */
++        if (pScrPriv == NULL)
++            return;
+ 
+-    (*pScrPriv->funcs.Unregister) (pDrawable, pDamage);
++        (*pScrPriv->funcs.Unregister) (pDrawable, pDamage);
++    }
+ 
+     if (pDrawable->type == DRAWABLE_WINDOW) {
+         WindowPtr pWindow = (WindowPtr) pDrawable;
