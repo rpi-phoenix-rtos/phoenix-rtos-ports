@@ -1,0 +1,58 @@
+damage: let the screen private outlive CloseScreen
+
+Exiting the desktop session crashed Xphoenix-glamor-daemon every time.
+damageCloseScreen() freed its screen private and then chained to the
+downstream CloseScreen, but several layers keep calling into damage while
+the server shuts down, and they do it after that point: composite's
+compDestroyWindow, glamor's glamor_invalidate_stipple (via its GC
+teardown), and misprite. Every damage entry point begins with
+damageScrPriv(), and some then make an indirect call through
+pScrPriv->funcs.*, so the freed allocation was dereferenced and in one
+case jumped through.
+
+Two narrower attempts did not converge, and are recorded here so they are
+not retried:
+
+  1. Deferring the free until after the downstream CloseScreen returns.
+     Still a use-after-free -- the calls come from within that chain. It
+     changed the symptom from a bad read (Data Abort at NULL+0x60) to a
+     jump through the stale function pointer (PC alignment fault).
+  2. Deferring the free, clearing the private slot so a later lookup
+     returns NULL, and guarding DamageUnregister on it. That fixed
+     DamageUnregister and moved the identical NULL dereference to
+     compDestroyWindow.
+
+There is no ordering that makes an early free safe, because damage does
+not own the teardown order of the layers above it. So do not free it. It
+is one struct per screen and the process exits moments later, which
+reclaims it -- a bounded, one-shot leak traded for removing a whole class
+of shutdown crash.
+
+--- a/miext/damage/damage.c
++++ b/miext/damage/damage.c
+@@ -1601,7 +1601,24 @@
+     unwrap(pScrPriv, pScreen, CreateGC);
+     unwrap(pScrPriv, pScreen, CopyWindow);
+     unwrap(pScrPriv, pScreen, CloseScreen);
+-    free(pScrPriv);
++
++    /* Do NOT free pScrPriv here, and do not clear its slot.
++     *
++     * Several layers keep calling into damage while the server shuts down, and
++     * they do it AFTER this runs: composite's compDestroyWindow, glamor's
++     * glamor_invalidate_stipple via its GC teardown, and misprite. Every damage
++     * entry point starts with damageScrPriv() and some then make an indirect call
++     * through pScrPriv->funcs.*, so freeing the private here is a use-after-free
++     * no matter where in this function the free sits.
++     *
++     * Guarding the callers one at a time was tried and does not converge: fixing
++     * DamageUnregister simply moved the same NULL dereference to
++     * compDestroyWindow. There is no ordering that makes an early free safe,
++     * because damage does not own the teardown order of the layers above it.
++     *
++     * So let the allocation outlive them. It is one struct per screen, and the
++     * process exits moments later, which reclaims it -- a bounded, one-shot leak
++     * traded for removing an entire class of shutdown crash. */
+     return (*pScreen->CloseScreen) (pScreen);
+ }
+ 
