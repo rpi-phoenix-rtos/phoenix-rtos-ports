@@ -34,11 +34,10 @@
 	supports="phoenix>=3.3"
 }
 
-# One patch (patches/0001): damage's CloseScreen freed its screen private before
-# calling the downstream CloseScreen, while misprite still calls DamageUnregister
-# during its own close -- a use-after-free that crashed the glamor server every
-# time the desktop session was exited. Otherwise the kdrive tree compiles
-# unmodified on Phoenix. (The
+# No patches: the xorg-server kdrive tree compiles unmodified on Phoenix. (Three
+# damage-teardown patches were tried and reverted -- none fixed the desktop-exit
+# crash; see docs/misc/2026-09-08-x-teardown-crash-open.md before trying a
+# fourth.) (The
 # former record/record.c malloc(0)->NULL assert-guard patch is gone: libphoenix
 # now returns a valid non-NULL pointer for malloc(0) (stdlib/malloc_dl.c), so
 # RECORD's xallocarray(0,...) no longer trips assert(ppAllContextsCopy) on a
