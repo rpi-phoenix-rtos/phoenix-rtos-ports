@@ -123,7 +123,7 @@ index 113bce13..31e103b6 100644
  
  #endif // __QGL_H__
 diff --git a/code/renderer/tr_init.c b/code/renderer/tr_init.c
-index 76f1160f..d125384d 100644
+index 76f1160f..ee88bdf0 100644
 --- a/code/renderer/tr_init.c
 +++ b/code/renderer/tr_init.c
 @@ -1185,6 +1185,188 @@ static void R_ScreenShot_f( void ) {
@@ -329,30 +329,6 @@ index 76f1160f..d125384d 100644
  	qglGetIntegerv(GL_PACK_ALIGNMENT, &packAlign);
  
  	linelen = cmd->width * 3;
-@@ -1769,7 +1958,23 @@ static void R_Register( void )
- 	ri.Cvar_SetDescription( r_allowExtensions, "Use all of the OpenGL extensions your card is capable of." );
- 	r_ext_compressed_textures = ri.Cvar_Get( "r_ext_compressed_textures", "0", CVAR_ARCHIVE_ND | CVAR_LATCH | CVAR_DEVELOPER );
- 	ri.Cvar_SetDescription( r_ext_compressed_textures, "Enables texture compression." );
-+#ifdef __phoenix__
-+	/* Phoenix-RTOS RPi4: default multitexture OFF.  Proven on HW -- with the
-+	 * two-unit path the WORLD RENDERS BLACK once a bot match is running, while
-+	 * player models and single-texture draws stay correct; with two-pass
-+	 * rendering the same scene renders completely, lightmaps intact.  The GL
-+	 * state is provably identical in both the working and failing cases (unit 1
-+	 * bound to the lightmap, both units enabled, GL_TEXTURE_ENV_MODE read back
-+	 * as GL_MODULATE on both), so this is a driver bug, not an engine one: the
-+	 * multitexture path adds a SECOND texcoord vertex element, and Mesa's u_vbuf
-+	 * translate fallback silently skips draw_vbo when it cannot build a
-+	 * translation (u_vbuf.c: the failure path never calls pipe->draw_vbo).
-+	 * Two-pass costs a second pass over world surfaces but is visually
-+	 * equivalent.  REVERT once the u_vbuf path is fixed. */
-+	r_ext_multitexture = ri.Cvar_Get( "r_ext_multitexture", "0", CVAR_ARCHIVE_ND | CVAR_LATCH | CVAR_DEVELOPER );
-+#else
- 	r_ext_multitexture = ri.Cvar_Get( "r_ext_multitexture", "1", CVAR_ARCHIVE_ND | CVAR_LATCH | CVAR_DEVELOPER );
-+#endif
- 	ri.Cvar_SetDescription( r_ext_multitexture, "Enables hardware multi-texturing (0: off, 1: on)." );
- 	r_ext_compiled_vertex_array = ri.Cvar_Get( "r_ext_compiled_vertex_array", "1", CVAR_ARCHIVE_ND | CVAR_LATCH | CVAR_DEVELOPER );
- 	ri.Cvar_SetDescription( r_ext_compiled_vertex_array, "Enables hardware-compiled vertex array rendering method." );
 diff --git a/code/renderer/tr_shade.c b/code/renderer/tr_shade.c
 index 67a9cb0b..10066335 100644
 --- a/code/renderer/tr_shade.c
