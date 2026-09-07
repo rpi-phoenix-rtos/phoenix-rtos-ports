@@ -323,6 +323,33 @@ index ed898d0c..cb9176ac 100644
  #ifdef YQ2_GL1_GLES
  	static const GLenum attachments[] = {GL_COLOR_EXT, GL_DEPTH_EXT, GL_STENCIL_EXT};
  
+diff --git a/src/client/refresh/gl3/gl3_draw.c b/src/client/refresh/gl3/gl3_draw.c
+index c76a60c6..0040df0b 100644
+--- a/src/client/refresh/gl3/gl3_draw.c
++++ b/src/client/refresh/gl3/gl3_draw.c
+@@ -386,7 +386,22 @@ GL3_DrawFrameBufferObject(int x, int y, int w, int h, GLuint fboTexture, const f
+ 		glUniform4fv(shader->uniVblend, 1, v_blend);
+ 	}
+ 
++#ifdef __phoenix__
++	/* Phoenix-RTOS RPi4: upstream's (0,1,1,0) pairs a BOTTOM-origin GL texture with
++	 * Q2's top-origin 2D ortho, which is correct on a normal driver.  Our Mesa forces
++	 * Y_0_TOP on any framebuffer >= 1024x768 (state_tracker/st_atom_framebuffer.c),
++	 * because this in-process context never gets a window-system framebuffer and so
++	 * every fb reports FlipY == false.  The underwater ppFBO is full-screen, so it
++	 * trips that gate and already holds the scene top-down -- upstream's flip then
++	 * lands on top of ours and the view renders upside down (proved on HW: mirrored at
++	 * viewsize 100, upright at viewsize 70, where the fb drops under the gate).
++	 * Un-flip here to match.  This is a STOPGAP: the real fix is to declare the scanout
++	 * FBO FlipY (GL_MESA_framebuffer_flip_y, which our driver reports) and delete the
++	 * size gate, after which this must be reverted along with glamor's flips. */
++	drawTexturedRectangleNow(x, y, w, h, 0, 0, 1, 1);
++#else
+ 	drawTexturedRectangleNow(x, y, w, h, 0, 1, 1, 0);
++#endif
+ }
+ 
+ /*
 diff --git a/src/client/refresh/gl3/gl3_image.c b/src/client/refresh/gl3/gl3_image.c
 index 218d4a03..7f4ac976 100644
 --- a/src/client/refresh/gl3/gl3_image.c
@@ -364,6 +391,44 @@ index 218d4a03..7f4ac976 100644
  	{
  		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, Q_max(gl_anisotropic->value, 1.f));
  	}
+diff --git a/src/client/refresh/gl3/gl3_main.c b/src/client/refresh/gl3/gl3_main.c
+index 1dba14a9..e4beef88 100644
+--- a/src/client/refresh/gl3/gl3_main.c
++++ b/src/client/refresh/gl3/gl3_main.c
+@@ -129,6 +129,10 @@ cvar_t *r_fixsurfsky;
+ cvar_t *r_palettedtexture;
+ cvar_t *r_validation;
+ cvar_t *gl3_usefbo;
++/* TEMPORARY (Phoenix bug #2 triage): force the underwater post-process path from a
++ * normal spawn, so the FBO->screen blit can be observed without swimming.  Remove
++ * once the orientation question is settled. */
++cvar_t *gl3_forceunderwater;
+ 
+ cvar_t *gl3_show_draw_stats;
+ 
+@@ -295,6 +299,7 @@ GL3_Register(void)
+ 	gl_znear = ri.Cvar_Get("gl_znear", "4", CVAR_ARCHIVE);
+ 
+ 	gl3_usefbo = ri.Cvar_Get("gl3_usefbo", "1", CVAR_ARCHIVE); // use framebuffer object for postprocess effects (water)
++	gl3_forceunderwater = ri.Cvar_Get("gl3_forceunderwater", "0", 0); /* TEMPORARY: bug #2 triage */
+ 
+ 	gl3_show_draw_stats = ri.Cvar_Get("gl3_show_draw_stats", "0", CVAR_ARCHIVE);
+ 
+@@ -1892,6 +1897,14 @@ GL3_RenderView(refdef_t *fd)
+ 
+ 	r_newrefdef = *fd;
+ 
++	/* TEMPORARY (bug #2 triage): forcing the FLAG rather than the FBO gate keeps all
++	 * three readers of RDF_UNDERWATER consistent (the FBO gate here, the water shader
++	 * selection in gl3_draw.c, and the blit).  The menu/player-model render carries
++	 * RDF_NOWORLDMODEL, so it still takes the direct path, as upstream intends. */
++	if (gl3_forceunderwater->value != 0.0f) {
++		r_newrefdef.rdflags |= RDF_UNDERWATER;
++	}
++
+ 	if (!gl3_worldmodel && !(r_newrefdef.rdflags & RDF_NOWORLDMODEL))
+ 	{
+ 		Com_Error(ERR_DROP, "R_RenderView: NULL worldmodel");
 diff --git a/src/client/vid/vid.c b/src/client/vid/vid.c
 index 793ef38f..5e8f61c7 100644
 --- a/src/client/vid/vid.c
