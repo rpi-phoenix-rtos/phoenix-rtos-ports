@@ -75,13 +75,13 @@ static void wait_for_gamedata(void)
  * (unchanged default). This lets a tester boot any level (e2m1, a water map, a DM map, ...) by
  * dropping a file into the game dir — no rebuild — which is also how the HDMI render pipeline can
  * exercise maps beyond start. Only [A-Za-z0-9_-] are accepted (it is pasted into a `map` command). */
-static void read_boot_map(const char *basedir, char *out, size_t n)
+static void read_boot_map(const char *basedir, char *out, size_t n, const char *cfgname)
 {
 	char path[96];
 	FILE *f;
 	size_t i;
 	out[0] = '\0';
-	snprintf(path, sizeof(path), "%s/id1/phoenix-map.cfg", basedir);
+	snprintf(path, sizeof(path), "%s/id1/%s", basedir, cfgname);
 	f = fopen(path, "r");
 	if (f != NULL) {
 		if (fgets(out, (int)n, f) == NULL)
@@ -151,14 +151,31 @@ int main(int argc, char *argv[])
 	{
 		extern cvar_t r_gpulightmapupdate, r_rtshadows;
 		char bootmap[64];
+		char bootdemo[64];
 		char mapcmd[80];
 		Cvar_SetValueQuick(&r_rtshadows, 0.0f);
 		Cvar_SetValueQuick(&r_gpulightmapupdate, 1.0f);
-		read_boot_map(g_basedir, bootmap, sizeof(bootmap));
-		snprintf(mapcmd, sizeof(mapcmd), "map %s\n", bootmap);
-		Cbuf_AddText(mapcmd);
-		Cbuf_Execute();
-		Sys_Printf("vkquake: loading 'map %s' (GPU-compute lightmap path; boot map from id1/phoenix-map.cfg, default start)\n", bootmap);
+		/* A DEMO takes precedence over a map when id1/phoenix-demo.cfg names one.
+		 * Reason: this port has no argv path at all (see read_boot_map above), so
+		 * `vkquake +playdemo demo1` is silently ignored -- the engine still boots
+		 * whatever map the config says, which reads as "the demo did not work".
+		 * Quake ships demo1/demo2/demo3 in id1/pak0.pak, and demo playback is the
+		 * only way to get real movement on screen without a keyboard, so it is
+		 * worth a route. Same one-line file convention and same sanitiser. */
+		read_boot_map(g_basedir, bootdemo, sizeof(bootdemo), "phoenix-demo.cfg");
+		if (bootdemo[0] != '\0') {
+			snprintf(mapcmd, sizeof(mapcmd), "playdemo %s\n", bootdemo);
+			Cbuf_AddText(mapcmd);
+			Cbuf_Execute();
+			Sys_Printf("vkquake: playing demo '%s' (from id1/phoenix-demo.cfg)\n", bootdemo);
+		}
+		else {
+			read_boot_map(g_basedir, bootmap, sizeof(bootmap), "phoenix-map.cfg");
+			snprintf(mapcmd, sizeof(mapcmd), "map %s\n", bootmap);
+			Cbuf_AddText(mapcmd);
+			Cbuf_Execute();
+			Sys_Printf("vkquake: loading 'map %s' (GPU-compute lightmap path; boot map from id1/phoenix-map.cfg, default start)\n", bootmap);
+		}
 	}
 
 	/* TEXTURE-STAGING FLUSH (hygiene; HW: textured 2D samples 0 = upload gap). conchars + the
