@@ -1,0 +1,39 @@
+Let the on-screen fps figure actually appear: NO_TRUST_COUNT 200 -> 20 frames.
+
+STK hides its fps readout for NO_TRUST_COUNT drawn frames after any state
+change, showing "FPS: -/-/-" until the countdown expires (irr_driver.cpp, the
+`no_trust` branch). Upstream's 200 assumes a 60+ fps machine, i.e. about three
+seconds.
+
+This port renders SuperTuxKart at roughly 6 fps, so 200 frames is about 34
+SECONDS -- longer than an entire demo race. Measured on hardware: with
+`show_fps` enabled the overlay drew "FPS: -/-/- - 63 KTris, Ping: 0ms" for the
+whole visible race, i.e. the counter was enabled but permanently useless.
+
+The constant is a frame count, so its settle time scales inversely with frame
+rate. 20 preserves the intent -- ignore the first few frames after a transition,
+when timings are meaningless -- while settling in ~0.3 s at 60 fps and ~3.5 s
+here.
+
+Wanted because the owner asked for live performance figures on screen in the
+showcase recording.
+
+--- a/src/graphics/irr_driver.cpp	2026-09-08 20:23:10.716082962 +0200
++++ b/src/graphics/irr_driver.cpp	2026-09-08 20:23:10.742500771 +0200
+@@ -1865,7 +1865,15 @@
+     GL32_draw2DRectangle(video::SColor(150, 96, 74, 196), position, NULL);
+     // We will let pass some time to let things settle before trusting FPS counter
+     // even if we also ignore fps = 1, which tends to happen in first checks
+-    const int NO_TRUST_COUNT = 200;
++    /* Frames to ignore after a state change before the fps figure is shown.
++     * Upstream's 200 assumes a 60+ fps machine, i.e. about three seconds. This
++     * port renders SuperTuxKart at roughly 6 fps, where 200 frames is ~34
++     * SECONDS -- longer than a whole demo race -- so the readout stayed at
++     * "FPS: -/-/-" for the entire recording and the counter was effectively
++     * dead. The constant is a frame count, so its settle time scales inversely
++     * with frame rate; 20 keeps the intent (discard the first few frames after
++     * a transition) and settles in ~0.3 s at 60 fps or ~3.5 s here. */
++    const int NO_TRUST_COUNT = 20;
+     static int no_trust = NO_TRUST_COUNT;
+ 
+     // Min and max info tracking, per mode, so user can check game vs menus
