@@ -252,11 +252,16 @@ Sys_Microseconds(void)
 {
 	struct timespec now;
 	static struct timespec first;
-#ifdef _POSIX_MONOTONIC_CLOCK
+	/*
+	 * Upstream gates this on _POSIX_MONOTONIC_CLOCK. libphoenix advertises
+	 * _POSIX_VERSION 200809L but defines no POSIX option macros at all, so
+	 * that test is always false here and the frame timer silently fell back
+	 * to CLOCK_REALTIME — which on Phoenix is CLOCK_MONOTONIC plus a
+	 * settable offset, i.e. it steps whenever anything calls clock_settime()
+	 * or settimeofday() (ntpclient does). Phoenix does support
+	 * CLOCK_MONOTONIC, so ask for it unconditionally.
+	 */
 	clock_gettime(CLOCK_MONOTONIC, &now);
-#else
-	clock_gettime(CLOCK_REALTIME, &now);
-#endif
 
 	if(first.tv_sec == 0)
 	{
