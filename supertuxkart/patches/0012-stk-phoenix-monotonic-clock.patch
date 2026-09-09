@@ -27,9 +27,18 @@ It also explains the in-game race clock independently: dt comes back as 1000 ms,
 MainLoop caps it at MAX_ELAPSED_TIME (50 ms), so game time advances 0.05 s per
 frame -- matching the 0.0497-0.0511 s/s measured off HDMI snapshots.
 
-Guarded by __phoenix__ so other platforms keep steady_clock. The proper fix is
-to rebuild libstdc++ with its time backends enabled, which would repair every
-C++ port using std::chrono; this patch makes STK correct meanwhile.
+Guarded by __phoenix__ so other platforms keep steady_clock.
+
+UPDATE 2026-09-09: the toolchain root cause is FIXED. phoenix-rtos-build
+95d9fca adds gcc-16.2.0-12-libstdcxx-phoenix-features.patch, which hardcodes
+the time backends (and ~20 other features) for *-phoenix*; a probe on hardware
+measures steady_clock's tick at 2000 ns where it used to be 1000000000 ns. So
+the description above no longer holds for a toolchain built after that commit,
+and this patch is now a functional no-op -- clock_gettime(CLOCK_MONOTONIC) is
+exactly what steady_clock resolves to. It is kept rather than reverted because
+it is correct either way and the port works; do not cite it as evidence that
+libstdc++ is still broken. Full account:
+docs/misc/2026-09-09-toolchain-silent-feature-audit.md in the coordination repo.
 
 --- a/src/utils/time.hpp	2026-09-08 11:52:58.810917281 +0200
 +++ b/src/utils/time.hpp	2026-09-08 11:52:58.824270573 +0200
