@@ -135,6 +135,15 @@ ac_cv_func_pipe=yes
 # Without these, every os.* dir_fd= keyword raises NotImplementedError, os.fwalk
 # is absent, and shutil.rmtree falls back to its non-fd, symlink-race-unsafe
 # path. The real fix is to keep the compat header out of configure-time CFLAGS.
+# Same mechanism, caught live: libphoenix grew a real clock_getres (0604c8e) and
+# the probe went from "yes" (it was seeing the shim in phoenix-py-compat.h) to
+# "no", because autoconf's own `char clock_getres (void);` now collides with the
+# real prototype:
+#   conftest.c:320:6: error: conflicting types for 'clock_getres';
+#                     have 'char(void)'
+# Without this, time.clock_getres() and time.get_clock_info() are compiled out
+# even though libphoenix implements the function.
+ac_cv_func_clock_getres=yes
 ac_cv_func_faccessat=yes
 ac_cv_func_fchownat=yes
 ac_cv_func_linkat=yes
@@ -150,6 +159,12 @@ ac_cv_func_readlinkat=yes
 ac_cv_func_readv=yes
 ac_cv_func_recvfrom=yes
 ac_cv_func_sched_get_priority_max=yes
+# NB CPython has no HAVE_SCHED_GETPARAM macro at all: posixmodule.c gates BOTH
+# os.sched_getparam and os.sched_setparam on HAVE_SCHED_SETPARAM (verified in the
+# built pyconfig.h). So ac_cv_func_sched_setparam is the load-bearing entry here
+# and ac_cv_func_sched_getparam is inert -- kept for symmetry and in case a
+# future CPython splits them. Same caveat for the old =no values: the getparam
+# one never did anything either.
 # These were forced to =no because libphoenix declared but did not define them.
 # That is no longer true: libphoenix af82c71 (2026-07-05, "sched: implement rest
 # of sched_ POSIX functions") defines all five, and a static link of a program
