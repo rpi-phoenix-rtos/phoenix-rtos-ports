@@ -1,3 +1,28 @@
+diff --git a/doc/040_cvarlist.md b/doc/040_cvarlist.md
+index c22e9232..b953f369 100644
+--- a/doc/040_cvarlist.md
++++ b/doc/040_cvarlist.md
+@@ -344,6 +344,9 @@ it's `+set busywait 0` (setting the `busywait` cvar) and `-portable`
+   0.  Setting this cvar to `1` disables this behavior, the music keeps
+   playing.
+ 
++* **ogg_pausewithgame**: When `1` the background is paused when the game
++  is paused. Defaults to `0`.
++
+ * **ogg_shuffle**: Ogg/Vorbis playback mode. Supported modes are:
+   - `0`: Loop the current track (the default).
+   - `1`: Play the current track once, then stop.
+@@ -353,6 +356,10 @@ it's `+set busywait 0` (setting the `busywait` cvar) and `-portable`
+ * **s_doppler**: If set to `1` doppler effects are enabled. This is only
+   supported by the OpenAL sound backend.
+ 
++* **s_muteonfocusloss**: If set to `1` (the default) all sounds are
++  muted when the game looses focus. Sound are unmuted when the game
++  regains focus.
++
+ * **s_openal**: Use OpenAL for sound playback. This is enabled by
+   default. OpenAL gives a huge quality boost over the classic sound
+   system and supports surround speakers and HRTF for headphones. OpenAL
 diff --git a/src/client/cl_image.c b/src/client/cl_image.c
 index 1de83dc0..f8b1276d 100644
 --- a/src/client/cl_image.c
@@ -15,6 +40,146 @@ index 1de83dc0..f8b1276d 100644
  #include "refresh/files/stb_image.h"
  
  static const byte *
+diff --git a/src/client/input/sdl2.c b/src/client/input/sdl2.c
+index b2b313ca..ed78f9e9 100644
+--- a/src/client/input/sdl2.c
++++ b/src/client/input/sdl2.c
+@@ -126,6 +126,7 @@ static cvar_t *m_filter;
+ static cvar_t *windowed_pauseonfocuslost;
+ static cvar_t *windowed_mouse;
+ static cvar_t *haptic_feedback_filter;
++static cvar_t *s_muteonfocusloss;
+ 
+ // ----
+ 
+@@ -987,38 +988,43 @@ IN_Update(void)
+ 					case SDL_WINDOWEVENT_FOCUS_LOST:
+ 					{
+ 						Key_MarkAllUp();
+-						S_Activate(false);
+ 
+ 						if (windowed_pauseonfocuslost->value != 1)
+ 						{
+ 							Cvar_SetValue("paused", 1);
+ 						}
+ 
+-						/* pause music */
+ 						if (Cvar_VariableValue("ogg_pausewithgame") == 1 &&
+ 							OGG_Status() == PLAY && cl.attractloop == false)
+ 						{
+ 							Cbuf_AddText("ogg toggle\n");
+ 						}
++
++						if (s_muteonfocusloss->value == 1)
++						{
++							S_Activate(false);
++						}
+ 						break;
+ 					}
+ 
+ 					case SDL_WINDOWEVENT_FOCUS_GAINED:
+ 					{
+-						S_Activate(true);
+-
+ 						if (windowed_pauseonfocuslost->value == 2)
+ 						{
+ 							Cvar_SetValue("paused", 0);
+ 						}
+ 
+-						/* play music */
+ 						if (Cvar_VariableValue("ogg_pausewithgame") == 1 &&
+ 							OGG_Status() == PAUSE && cl.attractloop == false &&
+ 							cl_paused->value == 0)
+ 						{
+ 							Cbuf_AddText("ogg toggle\n");
+ 						}
++
++						if (s_muteonfocusloss->value == 1)
++						{
++							S_Activate(true);
++						}
+ 						break;
+ 					}
+ 
+@@ -2928,6 +2934,8 @@ IN_Init(void)
+ 	windowed_pauseonfocuslost = Cvar_Get("vid_pauseonfocuslost", "0", CVAR_USERINFO | CVAR_ARCHIVE);
+ 	windowed_mouse = Cvar_Get("windowed_mouse", "1", CVAR_USERINFO | CVAR_ARCHIVE);
+ 
++	s_muteonfocusloss = Cvar_Get("s_muteonfocusloss", "1", CVAR_ARCHIVE);
++
+ 	Cmd_AddCommand("+mlook", IN_MLookDown);
+ 	Cmd_AddCommand("-mlook", IN_MLookUp);
+ 
+diff --git a/src/client/input/sdl3.c b/src/client/input/sdl3.c
+index 45ac4311..2d08a9eb 100644
+--- a/src/client/input/sdl3.c
++++ b/src/client/input/sdl3.c
+@@ -129,6 +129,7 @@ static cvar_t *m_filter;
+ static cvar_t *windowed_pauseonfocuslost;
+ static cvar_t *windowed_mouse;
+ static cvar_t *haptic_feedback_filter;
++static cvar_t *s_muteonfocusloss;
+ 
+ // ----
+ 
+@@ -966,38 +967,44 @@ IN_Update(void)
+ 			case SDL_EVENT_WINDOW_FOCUS_LOST:
+ 			{
+ 				Key_MarkAllUp();
+-				S_Activate(false);
+ 
+ 				if (windowed_pauseonfocuslost->value != 1)
+ 				{
+ 					Cvar_SetValue("paused", 1);
+ 				}
+ 
+-				/* pause music */
+ 				if (Cvar_VariableValue("ogg_pausewithgame") == 1 &&
+ 						OGG_Status() == PLAY && cl.attractloop == false)
+ 				{
+ 					Cbuf_AddText("ogg toggle\n");
+ 				}
++
++				if (s_muteonfocusloss->value == 1)
++				{
++					S_Activate(false);
++				}
+ 				break;
+ 			}
+ 
+ 			case SDL_EVENT_WINDOW_FOCUS_GAINED:
+ 			{
+-				S_Activate(true);
+ 
+ 				if (windowed_pauseonfocuslost->value == 2)
+ 				{
+ 					Cvar_SetValue("paused", 0);
+ 				}
+ 
+-				/* play music */
+ 				if (Cvar_VariableValue("ogg_pausewithgame") == 1 &&
+ 						OGG_Status() == PAUSE && cl.attractloop == false &&
+ 						cl_paused->value == 0)
+ 				{
+ 					Cbuf_AddText("ogg toggle\n");
+ 				}
++
++				if (s_muteonfocusloss->value == 1)
++				{
++					S_Activate(true);
++				}
+ 				break;
+ 			}
+ 
+@@ -2895,6 +2902,8 @@ IN_Init(void)
+ 	windowed_pauseonfocuslost = Cvar_Get("vid_pauseonfocuslost", "0", CVAR_USERINFO | CVAR_ARCHIVE);
+ 	windowed_mouse = Cvar_Get("windowed_mouse", "1", CVAR_USERINFO | CVAR_ARCHIVE);
+ 
++	s_muteonfocusloss = Cvar_Get("s_muteonfocusloss", "1", CVAR_ARCHIVE);
++
+ 	Cmd_AddCommand("+mlook", IN_MLookDown);
+ 	Cmd_AddCommand("-mlook", IN_MLookUp);
+ 
 diff --git a/src/client/refresh/files/common.c b/src/client/refresh/files/common.c
 index eba3fd3d..4deac01c 100644
 --- a/src/client/refresh/files/common.c
@@ -78,6 +243,66 @@ index eba3fd3d..4deac01c 100644
  
  /* shared variables */
  refdef_t r_newrefdef;
+diff --git a/src/client/refresh/gl1/gl1_draw.c b/src/client/refresh/gl1/gl1_draw.c
+index bf8edb51..000fce4a 100644
+--- a/src/client/refresh/gl1/gl1_draw.c
++++ b/src/client/refresh/gl1/gl1_draw.c
+@@ -308,6 +308,7 @@ void
+ RDraw_TileClear(int x, int y, int w, int h, const char *pic)
+ {
+ 	const image_t *image;
++	int x2;
+ 
+ 	image = R_FindPic(pic, (findimage_t)R_FindImage);
+ 
+@@ -324,8 +325,45 @@ RDraw_TileClear(int x, int y, int w, int h, const char *pic)
+ 
+ 	R_UpdateGLBuffer(buf_2d, image->texnum, 0, 0, 1);
+ 
+-	R_Buffer2DQuad(x, y, x + w, y + h, x / 64.0, y / 64.0,
+-		( x + w ) / 64.0, ( y + h ) / 64.0);
++	for (x2 = 0; x2 < w; x2 += image->width)
++	{
++		int next_x, y2, tile_w;
++		float tile_sh;
++
++		next_x = x + x2 + image->width;
++		if (next_x > x + w)
++		{
++			next_x = x + w;
++		}
++
++		tile_w = next_x - (x + x2);
++
++		tile_sh = image->sl +
++			(image->sh - image->sl) * ((float)tile_w / image->width);
++
++		for (y2 = 0; y2 < h; y2 += image->height)
++		{
++			int next_y, tile_h;
++			float tile_th;
++
++			next_y = y + y2 + image->height;
++			if (next_y > y + h)
++			{
++				next_y = y + h;
++			}
++
++			tile_h = next_y - (y + y2);
++			tile_th = image->tl +
++				(image->th - image->tl) * ((float)tile_h / image->height);
++
++			R_Buffer2DQuad(x + x2, y + y2,
++				next_x,
++				next_y,
++				image->sl, image->tl,
++				tile_sh, tile_th
++			);
++		}
++	}
+ }
+ 
+ /*
 diff --git a/src/client/refresh/gl1/gl1_main.c b/src/client/refresh/gl1/gl1_main.c
 index 81b8535c..72c63560 100644
 --- a/src/client/refresh/gl1/gl1_main.c
@@ -324,10 +549,68 @@ index ed898d0c..cb9176ac 100644
  	static const GLenum attachments[] = {GL_COLOR_EXT, GL_DEPTH_EXT, GL_STENCIL_EXT};
  
 diff --git a/src/client/refresh/gl3/gl3_draw.c b/src/client/refresh/gl3/gl3_draw.c
-index c76a60c6..0040df0b 100644
+index c76a60c6..8f65ebb2 100644
 --- a/src/client/refresh/gl3/gl3_draw.c
 +++ b/src/client/refresh/gl3/gl3_draw.c
-@@ -386,7 +386,22 @@ GL3_DrawFrameBufferObject(int x, int y, int w, int h, GLuint fboTexture, const f
+@@ -355,17 +355,53 @@ GL3_Draw_PicScaledCol(int x, int y, const char *pic, float factor, const float c
+ void
+ GL3_Draw_TileClear(int x, int y, int w, int h, const char *pic)
+ {
+-	if(w <= 0 || h <= 0)
++	const gl3image_t *image;
++	int x2;
++
++	if (w <= 0 || h <= 0)
++	{
+ 		return;
++	}
+ 
+-	gl3image_t *image = R_FindPic(pic, (findimage_t)GL3_FindImage);
++	image = R_FindPic(pic, (findimage_t)GL3_FindImage);
+ 	if (!image)
+ 	{
+-		Com_Printf("Can't find pic: %s\n", pic);
++		Com_Printf("%s(): Can't find pic: %s\n", __func__, pic);
+ 		return;
+ 	}
+ 
+-	drawTexturedRectangle(image->texnum, x, y, w, h, x/64.0f, y/64.0f, (x+w)/64.0f, (y+h)/64.0f);
++	if (gl3_scrap_dirty)
++	{
++		/* Upload any pending scrap textures before rendering 2D elements */
++		GL3_Scrap_Upload();
++	}
++
++	for (x2 = 0; x2 < w; x2 += image->width)
++	{
++		int tile_w, y2;
++		float tile_sh;
++
++		tile_w = (x2 + image->width > w) ? (w - x2) : image->width;
++		tile_sh = image->sl +
++			(image->sh - image->sl) * ((float)tile_w / image->width);
++
++		for (y2 = 0; y2 < h; y2 += image->height)
++		{
++			float tile_th;
++			int tile_h;
++
++			tile_h = (y2 + image->height > h) ? (h - y2) : image->height;
++			tile_th = image->tl +
++				(image->th - image->tl) * ((float)tile_h / image->height);
++
++			drawTexturedRectangle(image->texnum, x + x2, y + y2,
++				tile_w,
++				tile_h,
++				image->sl, image->tl,
++				tile_sh, tile_th
++			);
++		}
++	}
+ }
+ 
+ void
+@@ -386,7 +422,22 @@ GL3_DrawFrameBufferObject(int x, int y, int w, int h, GLuint fboTexture, const f
  		glUniform4fv(shader->uniVblend, 1, v_blend);
  	}
  
@@ -403,6 +686,206 @@ index 1dba14a9..03f7210d 100644
  	if (!gl3_worldmodel && !(r_newrefdef.rdflags & RDF_NOWORLDMODEL))
  	{
  		Com_Error(ERR_DROP, "R_RenderView: NULL worldmodel");
+diff --git a/src/client/refresh/gl3/gl3_shaders.c b/src/client/refresh/gl3/gl3_shaders.c
+index bfa10056..8d25db85 100644
+--- a/src/client/refresh/gl3/gl3_shaders.c
++++ b/src/client/refresh/gl3/gl3_shaders.c
+@@ -262,17 +262,6 @@ static const char* fragmentSrc2Dtinted = MULTILINE_STRING(
+ static const char* fragmentSrc2Dpostprocess = MULTILINE_STRING(
+ 		in vec2 passTexCoord;
+ 
+-		// for UBO shared between all shaders (incl. 2D)
+-		// TODO: not needed here, remove?
+-		layout (std140) uniform uniCommon
+-		{
+-			float gamma;
+-			float intensity;
+-			float intensity2D; // for HUD, menu etc
+-
+-			vec4 color;
+-		};
+-
+ 		uniform sampler2D tex;
+ 		uniform vec4 v_blend;
+ 
+@@ -293,17 +282,6 @@ static const char* fragmentSrc2Dpostprocess = MULTILINE_STRING(
+ static const char* fragmentSrc2DpostprocessWater = MULTILINE_STRING(
+ 		in vec2 passTexCoord;
+ 
+-		// for UBO shared between all shaders (incl. 2D)
+-		// TODO: not needed here, remove?
+-		layout (std140) uniform uniCommon
+-		{
+-			float gamma;
+-			float intensity;
+-			float intensity2D; // for HUD, menu etc
+-
+-			vec4 color;
+-		};
+-
+ 		const float PI = 3.14159265358979323846;
+ 
+ 		uniform sampler2D tex;
+@@ -935,14 +913,16 @@ enum {
+ };
+ 
+ static qboolean
+-initShader2D(gl3ShaderInfo_t* shaderInfo, const char* vertSrc, const char* fragSrc)
++initShader2D(gl3ShaderInfo_t* shaderInfo, const char* vertSrc, const char* fragSrc,
++	qboolean uniCommonRequired)
+ {
+ 	GLuint shaders2D[2] = {0};
+ 	GLuint prog = 0;
+ 
+ 	if(shaderInfo->shaderProgram != 0)
+ 	{
+-		Com_Printf("WARNING: calling initShader2D for gl3ShaderInfo_t that already has a shaderProgram!\n");
++		Com_Printf("WARNING: calling %s for gl3ShaderInfo_t that already has a shaderProgram!\n",
++			__func__);
+ 		glDeleteProgram(shaderInfo->shaderProgram);
+ 	}
+ 
+@@ -976,8 +956,13 @@ initShader2D(gl3ShaderInfo_t* shaderInfo, const char* vertSrc, const char* fragS
+ 	GL3_UseProgram(prog);
+ 
+ 	// Bind the buffer object to the uniform blocks
+-	GLuint blockIndex = glGetUniformBlockIndex(prog, "uniCommon");
+-	if(blockIndex != GL_INVALID_INDEX)
++	GLuint blockIndex = GL_INVALID_INDEX;
++	if (uniCommonRequired)
++	{
++		blockIndex = glGetUniformBlockIndex(prog, "uniCommon");
++	}
++
++	if (blockIndex != GL_INVALID_INDEX)
+ 	{
+ 		GLint blockSize;
+ 		glGetActiveUniformBlockiv(prog, blockIndex, GL_UNIFORM_BLOCK_DATA_SIZE, &blockSize);
+@@ -991,7 +976,7 @@ initShader2D(gl3ShaderInfo_t* shaderInfo, const char* vertSrc, const char* fragS
+ 
+ 		glUniformBlockBinding(prog, blockIndex, GL3_BINDINGPOINT_UNICOMMON);
+ 	}
+-	else
++	else if (uniCommonRequired)
+ 	{
+ 		Com_Printf("WARNING: Couldn't find uniform block index 'uniCommon'\n");
+ 		// TODO: clean up?
+@@ -1226,28 +1211,31 @@ static void initUBOs(void)
+ 
+ static qboolean createShaders(void)
+ {
+-	if(!initShader2D(&gl3state.si2D, vertexSrc2D, fragmentSrc2D))
++	if (!initShader2D(&gl3state.si2D, vertexSrc2D, fragmentSrc2D, true))
+ 	{
+ 		Com_Printf("WARNING: Failed to create shader program for textured 2D rendering!\n");
+ 		return false;
+ 	}
+-	if(!initShader2D(&gl3state.si2Dtinted, vertexSrc2D, fragmentSrc2Dtinted))
++
++	if (!initShader2D(&gl3state.si2Dtinted, vertexSrc2D, fragmentSrc2Dtinted, true))
+ 	{
+ 		Com_Printf("WARNING: Failed to create shader program for tinted 2D rendering!\n");
+ 		return false;
+ 	}
+-	if(!initShader2D(&gl3state.si2Dcolor, vertexSrc2Dcolor, fragmentSrc2Dcolor))
++
++	if (!initShader2D(&gl3state.si2Dcolor, vertexSrc2Dcolor, fragmentSrc2Dcolor, true))
+ 	{
+ 		Com_Printf("WARNING: Failed to create shader program for color-only 2D rendering!\n");
+ 		return false;
+ 	}
+ 
+-	if(!initShader2D(&gl3state.si2DpostProcess, vertexSrc2D, fragmentSrc2Dpostprocess))
++	if (!initShader2D(&gl3state.si2DpostProcess, vertexSrc2D, fragmentSrc2Dpostprocess, false))
+ 	{
+ 		Com_Printf("WARNING: Failed to create shader program to render framebuffer object!\n");
+ 		return false;
+ 	}
+-	if(!initShader2D(&gl3state.si2DpostProcessWater, vertexSrc2D, fragmentSrc2DpostprocessWater))
++
++	if (!initShader2D(&gl3state.si2DpostProcessWater, vertexSrc2D, fragmentSrc2DpostprocessWater, false))
+ 	{
+ 		Com_Printf("WARNING: Failed to create shader program to render framebuffer object under water!\n");
+ 		return false;
+diff --git a/src/client/refresh/soft/sw_poly.c b/src/client/refresh/soft/sw_poly.c
+index b8f6df30..2c7d7acc 100644
+--- a/src/client/refresh/soft/sw_poly.c
++++ b/src/client/refresh/soft/sw_poly.c
+@@ -768,7 +768,7 @@ R_PolygonScanLeftEdge (espan_t *s_polygon_spans)
+ 	int		i, lmaxindex;
+ 	emitpoint_t	*pvert, *pnext;
+ 	espan_t		*pspan;
+-	float		du, dv, vtop, u_step;
++	float		vtop, vvert;
+ 
+ 	pspan = s_polygon_spans;
+ 	i = s_minindex;
+@@ -779,27 +779,51 @@ R_PolygonScanLeftEdge (espan_t *s_polygon_spans)
+ 	if (lmaxindex == 0)
+ 		lmaxindex = r_polydesc.nump;
+ 
+-	vtop = ceil (r_polydesc.pverts[i].v);
++	vvert = r_polydesc.pverts[i].v;
++	if (vvert < r_refdef.fvrecty_adj)
++		vvert = r_refdef.fvrecty_adj;
++	if (vvert > r_refdef.fvrectbottom_adj)
++		vvert = r_refdef.fvrectbottom_adj;
++
++	vtop = ceil (vvert);
+ 
+ 	do
+ 	{
+-		float vbottom;
++		float vbottom, vnext;
+ 
+ 		pvert = &r_polydesc.pverts[i];
+ 		pnext = pvert - 1;
++		vnext = pnext->v;
++		if (vnext < r_refdef.fvrecty_adj)
++			vnext = r_refdef.fvrecty_adj;
++		if (vnext > r_refdef.fvrectbottom_adj)
++			vnext = r_refdef.fvrectbottom_adj;
+ 
+-		vbottom = ceil (pnext->v);
++		vbottom = ceil (vnext);
+ 
+ 		if (vtop < vbottom)
+ 		{
+ 			int v, u, istep, itop, ibottom;
++			float du, dv, u_step, uvert, unext;
++
++			uvert = pvert->u;
++			if (uvert < r_refdef.fvrectx_adj)
++				uvert = r_refdef.fvrectx_adj;
++			if (uvert > r_refdef.fvrectright_adj)
++				uvert = r_refdef.fvrectright_adj;
+ 
+-			du = pnext->u - pvert->u;
+-			dv = pnext->v - pvert->v;
++			unext = pnext->u;
++			if (unext < r_refdef.fvrectx_adj)
++				unext = r_refdef.fvrectx_adj;
++			if (unext > r_refdef.fvrectright_adj)
++				unext = r_refdef.fvrectright_adj;
++
++			du = unext - uvert;
++			dv = vnext - vvert;
+ 
+ 			u_step = (du * SHIFT16XYZ_MULT) / dv;
+ 			// adjust u to ceil the integer portion
+-			u = (int)((pvert->u * SHIFT16XYZ_MULT) + u_step * (vtop - pvert->v)) +
++			u = (int)((uvert * SHIFT16XYZ_MULT) + u_step * (vtop - vvert)) +
+ 				(SHIFT16XYZ_MULT - 1);
+ 			itop = (int)vtop;
+ 			ibottom = (int)vbottom;
+@@ -815,6 +839,7 @@ R_PolygonScanLeftEdge (espan_t *s_polygon_spans)
+ 		}
+ 
+ 		vtop = vbottom;
++		vvert = vnext;
+ 
+ 		i--;
+ 		if (i == 0)
 diff --git a/src/client/vid/vid.c b/src/client/vid/vid.c
 index 793ef38f..5e8f61c7 100644
 --- a/src/client/vid/vid.c
