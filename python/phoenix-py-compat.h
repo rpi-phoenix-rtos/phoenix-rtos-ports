@@ -11,11 +11,17 @@
 #include <wchar.h>
 #include <stddef.h>
 /* (2) wide-char funcs (wcstol/wcstok/wcsstr/...) are now IN libphoenix <wchar.h>. */
-/* (3) clock_getres: Phoenix has clock_gettime but not clock_getres; CPython uses
- *     it only to report clock resolution (time.get_clock_info). Nominal 1ns. */
-static inline int clock_getres(clockid_t __id, struct timespec *__res) {
-    (void)__id; if (__res) { __res->tv_sec = 0; __res->tv_nsec = 1; } return 0;
-}
+/* (3) clock_getres was shimmed here (a static inline reporting a nominal 1 ns)
+ *     because libphoenix lacked it. It has it now -- libphoenix 0604c8e -- so the
+ *     shim is not just redundant, it is ILLEGAL: a static declaration following
+ *     the non-static one in <time.h> is a hard error, and since this header is
+ *     -include'd into every TU that broke configure's very first probe with
+ *     "C compiler cannot create executables", failing the whole port. Better
+ *     anyway: the real one reports the resolution clock_gettime() actually
+ *     delivers (1000 ns -- gettime() is microseconds), so time.get_clock_info()
+ *     now tells the truth instead of claiming 1 ns.
+ *     If you add a shim here, check first that libphoenix has not grown the real
+ *     function; this file is the one place where that collision is fatal. */
 /* (4) O_NOFOLLOW: Phoenix fcntl.h lacks it; define 0 (no nofollow enforcement). */
 #ifndef O_NOFOLLOW
 #define O_NOFOLLOW 0
