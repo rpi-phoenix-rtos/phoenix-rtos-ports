@@ -122,6 +122,23 @@ ac_cv_func_opendir=yes
 ac_cv_func_pathconf=yes
 ac_cv_func_pause=yes
 ac_cv_func_pipe=yes
+# The *at() family. libphoenix defines all twelve (at.o), and a static link of a
+# program calling them succeeds -- but configure answers "no" for exactly these
+# seven, because the compat header force-included into configure-time CFLAGS
+# collides with autoconf's own `char openat(void);` declaration:
+#
+#   conftest.c:215:6: error: conflicting types for 'openat'; have 'char(void)'
+#
+# The correlation is exact: the shim includes <fcntl.h> and <unistd.h> but not
+# <sys/stat.h>, so the seven declared in those two headers fail while the four
+# from <sys/stat.h> (fchmodat, fstatat, mkdirat, renameat) are detected fine.
+# Without these, every os.* dir_fd= keyword raises NotImplementedError, os.fwalk
+# is absent, and shutil.rmtree falls back to its non-fd, symlink-race-unsafe
+# path. The real fix is to keep the compat header out of configure-time CFLAGS.
+ac_cv_func_faccessat=yes
+ac_cv_func_fchownat=yes
+ac_cv_func_linkat=yes
+ac_cv_func_openat=yes
 ac_cv_func_poll=yes
 ac_cv_func_pthread_condattr_setclock=yes
 ac_cv_func_pthread_detach=yes
@@ -129,21 +146,22 @@ ac_cv_func_pthread_kill=yes
 ac_cv_func_pthread_sigmask=yes
 ac_cv_func_ptsname=yes
 ac_cv_func_ptsname_r=yes
+ac_cv_func_readlinkat=yes
 ac_cv_func_readv=yes
 ac_cv_func_recvfrom=yes
 ac_cv_func_sched_get_priority_max=yes
-# Phoenix <sched.h> DECLARES these POSIX scheduling-policy funcs but libphoenix
-# does not DEFINE them, so configure's compile-only probe (against the fresh
-# dev-mode sysroot) would set HAVE_*=yes and posixmodule.c would emit calls that
-# fail at the static link (undefined reference to sched_getparam, ...). Force
-# them absent so os.sched_{get,set}param/scheduler are #if'd out — this matches
-# the HW-verified ad-hoc binary, which built with these auto-detected as absent.
-ac_cv_func_sched_getparam=no
-ac_cv_func_sched_setparam=no
-ac_cv_func_sched_getscheduler=no
-ac_cv_func_sched_setscheduler=no
-ac_cv_func_sched_rr_get_interval=no
+# These were forced to =no because libphoenix declared but did not define them.
+# That is no longer true: libphoenix af82c71 (2026-07-05, "sched: implement rest
+# of sched_ POSIX functions") defines all five, and a static link of a program
+# calling all five succeeds. Keeping them off silently compiled os.sched_* out.
+ac_cv_func_sched_getparam=yes
+ac_cv_func_sched_setparam=yes
+ac_cv_func_sched_getscheduler=yes
+ac_cv_func_sched_setscheduler=yes
+ac_cv_func_sched_rr_get_interval=yes
 ac_cv_func_sendto=yes
+ac_cv_func_symlinkat=yes
+ac_cv_func_unlinkat=yes
 ac_cv_func_setegid=yes
 ac_cv_func_seteuid=yes
 ac_cv_func_setgid=yes
