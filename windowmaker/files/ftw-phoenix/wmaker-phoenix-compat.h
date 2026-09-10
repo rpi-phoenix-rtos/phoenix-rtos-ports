@@ -16,8 +16,10 @@
 
 #include <dirent.h>
 
-/* process priority — no-op stub (best-effort caller in wmsetbg) */
-int nice(int incr);
+/* nice() is declared by libphoenix <unistd.h> now (and implemented there as the
+ * same SCHED_RR no-op), so neither the declaration nor the definition belongs
+ * here -- see the note in ftw.c, where keeping the definition was a build break.
+ */
 
 /* directory listing helpers — POSIX, absent from libphoenix <dirent.h> */
 int alphasort(const struct dirent **a, const struct dirent **b);

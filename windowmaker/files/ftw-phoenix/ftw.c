@@ -169,17 +169,23 @@ int ftw(const char *path, int (*fn)(const char *, const struct stat *, int), int
 }
 
 /*
- * nice(): libphoenix provides no process-priority API. Window Maker's
- * wmsetbg helper calls nice(15) as a best-effort "be a good citizen" and only
- * warns (does not fail) if it cannot. Provide a no-op that reports success so
- * the helper proceeds at normal priority. (Listed as a libphoenix gap in
- * ../WMAKER-PORT-STATUS.md.)
+ * nice() was shimmed here as a no-op because libphoenix had no process-priority
+ * API. It has one now -- libphoenix 0961476, "unistd: implement nice as a noop
+ * for SCHED_RR", which is the same no-op for the same reason (the kernel runs
+ * only SCHED_RR, and POSIX says SCHED_RR threads are unaffected by nice) -- and
+ * <unistd.h> declares it. Keeping ours turned a redundant definition into a
+ * BUILD BREAK, since both land in the static link:
+ *
+ *   ld: libm.a(sys.o): in function `nice':
+ *       multiple definition of `nice';
+ *       libftw.a(ftw.o): first defined here
+ *
+ * Latent until something forced a wmaker relink, which is why the shipped
+ * binary predates it: the whole showcase was one rebuild away from failing to
+ * build. Before adding a shim here, check whether libphoenix has grown the real
+ * function -- ftw/nftw/scandir/alphasort below were re-checked and are still
+ * genuinely absent, so they stay.
  */
-int nice(int incr)
-{
-	(void)incr;
-	return 0;
-}
 
 /*
  * scandir()/alphasort(): libphoenix's <dirent.h> declares neither. Window
