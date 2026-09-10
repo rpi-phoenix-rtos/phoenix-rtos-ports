@@ -193,7 +193,7 @@ int ftw(const char *path, int (*fn)(const char *, const struct stat *, int), int
  * This is a straightforward POSIX implementation over opendir/readdir. The
  * Phoenix struct dirent has a flexible d_name[] array, so each entry is
  * allocated sized to the actual name length. (libphoenix gap — see
- * ../WMAKER-PORT-STATUS.md.)
+ * ../../README.md — the gap table there.)
  */
 int alphasort(const struct dirent **a, const struct dirent **b)
 {

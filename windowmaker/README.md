@@ -37,13 +37,27 @@ The build needed several libphoenix additions / gap-fills:
 | `_SC_LINE_MAX` (sysconf)      | WINGs/error.c         | **committed to libphoenix** (sysconf returns `_POSIX2_LINE_MAX`)    |
 | `nftw()` / `ftw()`            | WINGs/proplist.c      | gap-fill lib (no `<ftw.h>` in libphoenix)                           |
 | `scandir()` / `alphasort()`   | util/wmiv, wmgenmenu  | gap-fill lib (absent from libphoenix `<dirent.h>`)                  |
-| `nice()`                      | util/wmsetbg          | gap-fill no-op stub (no process-priority API)                       |
+| `nice()`                      | util/wmsetbg          | **libphoenix provides it** (`0961476`, a SCHED_RR no-op) — do NOT stub it |
 | `rint()`                      | wcolorpanel, wbrowser | none needed — libphoenix libm implements `rint`/`rintf` (2026-09-04) |
 
-The gap-fill lib sources are in the coordination repo at
-`tools/x11-port/ftw-phoenix/` (`ftw.c`, `ftw.h`, `wmaker-phoenix-compat.h`).
-For an eventual upstream port, `ftw.h`/`nftw`, `scandir`/`alphasort`, and
-`nice` are the libphoenix gaps worth filling properly.
+The gap-fill lib sources live **in this port**, at
+`files/ftw-phoenix/` (`ftw.c`, `ftw.h`, `wmaker-phoenix-compat.h`) — they used to
+be in the coordination repo under `tools/x11-port/`, and that copy is gone.
+
+⚠ **Do not re-add a `nice()` stub here.** libphoenix implements `nice()` as of
+`0961476` and declares it in `<unistd.h>`, so a second definition is a hard link
+error and it takes the whole X11 showcase down:
+
+    ld: libm.a(sys.o): multiple definition of `nice';
+        libftw.a(ftw.o): first defined here
+    FAILED: windowmaker: build failed
+
+That was latent from the day libphoenix gained the function until a rebuild
+forced a wmaker relink (fixed 2026-09-10). Before adding any shim here, check
+whether libphoenix has grown the real function.
+
+Of the remaining gaps, `ftw.h`/`nftw` and `scandir`/`alphasort` are still genuinely
+absent and are the ones worth filling upstream.
 
 `fontconfig` itself (a build dependency) also needed two Phoenix source fixes
 (non-standard `timercmp()` macro; non-constant static initializer in

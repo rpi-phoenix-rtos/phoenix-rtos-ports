@@ -6,7 +6,7 @@
  *
  * These cover symbols libphoenix does not provide that Window Maker (and its
  * util/ helpers) reference. Each is listed as a known libphoenix gap in
- * ../WMAKER-PORT-STATUS.md.
+ * ../../README.md — the gap table there.
  *
  * Copyright 2026 Phoenix Systems
  * Author: Witold Bołt
