@@ -466,14 +466,16 @@ int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *absti
 }
 
 /*
- * copysign: libphoenix math/common.c provides fabs but not copysign. Use signbit (both
- * exist) rather than __builtin_copysign (which can self-recurse to this symbol).
- * NOTE TO MAIN AGENT: the upstreamable home is sources/libphoenix/math/common.c (add
- * copysign alongside fabs); doing it there needs a libphoenix rebuild + toolchain
- * re-sync to affect this host link, so it is provided here for now.
+ * copysign was provided here as a stopgap, with a note that its home was
+ * libphoenix. It IS in libphoenix now -- a strong `T` in the same archive member
+ * (exp.o) as ceil/exp/fabs -- so the stopgap is removed.
+ *
+ * It was not actually breaking the link: this glue is compiled into an archive
+ * member (libvkquake.a), so it is only extracted when something still needs a
+ * symbol from it, and vkQuake links and runs today. But keeping a duplicate
+ * strong definition of a libc function leaves the link's correctness dependent
+ * on extraction order, which is the kind of thing that breaks on an unrelated
+ * change -- exactly how the Window Maker `nice()` stub took down the X11 build
+ * once libphoenix grew that function (2026-09-10). Check libphoenix before
+ * adding a libc stopgap here.
  */
-double copysign(double x, double y)
-{
-	double a = fabs(x);
-	return signbit(y) ? -a : a;
-}
