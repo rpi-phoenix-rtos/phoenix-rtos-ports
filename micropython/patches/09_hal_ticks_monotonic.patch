@@ -1,0 +1,49 @@
+mp_hal_ticks_ms/us must be MONOTONIC; on Phoenix they were the wall clock.
+
+Both functions select their clock with
+
+    #if (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0) && defined(_POSIX_MONOTONIC_CLOCK)
+        clock_gettime(CLOCK_MONOTONIC, ...)
+    #else
+        gettimeofday(...)          /* <-- Phoenix took this branch */
+    #endif
+
+libphoenix advertises _POSIX_VERSION 200809L but defines no POSIX *option*
+macros at all, so that test is always false here and both tick functions fell
+back to gettimeofday(). That is the wall clock: on Phoenix CLOCK_REALTIME is
+CLOCK_MONOTONIC plus a settable offset (libphoenix time/time.c), so it steps
+whenever anything calls clock_settime()/settimeofday() -- ntpclient does, at
+boot.
+
+These two are MicroPython's monotonic primitives. time.ticks_ms()/ticks_us()
+and especially time.ticks_diff() are documented as monotonic and are the
+standard way MicroPython code measures elapsed time; backing them with a
+steppable clock makes ticks_diff() return nonsense (including negative or huge
+values) across a clock set. Phoenix does support CLOCK_MONOTONIC, so ask for it
+directly.
+
+Same defect and same fix as the Quake II frame timer (phoenix-rtos-ports
+4a166c4). Found by measuring which ports test the absent option macros:
+docs/misc/2026-09-10-posix-option-macros-blast-radius.md in the coordination
+repo. Guarded on __phoenix__ so other platforms keep the upstream probe.
+
+--- micropython-1.26.0/ports/unix/unix_mphal.c	2026-09-10 08:29:20.974569040 +0200
++++ micropython-phoenix/ports/unix/unix_mphal.c	2026-09-10 08:29:20.984139513 +0200
+@@ -206,7 +206,7 @@
+ 
+ #ifndef mp_hal_ticks_ms
+ mp_uint_t mp_hal_ticks_ms(void) {
+-    #if (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0) && defined(_POSIX_MONOTONIC_CLOCK)
++    #if defined(__phoenix__) || ((defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0) && defined(_POSIX_MONOTONIC_CLOCK))
+     struct timespec tv;
+     clock_gettime(CLOCK_MONOTONIC, &tv);
+     return tv.tv_sec * 1000 + tv.tv_nsec / 1000000;
+@@ -220,7 +220,7 @@
+ 
+ #ifndef mp_hal_ticks_us
+ mp_uint_t mp_hal_ticks_us(void) {
+-    #if (defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0) && defined(_POSIX_MONOTONIC_CLOCK)
++    #if defined(__phoenix__) || ((defined(_POSIX_TIMERS) && _POSIX_TIMERS > 0) && defined(_POSIX_MONOTONIC_CLOCK))
+     struct timespec tv;
+     clock_gettime(CLOCK_MONOTONIC, &tv);
+     return tv.tv_sec * 1000000 + tv.tv_nsec / 1000;
