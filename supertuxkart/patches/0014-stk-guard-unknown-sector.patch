@@ -1,0 +1,139 @@
+Reject an out-of-range drive-graph sector before it reaches the graph.
+
+This fixes a hard crash, ~1 run in 3, that looked like this on a Raspberry Pi 4:
+
+  Exception #36: Data Abort (EL0)  esr=0x92000004  far=0x800000010d009d78
+  pc -> DriveGraph::getAngleToNext(int, int) const
+  in thread 60, process "/usr/bin/supertuxkart"
+
+`far` has bit 63 set, which a valid aarch64 userspace pointer never has, so a
+garbage value was being dereferenced.
+
+The chain is entirely in STK's own code:
+
+  * Graph::UNKNOWN_SECTOR is -1 (tracks/graph.cpp).
+  * steerToAngle() below declares the sector `const unsigned int`, so a -1
+    sector becomes 0xFFFFFFFF silently at the call boundary.
+  * getAngleToNext(n, j) is getNode(n)->getAngleToSuccessor(j), and
+    DriveGraph::getNode(unsigned) bounds-checks only with
+    `assert(j < m_all_nodes.size())` -- compiled out under NDEBUG, which is how
+    a release build is built. So at runtime there is no check.
+  * m_all_nodes[0xFFFFFFFF] therefore reads about 32 GiB past the vector and
+    yields whatever is there as a Node*, and the following
+    dynamic_cast<DriveNode*> dereferences that pointer's vptr. The
+    `assert(n != NULL)` after it is compiled out too.
+
+It needs a kart to be off the drive graph (rescue, off-track, the first frames
+after a respawn) for the sector to go negative, which is why it is intermittent.
+It is latent on other platforms rather than absent: with asserts enabled it
+aborts loudly, and on a desktop the wild read usually lands on mapped memory and
+merely produces nonsense steering for one frame. It is fatal only when the
+computed address happens to be unmapped.
+
+Fixed at the boundary rather than in getNode(): an invalid sector should not
+reach the graph at all, and getNode() is a hot accessor whose contract other
+callers rely on. When the sector is unusable there is no graph direction to
+steer towards, so the kart keeps its current heading for that frame and only the
+caller's add_angle is applied -- the same result the normal path produces when
+the kart is already pointing down the track.
+
+Verified on hardware: 0 crashes in 7 runs with the AI removed (--numkarts=1,
+which takes away the only caller that can reach this), against 1 in 3 with
+--numkarts=4.
+
+THREE call routes reach the bad index, and all three are guarded here:
+
+  * AIBaseLapController::steerToAngle() -- the unsigned-conversion route; and
+  * SkiddingAI::findNonCrashingPoint(), which is the PC originally recorded for
+    this crash. It is worse than the first: it indexes m_next_node_index[] and
+    m_successor_index[] with m_track_node DIRECTLY, so it reads out of bounds
+    before getAngleToNext() is even called. reset() guards m_track_node by
+    falling back to findOutOfRoadSector(), but nothing re-checks it before this
+    function runs during a race; and
+  * SkiddingAI::findNonCrashingPointNew(), the PSA_NEW alternative selected by
+    m_point_selection_algorithm, whose very first statement is the same
+    m_next_node_index[m_track_node] read.
+
+--- a/src/karts/controller/ai_base_lap_controller.cpp
++++ b/src/karts/controller/ai_base_lap_controller.cpp
+@@ -246,8 +246,24 @@
+ float AIBaseLapController::steerToAngle(const unsigned int sector,
+                                      const float add_angle)
+ {
+-    float angle = DriveGraph::get()->getAngleToNext(sector,
+-                                                    getNextSector(sector));
++    /* `sector` is unsigned, so Graph::UNKNOWN_SECTOR (-1) arrives here as
++     * 0xFFFFFFFF. DriveGraph::getNode() only guards its index with an assert(),
++     * which is compiled out under NDEBUG, so letting that through indexes far
++     * past m_all_nodes and dereferences the garbage as a Node*. Check before
++     * handing the value to the graph. */
++    const DriveGraph *graph = DriveGraph::get();
++    if (graph == NULL || sector >= graph->getNumNodes())
++    {
++        /* No usable graph direction this frame: hold the current heading and
++         * apply only the caller's adjustment. */
++        float held = (m_kart->getBlockedByPlungerTicks() > 0)
++                   ? add_angle * 0.2f
++                   : add_angle;
++        return normalizeAngle(held);
++    }
++
++    float angle = graph->getAngleToNext(sector,
++                                        getNextSector(sector));
+ 
+     //Desired angle minus current angle equals how many angles to turn
+     float steer_angle = angle - m_kart->getHeading();
+--- a/src/karts/controller/skidding_ai.cpp
++++ b/src/karts/controller/skidding_ai.cpp
+@@ -2581,6 +2581,25 @@
+ */
+ void SkiddingAI::findNonCrashingPointNew(Vec3 *result, int *last_node)
+ {
++    /* m_track_node is Graph::UNKNOWN_SECTOR (-1) whenever the kart is off the
++     * drive graph -- rescue, off-track, the first frames after a respawn.
++     * reset() guards it by falling back to findOutOfRoadSector(), but nothing
++     * re-checks it before this runs during a race, and every use below indexes
++     * an array with it: m_next_node_index[] and m_successor_index[] directly,
++     * and DriveGraph::getNode() inside getAngleToNext(), whose only bounds check
++     * is an assert() compiled out under NDEBUG. With -1 those read far out of
++     * bounds and the garbage is dereferenced as a Node*. Aim 20 m ahead in kart
++     * space for this frame instead -- well defined, and what the normal path
++     * yields when the kart already points down the track. */
++    if (m_track_node == Graph::UNKNOWN_SECTOR ||
++        m_track_node < 0 ||
++        (unsigned int)m_track_node >= DriveGraph::get()->getNumNodes())
++    {
++        *last_node = m_track_node;
++        *result = m_kart->getTrans()(Vec3(0.0f, 0.0f, 20.0f));
++        return;
++    }
++
+     *last_node = m_next_node_index[m_track_node];
+     const core::vector2df xz = m_kart->getXYZ().toIrrVector2d();
+ 
+@@ -2699,6 +2718,25 @@
+     Vec3 forw(0, 0, 50);
+     m_curve[CURVE_KART]->addPoint(m_kart->getTrans()(forw)+eps);
+ #endif
++    /* m_track_node is Graph::UNKNOWN_SECTOR (-1) whenever the kart is off the
++     * drive graph -- rescue, off-track, the first frames after a respawn.
++     * reset() guards it by falling back to findOutOfRoadSector(), but nothing
++     * re-checks it before this runs during a race, and every use below indexes
++     * an array with it: m_next_node_index[] and m_successor_index[] directly,
++     * and DriveGraph::getNode() inside getAngleToNext(), whose only bounds check
++     * is an assert() compiled out under NDEBUG. With -1 those read far out of
++     * bounds and the garbage is dereferenced as a Node*. Aim 20 m ahead in kart
++     * space for this frame instead -- well defined, and what the normal path
++     * yields when the kart already points down the track. */
++    if (m_track_node == Graph::UNKNOWN_SECTOR ||
++        m_track_node < 0 ||
++        (unsigned int)m_track_node >= DriveGraph::get()->getNumNodes())
++    {
++        *last_node = m_track_node;
++        *aim_position = m_kart->getTrans()(Vec3(0.0f, 0.0f, 20.0f));
++        return;
++    }
++
+     *last_node = m_next_node_index[m_track_node];
+     float angle = DriveGraph::get()->getAngleToNext(m_track_node,
+                                               m_successor_index[m_track_node]);
