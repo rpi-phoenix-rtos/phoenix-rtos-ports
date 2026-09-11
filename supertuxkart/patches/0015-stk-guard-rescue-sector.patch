@@ -1,0 +1,59 @@
+Reject an out-of-range graph index on the RESCUE path too.
+
+Companion to 0014, which guarded the three AI routes to the same defect. This is
+the fourth route, found by auditing the callers of DriveGraph::getAngleToNext()
+after 0014 was verified.
+
+LinearWorld::getRescuePositionIndex() is declared `unsigned int` but returns
+getTrackSector(kart_id)->getCurrentGraphNode(), which is Graph::UNKNOWN_SECTOR
+(-1) exactly when the kart is off the drive graph -- and being off the graph is
+the usual reason a rescue is running in the first place. So the condition that
+produces the invalid sector and the code that consumes it are the same event,
+which makes this the most suspicious of the four routes even though 0014's three
+guards were enough to take the observed crash rate from 1 in 3 to 0 in 12.
+
+Everything downstream indexes an array with the value:
+
+  * Graph::get()->getQuad(index)->isIgnored(), immediately below, before any
+    check; and
+  * via the caller (World::rescueKartAfterRescue / moveKartAfterRescue),
+    getRescueTransform(index) -> getNode(index) twice, plus
+    Track::getAngle(index) -> DriveGraph::getAngleToNext(n, 0).
+
+DriveGraph::getNode(unsigned) bounds-checks only with
+assert(j < m_all_nodes.size()), compiled out under NDEBUG, so the index reads
+far past m_all_nodes and dynamic_cast dereferences the garbage as a Node* --
+reaching the exact fault site observed on hardware, getAngleToNext.
+
+Fixed by falling back to findOutOfRoadSector(), which is what the ignored-quad
+branch immediately below already does for its own bad-index case, so this keeps
+the function's existing idiom rather than inventing a new failure mode.
+
+Six clean trials on 0014 say its three guards suffice in practice; they do not
+make this conversion sound. Compile-verified (single-object build).
+
+--- a/src/modes/linear_world.cpp
++++ b/src/modes/linear_world.cpp
+@@ -828,6 +828,22 @@
+     // raycast to detect where it is driving on (--> potential rescue loop)
+     int index = getTrackSector(kart_id)->getCurrentGraphNode();
+ 
++    /* getCurrentGraphNode() is Graph::UNKNOWN_SECTOR (-1) exactly when the kart
++     * is off the drive graph -- which is the usual reason a rescue is happening
++     * at all. Everything downstream indexes an array with this value:
++     * getQuad(index) immediately below, and, via the caller,
++     * getRescueTransform() -> getNode(index) and Track::getAngle(index) ->
++     * DriveGraph::getAngleToNext(). DriveGraph::getNode() bounds-checks only
++     * with an assert() compiled out under NDEBUG, so -1 (0xFFFFFFFF once this
++     * function's unsigned return type converts it) reads far out of bounds and
++     * the garbage is dereferenced as a Node*. Fall back the same way the
++     * ignored-quad case just below already does. */
++    if (index == Graph::UNKNOWN_SECTOR || index < 0 ||
++        (unsigned int)index >= Graph::get()->getNumNodes())
++    {
++        return Graph::get()->findOutOfRoadSector(kart->getFrontXYZ());
++    }
++
+     // Do not rescue to an ignored quad, find another (non-ignored) quad
+     if (Graph::get()->getQuad(index)->isIgnored())
+     {
