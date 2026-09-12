@@ -1,0 +1,181 @@
+Fix the font fallback[] index skew, and bounds-check the fallback sprite bank.
+
+FontWithFace::render() builds three parallel arrays for the glyphs it will draw.
+Two of them are COMPACT -- `indices` via emplace_back() and `offsets` via
+push_back() -- but `fallback` was sized to gl.size() and written at the loop
+index `i`:
+
+    std::vector<bool> fallback(text_size);
+    ...
+    fallback[i] = use_fallback_font;
+
+The collect loop `continue`s on GLF_NEWLINE before appending to either compact
+array, so as soon as the text contains one newline the loop index and the
+compact index diverge. Both draw loops then read all three with the COMPACT
+index n:
+
+    const int sprite_id = indices[n].first;
+    if (!fallback[n] && (sprite_id < 0 || sprite_id >= sprite_amount))
+        continue;
+
+so for multi-line text fallback[n] describes a different glyph than indices[n].
+
+That is not merely cosmetic, because the bounds check is SKIPPED ENTIRELY when
+fallback[n] is true. A main-bank sprite_id then indexes the fallback bank, which
+holds only the glyphs actually demanded and is normally far smaller:
+
+    (*fallback_sprites)[sprite_id].Frames[0].textureNumber
+
+core::array::operator[] has only _IRR_DEBUG_BREAK_IF, so under NDEBUG there is
+no check at all -- the same shape as the drive-graph defect fixed in 0014/0015.
+The out-of-range read yields a garbage textureNumber, getTexture() returns a
+wild video::ITexture*, and FontDrawer::addGlyph()/draw() call grab()/drop() on
+it, each a 4-byte read-modify-write through that wild pointer.
+
+Two changes:
+
+  * `fallback` becomes compact (reserve + push_back) so it lines up with
+    `indices` and `offsets` by construction. The four in-loop reads use the
+    local `use_fallback_font` directly, which is what they always meant.
+  * both draw loops bound sprite_id against whichever bank they are about to
+    index, instead of skipping the check on the fallback path.
+
+Scope note: this is a real defect on its own terms (a wrong glyph scale and a
+wrong texture for multi-line text), independent of whether it turns out to be
+the writer behind the allocator corruption under investigation.
+
+Detector (Phoenix-local), CORRECTED. A first version checked the bounds in terms
+of the *fixed* fallback[], which cannot work: the compaction repairs the index
+before the bounds test runs, so such a check can never observe the bug and would
+report zero whether or not the defect was live. The detector now keeps a shadow
+of the PRE-FIX indexing (fallback_skewed[], written at the glyph loop index
+exactly as the buggy code did, never read for rendering) and fires once, as
+STK-FONT-OOB, exactly when the OLD code would have skipped the bounds test and
+read past the fallback bank. One fire proves the defect was live in that
+workload.
+
+Reachability is not hypothetical: BoldFace::init() calls setFallbackFont(regular),
+so any bold glyph absent from the bold TTF takes the fallback branch, and the HUD
+uses bold text.
+
+--- a/src/font/font_with_face.cpp
++++ b/src/font/font_with_face.cpp
+@@ -607,7 +607,16 @@
+     const unsigned int text_size = gl.size();
+     std::vector<std::pair<int, int> > indices;
+     core::array<core::position2d<float>> offsets(text_size);
+-    std::vector<bool> fallback(text_size);
++    // Compact, exactly like indices/offsets below. The GLF_NEWLINE branch in the
++    // collect loop `continue`s without appending to either, so an index running
++    // over gl.size() does NOT line up with them once any newline has been seen.
++    std::vector<bool> fallback;
++    fallback.reserve(text_size);
++    // Shadow of the PRE-FIX indexing, kept only so the detector below can
++    // answer whether the old out-of-bounds read was actually happening in a
++    // given workload. Written at the glyph loop index exactly as the buggy
++    // code did; never read for rendering.
++    std::vector<bool> fallback_skewed(text_size);
+     core::array<core::position2d<float>> gld_offsets;
+     gui::GlyphLayoutDraw df_used = gui::GLD_NONE;
+ 
+@@ -691,15 +700,16 @@
+                 }
+             }
+         }
+-        fallback[i]            = use_fallback_font;
++        fallback.push_back(use_fallback_font);
++        fallback_skewed[i] = use_fallback_font;
+         if (char_collector == NULL)
+         {
+             float glyph_offset_x = (int)(area->bearing_x +
+                 glyph_layout.x_offset * m_inverse_shaping) *
+-                (fallback[i] ? m_fallback_font_scale : scale);
++                (use_fallback_font ? m_fallback_font_scale : scale);
+             float glyph_offset_y = (int)(area->offset_y -
+                 glyph_layout.y_offset * m_inverse_shaping) *
+-                (fallback[i] ? m_fallback_font_scale : scale);
++                (use_fallback_font ? m_fallback_font_scale : scale);
+             offset.X += glyph_offset_x;
+             offset.Y += glyph_offset_y;
+             offsets.push_back(offset);
+@@ -711,10 +721,10 @@
+             // Billboard text specific, use offset_y_bt instead
+             float glyph_offset_x = (int)(area->bearing_x +
+                 glyph_layout.x_offset * m_inverse_shaping) *
+-                (fallback[i] ? m_fallback_font_scale : scale);
++                (use_fallback_font ? m_fallback_font_scale : scale);
+             float glyph_offset_y = (int)(area->offset_y_bt +
+                 glyph_layout.y_offset * m_inverse_shaping) *
+-                (fallback[i] ? m_fallback_font_scale : scale);
++                (use_fallback_font ? m_fallback_font_scale : scale);
+             offset.X += glyph_offset_x;
+             offset.Y += glyph_offset_y;
+             offsets.push_back(offset);
+@@ -824,8 +834,32 @@
+         for (int n = 0; n < indice_amount; n++)
+         {
+             const int sprite_id = indices[n].first;
+-            if (!fallback[n] && (sprite_id < 0 || sprite_id >= sprite_amount))
++            if (sprite_id < 0 || sprite_id >= (fallback[n] ?
++                (fallback_sprites == NULL ? 0 : (int)fallback_sprites->size()) :
++                sprite_amount))
++            {
+                 continue;
++            }
++            // PHOENIX detector. The fix above repairs the index BEFORE the bounds
++            // test, so a check written in terms of the corrected fallback[] can
++            // never observe the bug. Compare against the pre-fix indexing instead:
++            // this fires exactly when the OLD code would have skipped the bounds
++            // test and read past the fallback bank. One fire proves the defect was
++            // live in this workload.
++            {
++                static bool phoenix_oob_reported = false;
++                const int fb_amount = (fallback_sprites == NULL) ? 0 :
++                    (int)fallback_sprites->size();
++                if (!phoenix_oob_reported && fallback_skewed[n]
++                    && (sprite_id < 0 || sprite_id >= fb_amount))
++                {
++                    phoenix_oob_reported = true;
++                    printf("STK-FONT-OOB: pre-fix code would have read sprite_id=%d "
++                        "past fallback bank=%d (n=%d, corrected=%d)\n",
++                        sprite_id, fb_amount, n, (int)(fallback[n] ? 1 : 0));
++                    fflush(stdout);
++                }
++            }
+             if (indices[n].first == -1) continue;
+ 
+             const int tex_id = (fallback[n] ?
+@@ -889,8 +923,32 @@
+     for (int n = 0; n < indice_amount; n++)
+     {
+         const int sprite_id = indices[n].first;
+-        if (!fallback[n] && (sprite_id < 0 || sprite_id >= sprite_amount))
++        if (sprite_id < 0 || sprite_id >= (fallback[n] ?
++            (fallback_sprites == NULL ? 0 : (int)fallback_sprites->size()) :
++            sprite_amount))
++        {
+             continue;
++        }
++        // PHOENIX detector. The fix above repairs the index BEFORE the bounds
++        // test, so a check written in terms of the corrected fallback[] can
++        // never observe the bug. Compare against the pre-fix indexing instead:
++        // this fires exactly when the OLD code would have skipped the bounds
++        // test and read past the fallback bank. One fire proves the defect was
++        // live in this workload.
++        {
++            static bool phoenix_oob_reported = false;
++            const int fb_amount = (fallback_sprites == NULL) ? 0 :
++                (int)fallback_sprites->size();
++            if (!phoenix_oob_reported && fallback_skewed[n]
++                && (sprite_id < 0 || sprite_id >= fb_amount))
++            {
++                phoenix_oob_reported = true;
++                printf("STK-FONT-OOB: pre-fix code would have read sprite_id=%d "
++                    "past fallback bank=%d (n=%d, corrected=%d)\n",
++                    sprite_id, fb_amount, n, (int)(fallback[n] ? 1 : 0));
++                fflush(stdout);
++            }
++        }
+         if (indices[n].first == -1) continue;
+ 
+         const int tex_id = (fallback[n] ?
