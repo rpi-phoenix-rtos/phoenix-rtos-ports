@@ -1,0 +1,64 @@
+--- a/src/tracks/drive_graph.cpp
++++ b/src/tracks/drive_graph.cpp
+@@ -18,6 +18,8 @@
+ 
+ #include "tracks/drive_graph.hpp"
+ 
++#include <cstdio>
++
+ #include "config/user_config.hpp"
+ #include "io/file_manager.hpp"
+ #include "io/xml_node.hpp"
+@@ -743,9 +745,50 @@
+ // -----------------------------------------------------------------------------
+ DriveNode* DriveGraph::getNode(unsigned int j) const
+ {
+-    assert(j < m_all_nodes.size());
++    // PHOENIX: both asserts below are compiled out under NDEBUG, so an
++    // out-of-range index reads m_all_nodes OUT OF BOUNDS and the dynamic_cast
++    // then dereferences whatever that read produced. Observed on hardware as a
++    // Data Abort with far far outside any mapping (e.g. 0x20a0ca76c, and an
++    // earlier one ~32 GiB past the array from a -1 sector).
++    //
++    // Four CALLERS were guarded individually (patches 0014/0015), but this is
++    // the chokepoint every caller goes through -- getAngleToNext() reaches it by
++    // a route those patches do not cover -- so guard it here instead of adding a
++    // fifth caller-side check.
++    //
++    // Clamp rather than return NULL: every caller dereferences the result
++    // immediately, so NULL would only move the crash. Node 0 is always valid
++    // when the graph is non-empty, and a wrong-but-valid node costs one bad AI
++    // decision instead of the process.
++    //
++    // REPORTS (once) rather than clamping quietly: a silent clamp would hide the
++    // out-of-range index, which is the actual bug and is still unexplained.
++    if (m_all_nodes.empty())
++    {
++        return NULL;
++    }
++    if (j >= m_all_nodes.size())
++    {
++        static bool reported = false;
++        if (!reported)
++        {
++            reported = true;
++            printf("stk: DriveGraph::getNode(%u) out of range (size %u)"
++                   " -- clamping to 0\n",
++                   j, (unsigned)m_all_nodes.size());
++        }
++        j = 0;
++    }
+     DriveNode* n = dynamic_cast<DriveNode*>(m_all_nodes[j]);
+-    assert(n != NULL);
++    if (n == NULL)
++    {
++        static bool castReported = false;
++        if (!castReported)
++        {
++            castReported = true;
++            printf("stk: DriveGraph::getNode(%u) is not a DriveNode\n", j);
++        }
++    }
+     return n;
+ }   // getNode
+ 
