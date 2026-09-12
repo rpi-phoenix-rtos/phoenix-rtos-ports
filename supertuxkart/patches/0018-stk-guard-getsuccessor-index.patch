@@ -1,0 +1,49 @@
+--- a/src/tracks/drive_node.hpp
++++ b/src/tracks/drive_node.hpp
+@@ -22,6 +22,7 @@
+ #include <vector>
+ 
+ #include "tracks/quad.hpp"
++#include <cstdio>
+ 
+ /**
+   * \brief This class stores a node of the drive graph, i.e. a list of
+@@ -123,8 +124,37 @@
+                              { return (unsigned int)m_successor_nodes.size(); }
+     // ------------------------------------------------------------------------
+     /** Returns the i-th successor node. */
++    // PHOENIX: this was a raw vector index with NO bounds check -- not even an
++    // assert, unlike DriveGraph::getNode(). An out-of-range i reads
++    // m_successor_nodes out of bounds and returns garbage, which callers then
++    // use as a NODE index: DriveGraph::determineDirection() does exactly that,
++    // feeding getSuccessor()'s result straight into getAngleToNext() ->
++    // getNode(). That is how a wild index reached getNode and faulted on
++    // hardware (far=0x20a0ca76c).
++    //
++    // getNode() is now clamped (patch 0017), so the crash is already contained;
++    // this check exists to name the ACTUAL defect one level up -- "successor i
++    // out of range on a node with n successors" -- instead of reporting the
++    // laundered index that arrives at getNode.
++    //
++    // Returning 0 keeps the caller on a valid node; reporting once keeps the
++    // out-of-range index visible, since it is still unexplained.
+     unsigned int getSuccessor(unsigned int i)  const
+-                                               { return m_successor_nodes[i]; }
++    {
++        if (i >= m_successor_nodes.size())
++        {
++            static bool reported = false;
++            if (!reported)
++            {
++                reported = true;
++                printf("stk: DriveNode::getSuccessor(%u) out of range"
++                       " (%u successors) -- returning 0\n",
++                       i, (unsigned int)m_successor_nodes.size());
++            }
++            return 0;
++        }
++        return m_successor_nodes[i];
++    }
+     // ------------------------------------------------------------------------
+     /** Returns the number of predecessors. */
+     unsigned int getNumberOfPredecessors() const
