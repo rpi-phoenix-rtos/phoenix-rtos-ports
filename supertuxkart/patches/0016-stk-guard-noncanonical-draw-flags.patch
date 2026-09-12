@@ -1,0 +1,57 @@
+--- a/src/font/font_with_face.cpp
++++ b/src/font/font_with_face.cpp
+@@ -18,6 +18,9 @@
+ 
+ #include "font/font_with_face.hpp"
+ 
++#include <cstdio>
++#include <cstdint>
++
+ #include "config/user_config.hpp"
+ #include "font/face_ttf.hpp"
+ #include "font/font_drawer.hpp"
+@@ -732,7 +735,43 @@
+                 float each_size = width * scale /
+                     (float)glyph_layout.cluster.size();
+                 float start = offset.X;
+-                for (unsigned df = 0; df < glyph_layout.draw_flags.size();
++                // PHOENIX: a non-canonical draw_flags data pointer has been seen
++                // here (~1 STK run in 10). The {_M_start,_M_finish} pair reads
++                // back SELF-CONSISTENT -- finish-start equals the element count,
++                // so size() and operator[] both look sane -- but both words carry
++                // a bogus high half (e.g. 0x80000001 over a plausible heap
++                // address), and the first byte load takes a Data Abort here.
++                //
++                // Reading the pointer VALUE is safe; only dereferencing it is not.
++                // AArch64 user VAs are canonical (bits 63..47 zero), which the bad
++                // pointer violates, so test and skip just this glyph's draw flags.
++                // The glyph itself still renders and offset.X below still advances,
++                // so text stays correctly placed.
++                //
++                // It REPORTS rather than recovering quietly: a silent skip would
++                // hide the only evidence that the fault still happens.
++                bool df_ok = true;
++                {
++                    const void *const *dfv =
++                        (const void *const *)(const void *)&glyph_layout.draw_flags;
++                    uintptr_t dfstart = (uintptr_t)dfv[0];
++                    uintptr_t dffinish = (uintptr_t)dfv[1];
++                    if (((dfstart >> 47) != 0) || ((dffinish >> 47) != 0))
++                    {
++                        df_ok = false;
++                        printf("stk: BAD draw_flags vector -- skipping this glyph's flags\n"
++                               "  &glyph_layout = %p  &draw_flags = %p%s\n"
++                               "  _M_start = 0x%016llx  _M_finish = 0x%016llx\n",
++                               (const void *)&glyph_layout,
++                               (const void *)&glyph_layout.draw_flags,
++                               ((((uintptr_t)&glyph_layout.draw_flags) & 0xfffu) == 0u)
++                                   ? "  (PAGE-ALIGNED)" : "",
++                               (unsigned long long)dfstart,
++                               (unsigned long long)dffinish);
++                    }
++                }
++                for (unsigned df = 0;
++                     df_ok && df < glyph_layout.draw_flags.size();
+                      df++)
+                 {
+                     if (glyph_layout.draw_flags[df] != gui::GLD_NONE)
