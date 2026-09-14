@@ -75,7 +75,16 @@ static void wait_for_gamedata(void)
  * (unchanged default). This lets a tester boot any level (e2m1, a water map, a DM map, ...) by
  * dropping a file into the game dir — no rebuild — which is also how the HDMI render pipeline can
  * exercise maps beyond start. Only [A-Za-z0-9_-] are accepted (it is pasted into a `map` command). */
-static void read_boot_map(const char *basedir, char *out, size_t n, const char *cfgname)
+/* `dflt` may be NULL, which means "no default": leave `out` empty when the file is
+ * missing or holds nothing usable. That matters for phoenix-demo.cfg, whose whole
+ * job is to be ABSENT most of the time. Defaulting it to "start" like the map
+ * config made a missing demo file run `playdemo start` -- a demo that does not
+ * exist -- instead of falling through to the map path, so the demo override could
+ * not be turned off by removing the file. That is what blocked the wall-torch
+ * check (#67): the reproducer needs `map start`, and deleting the demo config did
+ * not produce it. */
+static void read_boot_map(const char *basedir, char *out, size_t n, const char *cfgname,
+	const char *dflt)
 {
 	char path[96];
 	FILE *f;
@@ -98,8 +107,8 @@ static void read_boot_map(const char *basedir, char *out, size_t n, const char *
 			break;
 		}
 	}
-	if (out[0] == '\0')
-		snprintf(out, n, "start");
+	if ((out[0] == '\0') && (dflt != NULL))
+		snprintf(out, n, "%s", dflt);
 }
 
 int main(int argc, char *argv[])
@@ -162,7 +171,7 @@ int main(int argc, char *argv[])
 		 * Quake ships demo1/demo2/demo3 in id1/pak0.pak, and demo playback is the
 		 * only way to get real movement on screen without a keyboard, so it is
 		 * worth a route. Same one-line file convention and same sanitiser. */
-		read_boot_map(g_basedir, bootdemo, sizeof(bootdemo), "phoenix-demo.cfg");
+		read_boot_map(g_basedir, bootdemo, sizeof(bootdemo), "phoenix-demo.cfg", NULL);
 		if (bootdemo[0] != '\0') {
 			snprintf(mapcmd, sizeof(mapcmd), "playdemo %s\n", bootdemo);
 			Cbuf_AddText(mapcmd);
@@ -170,7 +179,7 @@ int main(int argc, char *argv[])
 			Sys_Printf("vkquake: playing demo '%s' (from id1/phoenix-demo.cfg)\n", bootdemo);
 		}
 		else {
-			read_boot_map(g_basedir, bootmap, sizeof(bootmap), "phoenix-map.cfg");
+			read_boot_map(g_basedir, bootmap, sizeof(bootmap), "phoenix-map.cfg", "start");
 			snprintf(mapcmd, sizeof(mapcmd), "map %s\n", bootmap);
 			Cbuf_AddText(mapcmd);
 			Cbuf_Execute();
