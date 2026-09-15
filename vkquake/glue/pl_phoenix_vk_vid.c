@@ -67,6 +67,10 @@ extern PFN_vkVoidFunction vkGetInstanceProcAddr (VkInstance instance, const char
 /* v3d winsys scanout (libv3d-phoenix.a) — the fb0 present path the harness proved. */
 extern void v3d_phoenix_set_scanout (uint32_t pa, uint32_t bytes);
 extern void v3d_phoenix_set_next_scanout (void);
+/* Page-flip support, already used by the GL path (sdl_phoenix_glctx.c). scanout_init probes how
+ * many stacked buffers the firmware granted and sets up pa2/pa3; flip pans the display to one. */
+extern int	v3d_phoenix_scanout_init (uint32_t pa, uint32_t w, uint32_t h, uint32_t pitch);
+extern void v3d_phoenix_flip (int buf);
 
 /* ============================ globals the engine references ============================ */
 /* (a) GENUINELY UNDEFINED — this shim must DEFINE them (verified vs undefined-symbols.txt) */
@@ -120,14 +124,25 @@ static VkCommandBuffer frame_cb			  = VK_NULL_HANDLE;
  * issues an UNCONDITIONAL vkCmdPipelineBarrier on primary_cb_contexts[PCBX_UPDATE_WARP].cb — a NULL
  * cb there was the world-render SIGSEGV. */
 static VkCommandBuffer pcbx_cb[PCBX_NUM]  = { VK_NULL_HANDLE };
-static VkImage		   scanout_image	  = VK_NULL_HANDLE;
-static VkDeviceMemory  scanout_memory	  = VK_NULL_HANDLE;
-static VkImageView	   scanout_view		  = VK_NULL_HANDLE;
+/* PAGE-FLIP (vkq-tile-flicker). We used to render into ONE fb0-backed image, i.e. straight into
+ * the buffer the display was scanning out. V3D is tile-based and stores tiles one at a time at
+ * end-of-render-pass, so a refresh landing mid-store showed some tiles of the new frame and some
+ * of the old -- hard-edged, screen-axis-aligned blocks for exactly one frame. Now we render into
+ * an OFF-SCREEN buffer and pan the display to it once the frame is complete, which is what the
+ * GL path has always done (and why QuakeSpasm never showed this).
+ *
+ * Falls back to the old in-place behaviour when the firmware granted only one buffer. */
+#define VKQ_MAX_SCANOUT 3
+static VkImage		   scanout_image[VKQ_MAX_SCANOUT];
+static VkDeviceMemory  scanout_memory[VKQ_MAX_SCANOUT];
+static VkImageView	   scanout_view[VKQ_MAX_SCANOUT];
+static int			   scanout_nbuf		  = 1;	/* buffers the firmware granted (1 = no flipping) */
+static int			   scanout_cur		  = 0;	/* buffer this frame renders into */
 static VkImage		   depth_image		  = VK_NULL_HANDLE;   /* 3D: D32 depth buffer */
 static VkDeviceMemory  depth_memory		  = VK_NULL_HANDLE;
 static VkImageView	   depth_view		  = VK_NULL_HANDLE;
 static VkRenderPass	   ui_render_pass	  = VK_NULL_HANDLE;   /* the single color+depth pass (world+2D) */
-static VkFramebuffer   ui_framebuffer	  = VK_NULL_HANDLE;
+static VkFramebuffer   ui_framebuffer[VKQ_MAX_SCANOUT];
 static int			   have_depth		  = 0;   /* 1 once the color+depth pass/world path is wired */
 static int			   render_resources_created = 0;
 static int			   frame_recording	  = 0; /* set between GL_BeginRendering and GL_EndRendering */
@@ -505,7 +520,22 @@ static void discover_fb0 (void)
 		Sys_Printf ("vkvid: fb0 %ux%u pitch=%u pa=0x%llx size=%llu\n", fb_mode.width, fb_mode.height,
 		            fb_mode.pitch, (unsigned long long)fb_mode.framebuffer,
 		            (unsigned long long)fb_mode.smemlen);
-		v3d_phoenix_set_scanout ((uint32_t)fb_mode.framebuffer, (uint32_t)fb_mode.smemlen);
+		/* scanout_init (not just set_scanout) probes the firmware's granted virtual height and
+		 * sets up the second/third buffer addresses, without which v3d_phoenix_flip() is a no-op
+		 * and every frame is rendered straight into the displayed buffer. It also sets
+		 * scanout_bytes to ONE buffer (pitch*h) rather than the whole smemlen. */
+		scanout_nbuf = v3d_phoenix_scanout_init ((uint32_t)fb_mode.framebuffer, fb_mode.width,
+		                                         fb_mode.height, fb_mode.pitch);
+		if (scanout_nbuf < 1)
+			scanout_nbuf = 1;
+		if (scanout_nbuf > VKQ_MAX_SCANOUT)
+			scanout_nbuf = VKQ_MAX_SCANOUT;
+		if (getenv ("VKQ_SINGLE_BUFFER") != NULL) {
+			scanout_nbuf = 1; /* escape hatch: render in place, as before this fix */
+		}
+		Sys_Printf ("vkvid: scanout %d buffer(s) -> %s\n", scanout_nbuf,
+		            (scanout_nbuf >= 2) ? "PAGE-FLIP (render off-screen, pan on complete)"
+		                                : "single (render in place)");
 		fb_ready = 1;
 	} else {
 		Sys_Printf ("vkvid: fb0 GETMODE unavailable (offscreen only)\n");
@@ -570,47 +600,53 @@ static int create_render_resources (void)
 			.usage		   = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
 			.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 		};
-		err = pCreateImage (g_vk_device, &ici, NULL, &scanout_image);
-		if (err != VK_SUCCESS) {
-			Sys_Printf ("vkvid: vkCreateImage(scanout) -> %d\n", (int)err);
-			return 0;
-		}
+		for (int b = 0; b < scanout_nbuf; ++b) {
+			err = pCreateImage (g_vk_device, &ici, NULL, &scanout_image[b]);
+			if (err != VK_SUCCESS) {
+				Sys_Printf ("vkvid: vkCreateImage(scanout %d) -> %d\n", b, (int)err);
+				return 0;
+			}
 
-		VkMemoryRequirements mreq;
-		memset (&mreq, 0, sizeof (mreq));
-		pGetImageMemReq (g_vk_device, scanout_image, &mreq);
+			VkMemoryRequirements mreq;
+			memset (&mreq, 0, sizeof (mreq));
+			pGetImageMemReq (g_vk_device, scanout_image[b], &mreq);
 
-		VkMemoryAllocateInfo mai = {
-			.sType			 = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-			.allocationSize	 = mreq.size ? mreq.size : (VkDeviceSize)fb_mode.smemlen,
-			.memoryTypeIndex = pick_memory_type (mreq.memoryTypeBits),
-		};
-		v3d_phoenix_set_next_scanout (); /* the next BO (this image's memory) backs the live scanout */
-		err = pAllocateMemory (g_vk_device, &mai, NULL, &scanout_memory);
-		if (err == VK_SUCCESS)
-			err = pBindImageMemory (g_vk_device, scanout_image, scanout_memory, 0);
-		if (err != VK_SUCCESS) {
-			Sys_Printf ("vkvid: scanout image alloc/bind -> %d\n", (int)err);
-			return 0;
+			VkMemoryAllocateInfo mai = {
+				.sType			 = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+				.allocationSize	 = mreq.size ? mreq.size : (VkDeviceSize)fb_mode.smemlen,
+				.memoryTypeIndex = pick_memory_type (mreq.memoryTypeBits),
+			};
+			/* Each scanout-flagged alloc claims the NEXT granted buffer (0, then 1, then 2). */
+			v3d_phoenix_set_next_scanout ();
+			err = pAllocateMemory (g_vk_device, &mai, NULL, &scanout_memory[b]);
+			if (err == VK_SUCCESS)
+				err = pBindImageMemory (g_vk_device, scanout_image[b], scanout_memory[b], 0);
+			if (err != VK_SUCCESS) {
+				Sys_Printf ("vkvid: scanout image %d alloc/bind -> %d\n", b, (int)err);
+				return 0;
+			}
+			Sys_Printf ("vkvid: scanout image %d %ux%u bound (mem=%u)\n", b, fb_mode.width,
+			            fb_mode.height, (unsigned)mreq.size);
 		}
-		Sys_Printf ("vkvid: scanout image %ux%u bound (mem=%u)\n", fb_mode.width, fb_mode.height, (unsigned)mreq.size);
 	}
 
 	/* (2) Image view over the scanout image. */
 	{
-		VkImageViewCreateInfo vci = {
-			.sType			  = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-			.image			  = scanout_image,
-			.viewType		  = VK_IMAGE_VIEW_TYPE_2D,
-			.format			  = vulkan_globals.color_format,
-			.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-		};
-		err = pCreateImageView (g_vk_device, &vci, NULL, &scanout_view);
-		if (err != VK_SUCCESS) {
-			Sys_Printf ("vkvid: vkCreateImageView -> %d\n", (int)err);
-			return 0;
+		for (int b = 0; b < scanout_nbuf; ++b) {
+			VkImageViewCreateInfo vci = {
+				.sType			  = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+				.image			  = scanout_image[b],
+				.viewType		  = VK_IMAGE_VIEW_TYPE_2D,
+				.format			  = vulkan_globals.color_format,
+				.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+			};
+			err = pCreateImageView (g_vk_device, &vci, NULL, &scanout_view[b]);
+			if (err != VK_SUCCESS) {
+				Sys_Printf ("vkvid: vkCreateImageView(%d) -> %d\n", b, (int)err);
+				return 0;
+			}
 		}
-		Sys_Printf ("vkvid: rr: imageview ok\n");
+		Sys_Printf ("vkvid: rr: imageview ok (%d)\n", scanout_nbuf);
 	}
 
 	/* (2b) 3D: D32_SFLOAT depth buffer (image + memory + view), OPTIMAL tiling, depth-stencil
@@ -723,22 +759,28 @@ static int create_render_resources (void)
 
 	/* (4) Framebuffer wrapping the scanout view. */
 	{
-		VkImageView fb_atts[2] = { scanout_view, depth_view };
-		VkFramebufferCreateInfo fbci = {
-			.sType			 = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-			.renderPass		 = ui_render_pass,
-			.attachmentCount = have_depth ? 2u : 1u,
-			.pAttachments	 = fb_atts,
-			.width			 = fb_mode.width,
-			.height			 = fb_mode.height,
-			.layers			 = 1,
-		};
-		err = pCreateFramebuffer (g_vk_device, &fbci, NULL, &ui_framebuffer);
-		if (err != VK_SUCCESS) {
-			Sys_Printf ("vkvid: vkCreateFramebuffer(ui) -> %d\n", (int)err);
-			return 0;
+		/* One framebuffer per scanout buffer. The DEPTH attachment is deliberately shared: the
+		 * present path submits and waits for device idle every frame, so only one frame is ever
+		 * in flight and the depth buffer cannot be read by a previous frame while this one
+		 * writes it. */
+		for (int b = 0; b < scanout_nbuf; ++b) {
+			VkImageView fb_atts[2] = { scanout_view[b], depth_view };
+			VkFramebufferCreateInfo fbci = {
+				.sType			 = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+				.renderPass		 = ui_render_pass,
+				.attachmentCount = have_depth ? 2u : 1u,
+				.pAttachments	 = fb_atts,
+				.width			 = fb_mode.width,
+				.height			 = fb_mode.height,
+				.layers			 = 1,
+			};
+			err = pCreateFramebuffer (g_vk_device, &fbci, NULL, &ui_framebuffer[b]);
+			if (err != VK_SUCCESS) {
+				Sys_Printf ("vkvid: vkCreateFramebuffer(ui %d) -> %d\n", b, (int)err);
+				return 0;
+			}
 		}
-		Sys_Printf ("vkvid: rr: framebuffer ok\n");
+		Sys_Printf ("vkvid: rr: framebuffer ok (%d)\n", scanout_nbuf);
 	}
 
 	/* (5) Command pool + one PRIMARY command buffer for the per-frame record/submit. */
@@ -1100,7 +1142,7 @@ qboolean GL_BeginRendering (qboolean use_tasks, task_handle_t *begin_rendering_t
 	VkRenderPassBeginInfo rpbi = {
 		.sType			 = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
 		.renderPass		 = ui_render_pass,
-		.framebuffer	 = ui_framebuffer,
+		.framebuffer	 = ui_framebuffer[scanout_cur],
 		.renderArea		 = {{0, 0}, {(uint32_t)vid.width, (uint32_t)vid.height}},
 		.clearValueCount = have_depth ? 2u : 1u,
 		.pClearValues	 = clears,
@@ -1212,6 +1254,17 @@ task_handle_t GL_EndRendering (qboolean use_tasks, qboolean use_swapchain)
 	}
 
 	GL_WaitForDeviceIdle ();
+
+	/* THE PRESENT. The device is idle, so every tile of this frame has been stored -- only now is
+	 * it safe to show it. Pan the display to the buffer we just rendered, then move the next frame
+	 * onto a buffer that is NOT being scanned out. Rendering into the displayed buffer is what
+	 * produced the one-frame tile-shaped blocks (`vkq-tile-flicker`): V3D stores tiles one at a
+	 * time, so a refresh landing mid-store mixed new and old tiles. With scanout_nbuf == 1 there is
+	 * nowhere to flip to and we keep the old in-place behaviour. */
+	if (scanout_nbuf >= 2) {
+		v3d_phoenix_flip (scanout_cur);
+		scanout_cur = (scanout_cur + 1) % scanout_nbuf;
+	}
 
 	if (present_count < 8) {
 		Sys_Printf ("vkvid: waited %lu\n", present_count + 1);
