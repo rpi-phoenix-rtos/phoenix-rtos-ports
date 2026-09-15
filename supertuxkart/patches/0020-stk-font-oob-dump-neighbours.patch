@@ -1,0 +1,51 @@
+--- a/src/font/font_with_face.cpp
++++ b/src/font/font_with_face.cpp
+@@ -778,6 +778,48 @@
+                                    ? "  (PAGE-ALIGNED)" : "",
+                                (unsigned long long)dfstart,
+                                (unsigned long long)dffinish);
++
++                        // PHOENIX: discriminate WHERE the bad value comes from.
++                        //
++                        // (1) Re-read through a VOLATILE pointer. Without volatile
++                        // the compiler reuses the first load and the re-read proves
++                        // nothing. A value that changes between reads means a
++                        // transient load/TLB fault; a stable bad value means the
++                        // memory really holds it.
++                        {
++                            const void *const volatile *vdf =
++                                (const void *const volatile *)dfv;
++                            for (int r = 0; r < 4; r++)
++                            {
++                                printf("  reread[%d] = 0x%016llx 0x%016llx\n", r,
++                                       (unsigned long long)(uintptr_t)vdf[0],
++                                       (unsigned long long)(uintptr_t)vdf[1]);
++                            }
++                        }
++
++                        // (2) Dump this element and its NEIGHBOURS in the same
++                        // vector, plus the vector's own identity. Neighbours also
++                        // foreign => the whole buffer is aliased (an allocator
++                        // hand-out bug). Only this element's post-page-boundary
++                        // half foreign => page-level (a VM bug), which is what the
++                        // page-aligned siblings already recorded point at.
++                        printf("  vector: base=%p size=%u capacity=%u i=%u elem=%u\n",
++                               (const void *)gl.data(), (unsigned)gl.size(),
++                               (unsigned)gl.capacity(), i,
++                               (unsigned)sizeof(gui::GlyphLayout));
++                        for (unsigned d = (i > 0u) ? (i - 1u) : 0u;
++                             (d <= i + 1u) && (d < gl.size()); d++)
++                        {
++                            const unsigned char *b =
++                                (const unsigned char *)(const void *)&gl[d];
++                            printf("  gl[%u] @%p:", d, (const void *)b);
++                            for (unsigned o = 0; o < sizeof(gui::GlyphLayout); o++)
++                            {
++                                printf("%s%02x", ((o % 16u) == 0u) ? "\n   " : " ",
++                                       b[o]);
++                            }
++                            printf("\n");
++                        }
+                     }
+                 }
+                 for (unsigned df = 0;

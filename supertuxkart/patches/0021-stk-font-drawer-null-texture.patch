@@ -1,0 +1,29 @@
+--- a/src/font/font_drawer.cpp
++++ b/src/font/font_drawer.cpp
+@@ -27,6 +27,7 @@
+ 
+ #include <S3DVertex.h>
+ #include <irrArray.h>
++#include <cstdio>
+ #include <map>
+ #include <memory>
+ 
+@@ -85,6 +86,18 @@
+                           const core::rect<s32>* clip_rect,
+                           const video::SColor* color)
+ {
++    // PHOENIX: a NULL texture is reachable and is dereferenced one line below.
++    // CGUISpriteBank::getTexture() returns 0 for an out-of-range texture number
++    // (CGUISpriteBank.cpp:64-70), and the font path can ask for one: a bogus
++    // SGUISprite -- the shape the fallback-bank index skew produced, see patch
++    // 0019 -- yields an arbitrary .Frames[0].textureNumber. Skipping the glyph
++    // loses one character; dereferencing NULL loses the process.
++    if (texture == NULL)
++    {
++        printf("stk: FontDrawer::addGlyph got a NULL texture -- skipping glyph\n");
++        return;
++    }
++
+     if (clip_rect)
+         g_clip.reset(new core::rect<s32>(*clip_rect));
+     else
