@@ -1,0 +1,68 @@
+--- a/lib/libnfs-sync.c
++++ b/lib/libnfs-sync.c
+@@ -196,6 +196,11 @@
+ #endif
+ }
+ 
++/* Overall deadline for a sync call, as a multiple of the per-PDU rpc->timeout.
++ * Large enough to ride out a genuine reconnect, small enough that a wedged
++ * server cannot stall the caller indefinitely. */
++#define NFS_SYNC_TIMEOUT_FACTOR 4
++
+ static void
+ wait_for_reply(struct rpc_context *rpc, struct sync_cb_data *cb_data)
+ {
+@@ -262,6 +267,7 @@
+ 	struct pollfd pfd;
+ 	int revents;
+ 	int ret;
++	uint64_t deadline = 0;
+ 
+ #ifdef HAVE_MULTITHREADING
+         if(nfs->rpc->multithreading_enabled) {
+@@ -269,6 +275,28 @@
+                 return;
+         }
+ #endif
++	/* Bound the whole sync wait, not just each poll().
++	 *
++	 * rpc->timeout is a PER-PDU timeout, and rpc_service() -> rpc_timeout_scan()
++	 * does not fail a timed-out PDU: it hands it to rpc_reconnect_requeue(),
++	 * which reconnects and re-sends it.  So a call the server will never answer
++	 * -- e.g. a RENEW after the server dropped our NFSv4 client state -- is
++	 * retried forever, is_finished is never set, and this loop never returns.
++	 * wait_for_reply() above has an overall deadline for exactly this reason;
++	 * the NFS variant was missing one.
++	 *
++	 * A never-returning sync call is fatal to a single-threaded NFS client:
++	 * it takes the service loop down with it, and every process behind that
++	 * loop then blocks forever on its first filesystem request.
++	 *
++	 * Allow a few reconnect attempts, then give up so the caller sees an error
++	 * and can recover (re-mount and reclaim its state).
++	 */
++	if (nfs->rpc->timeout > 0) {
++		deadline = rpc_current_time() +
++			(uint64_t)nfs->rpc->timeout * NFS_SYNC_TIMEOUT_FACTOR;
++	}
++
+ 	while (!cb_data->is_finished) {
+ 
+ 		pfd.fd = nfs_get_fd(nfs);
+@@ -290,6 +318,16 @@
+                         rpc_error_all_pdus(nfs->rpc, "RPC ERROR: Failed to reconnect async");
+ 			break;
+ 		}
++
++		if (deadline > 0 && rpc_current_time() > deadline) {
++			nfs_set_error(nfs, "Timeout reached");
++			/* Drop the connection and complete every outstanding PDU.
++			 * cb_data lives on our caller's stack, so the queued PDU
++			 * that still points at it must not outlive this frame. */
++			rpc_disconnect(nfs->rpc, "RPC ERROR: sync call timed out");
++			cb_data->status = -ETIMEDOUT;
++			break;
++		}
+ 	}
+ }
+ 
