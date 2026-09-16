@@ -307,29 +307,33 @@ index 6ffa1dd..6247d31 100644
  #define MAX_PUSH_CONSTANT_SIZE 128 // Vulkan guaranteed minimum maxPushConstantsSize
  
 diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
-index a8de19d..90fd798 100644
+index a8de19d..b4ea719 100644
 --- a/Quake/host_cmd.c
 +++ b/Quake/host_cmd.c
-@@ -3208,6 +3208,19 @@ static void Host_Startdemos_f (void)
- 	if (!sv.active && cls.demonum != -1 && !cls.demoplayback)
+@@ -3215,7 +3215,22 @@ static void Host_Startdemos_f (void)
+ 			Cbuf_InsertText ("menu_main\n");
+ 			return;
+ 		}
+-		CL_NextDemo ();
++		/* Phoenix vkQuake port: ARM the demo loop here, but do not START it.
++		 *
++		 * quake.rc is executed by the port's pre-frame-loop Cbuf_Execute (pl_phoenix_main.c),
++		 * so CL_NextDemo would run before the Host_Frame loop ever turns -- and it renders, via
++		 * SCR_BeginLoadingPlaque. Nothing drives or instruments the render path until that loop,
++		 * so a stall there has no heartbeat to locate it. Show the menu instead; the port's own
++		 * post-Host_Init `playdemo` (id1/phoenix-demo.cfg) starts playback inside the frame loop.
++		 *
++		 * cls.demos[] is filled above and cls.demonum is deliberately LEFT AT 0, so the loop is
++		 * ARMED: when a demo ends, its trailing svc_disconnect reaches Host_EndGame, which calls
++		 * CL_NextDemo whenever demonum != -1, and that cycles the list. The bring-up hack this
++		 * replaces set demonum = -1 right here, which is the whole reason vkQuake played exactly
++		 * ONE demo and then fell to the console while QuakeSpasm looped -- one line, not an engine
++		 * difference. (CL_PlayDemo_f clears demonum only on error, so the port's own playdemo does
++		 * not disarm it.) */
++		Cbuf_InsertText ("menu_main\n");
+ 	}
+ 	else
  	{
- 		cls.demonum = 0;
-+		/* Phoenix vkQuake bring-up: SKIP the auto-demo world-load. quake.rc's `startdemos`
-+		 * runs inside Host_Init's Cbuf_Execute (host.c), so CL_NextDemo->demo1 would load a BSP
-+		 * world + drive V_RenderView DURING Host_Init — before the instrumented frame loop, so a
-+		 * world-render hang there is invisible/undebuggable. Go straight to the menu so Host_Init
-+		 * completes cleanly; the world is then loaded by pl_phoenix_main's post-Host_Init
-+		 * `map start`, inside the frame loop where the loop-N enter/exit heartbeat can pinpoint it.
-+		 * TODO(vkquake-port): restore the demo loop once the world render path is proven. */
-+		if (1)
-+		{
-+			cls.demonum = -1;
-+			Cbuf_InsertText ("menu_main\n");
-+			return;
-+		}
- 		if (!cl_startdemos.value)
- 		{ /* QuakeSpasm customization: */
- 			/* go straight to menu, no CL_NextDemo */
 diff --git a/Quake/r_alias.c b/Quake/r_alias.c
 index 9791d4f..0c41226 100644
 --- a/Quake/r_alias.c
