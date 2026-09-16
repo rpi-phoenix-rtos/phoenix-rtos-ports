@@ -1,0 +1,92 @@
+DIAGNOSTIC / DISCRIMINATOR — NOT APPLIED. **SECONDARY** — run the primary A/B first.
+
+PRIMARY A/B (do this one first): make the GPU-compute lightmap path selectable instead of
+forced, in glue/pl_phoenix_main.c:166
+
+    -               Cvar_SetValueQuick(&r_gpulightmapupdate, 1.0f);
+    +               Cvar_SetValueQuick(&r_gpulightmapupdate,
+    +                       (getenv ("VKQ_CPU_LIGHTMAP") != NULL) ? 0.0f : 1.0f);
+
+r_gpulightmapupdate 0 takes the CPU R_BuildLightMap + R_UploadLightmap path, which bypasses
+surface_indices, the three lightstyle textures and imageStore entirely. Lighting correct with
+it set => the defect is in the compute inputs / compute write. Still wrong => the defect is in
+the atlas build or the fragment sampling and the whole compute story is irrelevant. Cost: a
+one-off ~15 s CPU lightmap build per map load (documented in the glue), acceptable for triage.
+Caveat: that path's own vkCmdCopyBufferToImage (r_brush.c:3349-3377) is NOT covered by the #29
+extent fix in patch 0001 — if that defect is real you will see gross corruption or unlit walls,
+not per-face brightness errors, so it does not confound the reading.
+
+THE PATCH BELOW is the follow-up, to be run only if the primary A/B says "compute path guilty".
+It splits SCHEDULER staleness from CONTENT error inside that path.
+
+
+Filename ends in `.proposed` on purpose: `b_port_apply_patches` (port.def.sh:125) applies
+every file in this directory, and this patch is a triage A/B, not a fix. Rename to
+`0002-vkquake-lm-force-redispatch.patch` to arm it; rename back (or delete) afterwards.
+
+WHAT IT DOES
+  vkQuake updates lightmaps GPU-side and INCREMENTALLY: a 128x256 "cull block" of the
+  1024x1024 atlas is re-dispatched only when one of the light styles it uses has actually
+  changed value since the last dispatch (`lm->cached_light[l] != d_lightstylevalue[l]`,
+  r_brush.c:3712). If a dispatch's `imageStore` results are ever lost or mis-placed, the
+  bookkeeping believes the block is up to date and NEVER re-writes it — the wall stays
+  frozen at whatever brightness it last got (too dark OR too bright, depending on where in
+  the style cycle it froze). This patch removes ONLY the value-change gate: every cull block
+  that contains any animated light style is re-dispatched every frame. The visibility gate
+  (`used_lightstyles & modified`) is kept, so cost stays bounded.
+
+HOW TO READ THE RESULT
+  artefact GONE     -> the GPU write itself is fine; the defect is CPU-side staleness
+                       bookkeeping (cached_light / cached_framecount / modified[]).
+  artefact PERSISTS -> the dispatch runs and still produces the wrong texels: look at the
+                       compute path (surface_indices / lightstyle textures / imageStore),
+                       not at the update scheduling.
+  Enable at runtime with VKQ_LM_FORCE=1 in the environment so one build gives both arms.
+
+--- a/Quake/r_brush.c
++++ b/Quake/r_brush.c
+@@
+ 			qboolean any_needs_dlight_update = false;
+ 			uint32_t used_lightstyles = 0;
+ 			int		 num_blocks = 0;
++#if defined(__phoenix__)
++		/* DIAGNOSTIC (vkquake-port): see 0002-vkquake-lm-force-redispatch.patch.proposed.
++		 * Cached once — this sits inside a 4x8 block loop run per lightmap per frame. */
++		static int lm_force_redispatch = -1;
++		if (lm_force_redispatch < 0)
++			lm_force_redispatch = (getenv ("VKQ_LM_FORCE") != NULL) ? 1 : 0;
++#endif
+ 			for (int y = 0; y < LMBLOCK_HEIGHT / LM_CULL_BLOCK_H; y++)
+ 				for (int x = 0; x < LMBLOCK_WIDTH / LM_CULL_BLOCK_W; x++)
+ 				{
+@@
+ 					if (regions[y][x] != 2)
++					{
++#if defined(__phoenix__)
++					/* Force a full re-dispatch of every block that has an animated style,
++					 * ignoring cached_light. Keeps the `used_lightstyles & modified`
++					 * visibility gate below intact. */
++					if (lm_force_redispatch && lm->num_used_lightstyles[y][x] > 0)
++					{
++						if (regions[y][x] == 0)
++							num_blocks += 1;
++						regions[y][x] = 2;
++						for (int i = 0; i < lm->num_used_lightstyles[y][x]; i++)
++						{
++							int l = lm->used_lightstyles[y][x][i];
++							if (!any_needs_dlight_update)
++								used_lightstyles |= 1 << (l < 16 ? l : l % 16 + 16);
++						}
++					}
++					else
++#endif
+ 						for (int i = 0; i < lm->num_used_lightstyles[y][x]; i++)
+ 						{
+ 							int l = lm->used_lightstyles[y][x][i];
+@@
+ 								else
+ 									break;
+ 							}
+ 						}
++					}
+ 				}

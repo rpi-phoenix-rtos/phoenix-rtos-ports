@@ -307,30 +307,37 @@ index 6ffa1dd..6247d31 100644
  #define MAX_PUSH_CONSTANT_SIZE 128 // Vulkan guaranteed minimum maxPushConstantsSize
  
 diff --git a/Quake/host_cmd.c b/Quake/host_cmd.c
-index a8de19d..b4ea719 100644
+index a8de19d..61df624 100644
 --- a/Quake/host_cmd.c
 +++ b/Quake/host_cmd.c
-@@ -3215,7 +3215,22 @@ static void Host_Startdemos_f (void)
+@@ -3215,7 +3215,29 @@ static void Host_Startdemos_f (void)
  			Cbuf_InsertText ("menu_main\n");
  			return;
  		}
 -		CL_NextDemo ();
-+		/* Phoenix vkQuake port: ARM the demo loop here, but do not START it.
++		/* Phoenix vkQuake port: ARM the demo loop here, but do not START it -- and do not
++		 * open the menu either. Falling out of this branch having done nothing is deliberate.
 +		 *
 +		 * quake.rc is executed by the port's pre-frame-loop Cbuf_Execute (pl_phoenix_main.c),
 +		 * so CL_NextDemo would run before the Host_Frame loop ever turns -- and it renders, via
 +		 * SCR_BeginLoadingPlaque. Nothing drives or instruments the render path until that loop,
-+		 * so a stall there has no heartbeat to locate it. Show the menu instead; the port's own
-+		 * post-Host_Init `playdemo` (id1/phoenix-demo.cfg) starts playback inside the frame loop.
++		 * so a stall there has no heartbeat to locate it. The port's own post-Host_Init
++		 * `playdemo` (id1/phoenix-demo.cfg) starts playback inside the frame loop instead.
 +		 *
 +		 * cls.demos[] is filled above and cls.demonum is deliberately LEFT AT 0, so the loop is
 +		 * ARMED: when a demo ends, its trailing svc_disconnect reaches Host_EndGame, which calls
-+		 * CL_NextDemo whenever demonum != -1, and that cycles the list. The bring-up hack this
-+		 * replaces set demonum = -1 right here, which is the whole reason vkQuake played exactly
-+		 * ONE demo and then fell to the console while QuakeSpasm looped -- one line, not an engine
-+		 * difference. (CL_PlayDemo_f clears demonum only on error, so the port's own playdemo does
-+		 * not disarm it.) */
-+		Cbuf_InsertText ("menu_main\n");
++		 * CL_NextDemo whenever demonum != -1, and that cycles the list. CL_PlayDemo_f clears
++		 * demonum only on error, so the port's own playdemo does not disarm it.
++		 *
++		 * The bring-up hack this replaces set demonum = -1 right here, which is why vkQuake
++		 * played exactly ONE demo and then fell to the console while QuakeSpasm looped.
++		 *
++		 * WARNING -- do NOT `Cbuf_InsertText ("menu_main\n")` here, which an earlier version of
++		 * this fix did. M_Menu_Main_f stashes cls.demonum in m_save_demonum and sets it to -1
++		 * (menu.c), and restores it ONLY from M_Main_Key's ESCAPE case -- a keypress that never
++		 * arrives on a headless board. Opening the menu therefore silently disarms the very loop
++		 * this code arms. HW-confirmed 2026-09-16: with the menu call, exactly one demo played
++		 * and the engine then sat on the console at a flat ~42 fps for the rest of the run. */
  	}
  	else
  	{
