@@ -54,7 +54,7 @@ depends on <sys/threads.h>.
 +	if (info == NULL)
 +		return False;
 +
-+	while ((cnt = threadsinfo(n, info)) >= n) {
++	while ((cnt = threadsinfo(n, PH_THREADINFO_ALL, info)) >= n) {
 +		n *= 2;
 +		rinfo = realloc(info, n * sizeof(*info));
 +		if (rinfo == NULL) {
