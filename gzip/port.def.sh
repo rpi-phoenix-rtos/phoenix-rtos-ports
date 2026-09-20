@@ -101,10 +101,17 @@ p_build() {
 	# Only the library and the program: the top-level `all` also recurses into
 	# doc/ and tests/, neither of which produces anything we install. lib must
 	# come first -- automake lists lib/libgzip.a as a prerequisite of gzip but
-	# generates no rule to build it from the top Makefile. version.c/version.h
-	# are BUILT_SOURCES, which a targeted `make gzip` does not trigger.
+	# generates no rule to build it from the top Makefile.
+	#
+	# version.c/version.h are BUILT_SOURCES, which a targeted `make gzip` does
+	# not trigger, and they need a make invocation of their OWN: automake only
+	# orders BUILT_SOURCES before the compiles via `all: $(BUILT_SOURCES); $(MAKE)
+	# all-am`, which we are bypassing here. Named as extra goals of the same -j
+	# run they would race gzip.o, whose .deps entry is still the empty stub on a
+	# clean tree, so nothing records that it includes version.h.
 	make -C "${PREFIX_PORT_WORKDIR}/lib"
-	make -C "${PREFIX_PORT_WORKDIR}" version.c version.h gzip
+	make -C "${PREFIX_PORT_WORKDIR}" version.c version.h
+	make -C "${PREFIX_PORT_WORKDIR}" gzip
 
 	"${CROSS}readelf" -h "${bin}" | grep -q 'AArch64' ||
 		b_die "gzip: built binary is not an AArch64 executable"
