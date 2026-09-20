@@ -1,0 +1,38 @@
+Teach gnulib's fseterr()/fwriting() about Phoenix's FILE struct.
+
+Both dispatch on a libc's private FILE layout and end in a hard
+#error for unknown platforms. libphoenix has neither __fseterr nor
+__fwriting, so gnulib compiles both files.
+struct _FILE {fd,flags,mode,bufeof,bufpos,bufsz,buffer,lock};
+F_WRITING = 1<<1, F_ERROR = 1<<3 (libphoenix stdio/file.c).
+
+--- a/lib/fseterr.c
++++ b/lib/fseterr.c
+@@ -32,7 +32,11 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__               /* Phoenix-RTOS libphoenix */
++  /* struct _FILE {fd,flags,mode,bufeof,bufpos,bufsz,buffer,lock};
++     F_ERROR = 1<<3 (libphoenix stdio/file.c).  */
++  fp->flags |= (1u << 3) /*F_ERROR*/;
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   fp->_flags |= _IO_ERR_SEEN;
+ #elif defined __sferror || defined __DragonFly__ || defined __ANDROID__
+--- a/lib/fwriting.c
++++ b/lib/fwriting.c
+@@ -31,7 +31,11 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__               /* Phoenix-RTOS libphoenix */
++  /* struct _FILE {fd,flags,mode,bufeof,bufpos,bufsz,buffer,lock};
++     F_WRITING = 1<<1 (libphoenix stdio/file.c).  */
++  return (fp->flags & (1u << 1) /*F_WRITING*/) != 0;
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   return (fp->_flags & (_IO_NO_READS | _IO_CURRENTLY_PUTTING)) != 0;
+ #elif defined __sferror || defined __DragonFly__ || defined __ANDROID__

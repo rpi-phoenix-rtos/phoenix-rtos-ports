@@ -1,0 +1,74 @@
+Rename gnulib's gettime()/settime() to gl_gettime()/gl_settime().
+
+libphoenix declares its own, unrelated, clock primitives with those names in
+<sys/time.h>:
+
+    int gettime(time_t *raw, time_t *offs);
+    int settime(time_t offs);
+
+gnulib declares `void gettime (struct timespec *)` / `int settime (struct
+timespec const *)` in lib/timespec.h, so any translation unit seeing both
+headers fails with conflicting types.  Worse, a static link would let gnulib's
+gettime.o satisfy libphoenix's OWN internal references to gettime() with a
+function of a different signature.  Renaming the gnulib pair (the same fix the
+coreutils port carries as its patch 0001) keeps the two apart.
+
+Only three files mention them here: the declaration, the definition, and
+utimens.c, gzip's single caller.  gzip ships no settime.c, so the declaration
+is renamed for header hygiene only.
+
+--- a/lib/timespec.h	2026-09-20 13:51:09.167514039 +0200
++++ b/lib/timespec.h	2026-09-20 13:51:09.188648529 +0200
+@@ -90,8 +90,8 @@
+ 
+ long int gettime_res (void);
+ struct timespec current_timespec (void);
+-void gettime (struct timespec *) _GL_ARG_NONNULL ((1));
+-int settime (struct timespec const *) _GL_ARG_NONNULL ((1));
++void gl_gettime (struct timespec *) _GL_ARG_NONNULL ((1));
++int gl_settime (struct timespec const *) _GL_ARG_NONNULL ((1));
+ 
+ #ifdef __cplusplus
+ }
+--- a/lib/gettime.c	2026-09-20 13:51:09.165794706 +0200
++++ b/lib/gettime.c	2026-09-20 13:51:09.190486275 +0200
+@@ -1,4 +1,4 @@
+-/* gettime -- get the system clock
++/* gl_gettime -- get the system clock
+ 
+    Copyright (C) 2002, 2004-2007, 2009-2026 Free Software Foundation, Inc.
+ 
+@@ -26,7 +26,7 @@
+ /* Get the system time into *TS.  */
+ 
+ void
+-gettime (struct timespec *ts)
++gl_gettime (struct timespec *ts)
+ {
+ #if defined CLOCK_REALTIME && HAVE_CLOCK_GETTIME
+   clock_gettime (CLOCK_REALTIME, ts);
+@@ -46,6 +46,6 @@
+ current_timespec (void)
+ {
+   struct timespec ts;
+-  gettime (&ts);
++  gl_gettime (&ts);
+   return ts;
+ }
+--- a/lib/utimens.c	2026-09-20 13:51:09.167656025 +0200
++++ b/lib/utimens.c	2026-09-20 13:51:09.188822425 +0200
+@@ -158,12 +158,12 @@
+   if (timespec[0].tv_nsec == UTIME_OMIT)
+     timespec[0] = get_stat_atime (statbuf);
+   else if (timespec[0].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[0]);
++    gl_gettime (&timespec[0]);
+ 
+   if (timespec[1].tv_nsec == UTIME_OMIT)
+     timespec[1] = get_stat_mtime (statbuf);
+   else if (timespec[1].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[1]);
++    gl_gettime (&timespec[1]);
+ 
+   return false;
+ }

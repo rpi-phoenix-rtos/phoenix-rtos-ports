@@ -1,0 +1,219 @@
+Rename sed's global 'debug' flag to 'sed_debug'.
+
+libphoenix exports an un-namespaced global 'debug' (the Phoenix
+kernel debug-console syscall wrapper, libphoenix
+arch/aarch64/syscalls.S). Linking sed statically against libc.a
+therefore fails with:
+  libc.a(syscalls.o): in function 'debug':
+  multiple definition of 'debug'; sed/sed-sed.o:(.bss.debug+0x0)
+Renaming the sed-side variable is the least invasive fix; the
+user-visible --debug option is a string literal and unaffected.
+
+--- a/sed/sed.h
++++ b/sed/sed.h
+@@ -259,7 +259,7 @@
+ extern bool sandbox;
+ 
+ /* If set, print debugging information.  */
+-extern bool debug;
++extern bool sed_debug;
+ 
+ #define MBRTOWC(pwc, s, n, ps) \
+   (mb_cur_max == 1 ? \
+--- a/sed/sed.c
++++ b/sed/sed.c
+@@ -63,7 +63,7 @@
+ bool sandbox = false;
+ 
+ /* if set, print debugging information */
+-bool debug = false;
++bool sed_debug = false;
+ 
+ /* How do we edit files in-place? (we don't if NULL) */
+ char *in_place_extension = NULL;
+@@ -331,7 +331,7 @@
+           break;
+ 
+         case DEBUG_OPTION:
+-          debug = true;
++          sed_debug = true;
+           break;
+ 
+         case 'u':
+@@ -374,7 +374,7 @@
+     }
+ #endif
+ 
+-  if (debug)
++  if (sed_debug)
+     debug_print_program (the_program);
+ 
+   return_code = process_files (the_program, argv+optind);
+--- a/sed/compile.c
++++ b/sed/compile.c
+@@ -1073,7 +1073,7 @@
+               bad_prog ("\":\" lacks a label");
+             labels = setup_label (labels, vector->v_length, label, NULL);
+ 
+-            if (debug)
++            if (sed_debug)
+               cur_cmd->x.label_name = strdup (label);
+           }
+           break;
+--- a/sed/execute.c
++++ b/sed/execute.c
+@@ -1026,7 +1026,7 @@
+                     &regs, sub->max_id + 1))
+     return;
+ 
+-  if (debug)
++  if (sed_debug)
+     {
+       if (regs.num_regs>0 && regs.start[0] != -1)
+         puts ("MATCHED REGEX REGISTERS");
+@@ -1286,7 +1286,7 @@
+   end_cmd = vec->v + vec->v_length;
+   while (cur_cmd < end_cmd)
+     {
+-      if (debug)
++      if (sed_debug)
+         {
+           fputs ("COMMAND: ", stdout);
+           debug_print_command (vec, cur_cmd);
+@@ -1324,7 +1324,7 @@
+                  but it seems to be expected (and make sense). */
+               FALLTHROUGH;
+             case 'd':
+-              if (debug)
++              if (sed_debug)
+                 debug_print_end_of_cycle ();
+               return -1;
+ 
+@@ -1342,7 +1342,7 @@
+                 /* reset to start next cycle without reading a new line: */
+                 cur_cmd = vec->v;
+ 
+-                if (debug)
++                if (sed_debug)
+                   debug_print_line (&line);
+                 continue;
+               }
+@@ -1413,7 +1413,7 @@
+                  on the moved buffer might consider a wrong character set.
+                  We keep it true because it's what sed <= 4.1.5 did.  */
+               line_copy (&hold, &line, true);
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&hold);
+               break;
+ 
+@@ -1424,21 +1424,21 @@
+                  We keep it true because it's what sed <= 4.1.5 did, but
+                  we could consider having line_ap.  */
+               line_append (&hold, &line, true);
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&line);
+               break;
+ 
+             case 'h':
+               /* Here, it is ok to have true.  */
+               line_copy (&line, &hold, true);
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&hold);
+               break;
+ 
+             case 'H':
+               /* See comment above for 'G' regarding the third parameter.  */
+               line_append (&line, &hold, true);
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&hold);
+               break;
+ 
+@@ -1460,12 +1460,12 @@
+                              &output_file);
+               if (test_eof (input) || !read_pattern_space (input, vec, false))
+                 {
+-                  if (debug)
++                  if (sed_debug)
+                     debug_print_end_of_cycle ();
+                   return -1;
+                 }
+ 
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&line);
+               break;
+ 
+@@ -1474,7 +1474,7 @@
+ 
+               if (test_eof (input) || !read_pattern_space (input, vec, true))
+                 {
+-                  if (debug)
++                  if (sed_debug)
+                     debug_print_end_of_cycle ();
+                   line.length--;
+                   if (posixicity == POSIXLY_EXTENDED && !no_default_output)
+@@ -1482,7 +1482,7 @@
+                                   &output_file);
+                   return -1;
+                 }
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&line);
+               break;
+ 
+@@ -1553,7 +1553,7 @@
+ 
+             case 's':
+               do_subst (cur_cmd->x.cmd_subst);
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&line);
+               break;
+ 
+@@ -1594,7 +1594,7 @@
+             case 'x':
+               /* See comment above for 'g' regarding the third parameter.  */
+               line_exchange (&line, &hold, false);
+-              if (debug)
++              if (sed_debug)
+                 {
+                   debug_print_line (&line);
+                   debug_print_line (&hold);
+@@ -1611,13 +1611,13 @@
+                   for (e=p+line.length; p<e; ++p)
+                     *p = cur_cmd->x.translate[*p];
+                 }
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&line);
+               break;
+ 
+             case 'z':
+               line.length = 0;
+-              if (debug)
++              if (sed_debug)
+                 debug_print_line (&line);
+               break;
+ 
+@@ -1645,7 +1645,7 @@
+       ++cur_cmd;
+     }
+ 
+-    if (debug)
++    if (sed_debug)
+       debug_print_end_of_cycle ();
+     if (!no_default_output)
+       output_line (line.active, line.length, line.chomped, &output_file);
+@@ -1682,7 +1682,7 @@
+   status = EXIT_SUCCESS;
+   while (read_pattern_space (&input, the_program, false))
+     {
+-      if (debug)
++      if (sed_debug)
+         {
+           debug_print_input (&input);
+           debug_print_line (&line);

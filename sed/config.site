@@ -1,0 +1,58 @@
+# Cross-compile ac_cv_* answers for GNU sed on Phoenix-RTOS.
+#
+# configure cannot run a target binary, so its AC_CHECK_FUNCS/AC_RUN_IFELSE
+# probes fall back to the "missing/broken" branch for functions libphoenix
+# actually provides, and gnulib then compiles replacements that do not build.
+# Every function below was link-tested against libphoenix's static libc, and
+# the list is trimmed to the variables sed 4.10's own configure consults (the
+# coreutils port's config.site is the superset).
+# Functions libphoenix provides.
+ac_cv_func___fpurge=yes
+ac_cv_func_canonicalize_file_name=yes
+ac_cv_func_clock_gettime=yes
+ac_cv_func_clock_settime=yes
+ac_cv_func_closedir=yes
+ac_cv_func_fcntl=yes
+ac_cv_func_flockfile=yes
+ac_cv_func_ftruncate=yes
+ac_cv_func_funlockfile=yes
+ac_cv_func_getdelim=yes
+ac_cv_func_getprogname=yes
+ac_cv_func_getrandom=yes
+ac_cv_func_gettimeofday=yes
+ac_cv_func_inet_pton=yes
+ac_cv_func_ioctl=yes
+ac_cv_func_isblank=yes
+ac_cv_func_iswblank=yes
+ac_cv_func_iswcntrl=yes
+ac_cv_func_link=yes
+ac_cv_func_lstat=yes
+ac_cv_func_mbrtowc=yes
+ac_cv_func_mbsinit=yes
+ac_cv_func_mbtowc=yes
+ac_cv_func_mempcpy=yes
+ac_cv_func_memrchr=yes
+ac_cv_func_mkostemp=yes
+ac_cv_func_nl_langinfo=yes
+ac_cv_func_opendir=yes
+ac_cv_func_pipe=yes
+ac_cv_func_pthread_atfork=yes
+ac_cv_func_pthread_sigmask=yes
+ac_cv_func_raise=yes
+ac_cv_func_readdir=yes
+ac_cv_func_readlink=yes
+ac_cv_func_setenv=yes
+ac_cv_func_shutdown=yes
+ac_cv_func_sigprocmask=yes
+ac_cv_func_stpcpy=yes
+ac_cv_func_strerror_r=yes
+ac_cv_func_strtoimax=yes
+ac_cv_func_strtoll=yes
+ac_cv_func_symlink=yes
+ac_cv_func_towlower=yes
+ac_cv_func_unsetenv=yes
+ac_cv_func_wcrtomb=yes
+ac_cv_func_wctob=yes
+# Cross-compile answers for gnulib's run-time probes (no target to run on).
+ac_cv_func_malloc_0_nonnull=yes
+gl_cv_func_realloc_0_nonnull=1
