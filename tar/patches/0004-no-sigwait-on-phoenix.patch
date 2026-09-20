@@ -1,0 +1,58 @@
+Refuse --checkpoint-action=wait on Phoenix: libphoenix has no sigwait().
+
+libphoenix DECLARES `int sigwait(const sigset_t *, int *)`
+(libphoenix/include/signal.h:92) but never defines it, so the link fails:
+
+  checkpoint.o: undefined reference to `sigwait'
+
+The only caller is the `wait=SIG` checkpoint action, which suspends tar
+until one of the named signals arrives. Rather than emulate it (the
+signals are merely blocked, never given a handler, so a sigsuspend-based
+stand-in would either hang or die on the default disposition), the option
+is rejected where it is PARSED, so the failure is a clear message before
+any archiving starts instead of a wedge mid-run.
+
+This is a workaround for a libphoenix gap, not a tar bug: when libphoenix
+implements sigwait() both hunks should be dropped. Note that `sigpending`
+(signal.h:73) is missing the same way -- declared, undefined -- so a
+compile-time probe answers "yes" and only the link says otherwise.
+
+--- a/src/checkpoint.c	2023-07-10 09:29:17.000000000 +0200
++++ b/src/checkpoint.c	2026-09-20 13:57:47.303988978 +0200
+@@ -138,9 +138,20 @@
+     alloc_action (cop_totals);
+   else if (strncmp (str, "wait=", 5) == 0)
+     {
++#if defined __phoenix__
++      /* Phoenix-RTOS: libphoenix declares sigwait() in <signal.h> but does not
++         define it, so the "wait" action cannot be honoured.  Refuse here, while
++         parsing the option, rather than blocking forever (or dying on a default
++         signal disposition) in the middle of an archive run.  Drop this hunk
++         once libphoenix implements sigwait().  */
++      FATAL_ERROR ((0, 0,
++                    _("%s: checkpoint action 'wait' is not supported on this platform"),
++                    str));
++#else
+       act = alloc_action (cop_wait);
+       act->v.signal = decode_signal (str + 5);
+       sigaddset (&sigs, act->v.signal);
++#endif
+     }
+   else
+     FATAL_ERROR ((0, 0, _("%s: unknown checkpoint action"), str));
+@@ -427,10 +438,15 @@
+ 	  break;
+ 
+ 	case cop_wait:
++#if defined __phoenix__
++	  /* Unreachable: cop_wait is rejected at parse time (see above).  */
++	  break;
++#else
+ 	  {
+ 	    int n;
+ 	    sigwait (&sigs, &n);
+ 	  }
++#endif
+ 	}
+     }
+ }

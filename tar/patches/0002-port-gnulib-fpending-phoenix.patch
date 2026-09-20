@@ -1,0 +1,26 @@
+Teach gnulib's __fpending() replacement about Phoenix's FILE struct.
+
+libphoenix has no __fpending, so gnulib compiles its own gnu/fpending.c,
+whose #if ladder walks the known libc FILE layouts and ends in
+  # error "Please port gnulib fpending.c to your platform!"
+Phoenix's FILE (libphoenix/include/stdio.h) is
+  { fd, flags, mode, bufeof, bufpos, bufsz, buffer, lock, next, prev }
+with F_WRITING == 1<<1 (libphoenix/stdio/file.c), and while the stream is
+in writing mode bufpos counts the bytes staged in the buffer -- exactly
+what __fpending must report. The same hunk is carried by the coreutils
+port (its patch 0002).
+
+--- a/gnu/fpending.c
++++ b/gnu/fpending.c
+@@ -36,7 +36,10 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__              /* Phoenix-RTOS libphoenix */
++  /* FILE: {fd,flags,mode,bufeof,bufpos,bufsz,buffer,...}; F_WRITING = 1<<1. */
++  return (fp->flags & (1u << 1)) ? fp->bufpos : 0;
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   return fp->_IO_write_ptr - fp->_IO_write_base;
+ #elif defined __sferror || defined __DragonFly__ || defined __ANDROID__

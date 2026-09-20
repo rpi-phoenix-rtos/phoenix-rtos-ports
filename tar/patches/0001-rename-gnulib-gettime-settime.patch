@@ -1,0 +1,138 @@
+Rename gnulib's gettime()/settime() to gl_gettime()/gl_settime().
+
+libphoenix's <sys/time.h> already declares its own, incompatible
+`int gettime(time_t *raw, time_t *offs)` / `int settime(time_t offs)`.
+Any TU that includes both that header and gnulib's timespec.h fails to
+compile with a conflicting-types error, and the definitions would clash
+at link time as well. Renaming the gnulib pair (declaration, definition
+and every call site in gnu/ and src/) is the least invasive fix; the
+same patch is carried by the coreutils port.
+
+diff -Naur a/gnu/gettime.c b/gnu/gettime.c
+--- a/gnu/gettime.c	2023-06-17 08:47:53.000000000 +0200
++++ b/gnu/gettime.c	2026-09-20 13:50:27.082831025 +0200
+@@ -1,4 +1,4 @@
+-/* gettime -- get the system clock
++/* gl_gettime -- get the system clock
+ 
+    Copyright (C) 2002, 2004-2007, 2009-2023 Free Software Foundation, Inc.
+ 
+@@ -26,7 +26,7 @@
+ /* Get the system time into *TS.  */
+ 
+ void
+-gettime (struct timespec *ts)
++gl_gettime (struct timespec *ts)
+ {
+ #if defined CLOCK_REALTIME && HAVE_CLOCK_GETTIME
+   clock_gettime (CLOCK_REALTIME, ts);
+@@ -46,6 +46,6 @@
+ current_timespec (void)
+ {
+   struct timespec ts;
+-  gettime (&ts);
++  gl_gettime (&ts);
+   return ts;
+ }
+diff -Naur a/gnu/parse-datetime.c b/gnu/parse-datetime.c
+--- a/gnu/parse-datetime.c	2023-06-17 08:50:18.000000000 +0200
++++ b/gnu/parse-datetime.c	2026-09-20 13:50:27.105830944 +0200
+@@ -3432,7 +3432,7 @@
+   struct timespec gettime_buffer;
+   if (! now)
+     {
+-      gettime (&gettime_buffer);
++      gl_gettime (&gettime_buffer);
+       now = &gettime_buffer;
+     }
+ 
+diff -Naur a/gnu/parse-datetime.y b/gnu/parse-datetime.y
+--- a/gnu/parse-datetime.y	2023-06-17 08:47:54.000000000 +0200
++++ b/gnu/parse-datetime.y	2026-09-20 13:50:27.109830931 +0200
+@@ -1724,7 +1724,7 @@
+   struct timespec gettime_buffer;
+   if (! now)
+     {
+-      gettime (&gettime_buffer);
++      gl_gettime (&gettime_buffer);
+       now = &gettime_buffer;
+     }
+ 
+diff -Naur a/gnu/timespec.h b/gnu/timespec.h
+--- a/gnu/timespec.h	2023-06-17 08:47:56.000000000 +0200
++++ b/gnu/timespec.h	2026-09-20 13:50:27.063831092 +0200
+@@ -90,8 +90,8 @@
+ 
+ long int gettime_res (void);
+ struct timespec current_timespec (void);
+-void gettime (struct timespec *) _GL_ARG_NONNULL ((1));
+-int settime (struct timespec const *) _GL_ARG_NONNULL ((1));
++void gl_gettime (struct timespec *) _GL_ARG_NONNULL ((1));
++int gl_settime (struct timespec const *) _GL_ARG_NONNULL ((1));
+ 
+ #ifdef __cplusplus
+ }
+diff -Naur a/gnu/utimens.c b/gnu/utimens.c
+--- a/gnu/utimens.c	2023-06-17 08:47:56.000000000 +0200
++++ b/gnu/utimens.c	2026-09-20 13:50:27.092465992 +0200
+@@ -148,12 +148,12 @@
+   if (timespec[0].tv_nsec == UTIME_OMIT)
+     timespec[0] = get_stat_atime (statbuf);
+   else if (timespec[0].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[0]);
++    gl_gettime (&timespec[0]);
+ 
+   if (timespec[1].tv_nsec == UTIME_OMIT)
+     timespec[1] = get_stat_mtime (statbuf);
+   else if (timespec[1].tv_nsec == UTIME_NOW)
+-    gettime (&timespec[1]);
++    gl_gettime (&timespec[1]);
+ 
+   return false;
+ }
+diff -Naur a/src/buffer.c b/src/buffer.c
+--- a/src/buffer.c	2023-07-10 09:29:17.000000000 +0200
++++ b/src/buffer.c	2026-09-20 13:50:27.130830857 +0200
+@@ -250,7 +250,7 @@
+ void
+ set_start_time (void)
+ {
+-  gettime (&start_time);
++  gl_gettime (&start_time);
+   volume_start_time = start_time;
+   last_stat_time = start_time;
+ }
+@@ -258,7 +258,7 @@
+ static void
+ set_volume_start_time (void)
+ {
+-  gettime (&volume_start_time);
++  gl_gettime (&volume_start_time);
+   last_stat_time = volume_start_time;
+ }
+ 
+@@ -266,10 +266,10 @@
+ compute_duration (void)
+ {
+   struct timespec now;
+-  gettime (&now);
++  gl_gettime (&now);
+   duration += ((now.tv_sec - last_stat_time.tv_sec)
+                + (now.tv_nsec - last_stat_time.tv_nsec) / 1e9);
+-  gettime (&last_stat_time);
++  gl_gettime (&last_stat_time);
+   return duration;
+ }
+ 
+diff -Naur a/src/extract.c b/src/extract.c
+--- a/src/extract.c	2023-07-10 12:13:55.000000000 +0200
++++ b/src/extract.c	2026-09-20 13:50:27.117830902 +0200
+@@ -356,7 +356,7 @@
+   else if (timespec_cmp (volume_start_time, t) < 0)
+     {
+       struct timespec now;
+-      gettime (&now);
++      gl_gettime (&now);
+       if (timespec_cmp (now, t) < 0)
+ 	{
+ 	  char buf[TIMESPEC_STRSIZE_BOUND];

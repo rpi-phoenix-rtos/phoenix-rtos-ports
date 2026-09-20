@@ -1,0 +1,35 @@
+Append $(LIBICONV) to tar's LDADD.
+
+src/utf8.c calls iconv()/iconv_open() whenever configure defines
+HAVE_ICONV, but tar's src/Makefile.am never puts $(LIBICONV) on the link
+line -- upstream gets away with it because on glibc iconv lives in libc.
+Phoenix gets iconv from the separate libiconv port (libiconv.a in the
+sysroot), which configure detects correctly (LIBICONV is set in the
+generated Makefile) but nothing ever links, so tar fails with
+
+  utf8.o: undefined reference to `libiconv'
+  utf8.o: undefined reference to `libiconv_open'
+
+$(LIBICONV) has to come AFTER ../gnu/libgnu.a, so LIBS/LDFLAGS are no
+substitute with a static archive. Both Makefile.am and the shipped
+Makefile.in are patched so the change survives an automake re-run.
+
+--- a/src/Makefile.am	2023-07-10 09:29:17.000000000 +0200
++++ b/src/Makefile.am	2026-09-20 13:55:20.468510468 +0200
+@@ -52,4 +52,4 @@
+ tar_LDADD = $(LIBS) ../lib/libtar.a ../gnu/libgnu.a\
+  $(LIB_ACL) $(LIB_CLOCK_GETTIME) $(LIB_EACCESS)\
+  $(LIB_GETRANDOM) $(LIB_HARD_LOCALE) $(FILE_HAS_ACL_LIB) $(LIB_MBRTOWC)\
+- $(LIB_SELINUX) $(LIB_SETLOCALE_NULL)
++ $(LIB_SELINUX) $(LIB_SETLOCALE_NULL) $(LIBICONV)
+--- a/src/Makefile.in	2023-07-18 08:39:15.000000000 +0200
++++ b/src/Makefile.in	2026-09-20 13:55:20.468565190 +0200
+@@ -1793,7 +1793,7 @@
+ tar_LDADD = $(LIBS) ../lib/libtar.a ../gnu/libgnu.a\
+  $(LIB_ACL) $(LIB_CLOCK_GETTIME) $(LIB_EACCESS)\
+  $(LIB_GETRANDOM) $(LIB_HARD_LOCALE) $(FILE_HAS_ACL_LIB) $(LIB_MBRTOWC)\
+- $(LIB_SELINUX) $(LIB_SETLOCALE_NULL)
++ $(LIB_SELINUX) $(LIB_SETLOCALE_NULL) $(LIBICONV)
+ 
+ all: all-am
+ 
