@@ -1,0 +1,31 @@
+Teach gnulib's __fpending() replacement about Phoenix's FILE struct.
+
+libphoenix has no __fpending(), so gnulib compiles lib/fpending.c, whose
+implementation is a ladder of per-libc FILE-internals cases ending in
+"#error Please port gnulib fpending.c to your platform!".
+
+Phoenix's FILE (libphoenix/include/stdio.h) is
+  { fd, flags, mode, bufeof, bufpos, bufsz, buffer, lock, next, prev }
+with F_WRITING = 1 << 1, so the pending byte count of a stream open for
+writing is bufpos (bytes staged in buffer[] since the last flush), and 0
+for a stream that is not currently writing.
+
+Same change as coreutils' 0002 patch (that one also covers freadahead/
+freading/freadptr/fseterr/freadseek; grep's gnulib pulls in fpending only).
+Implementing __fpending() in libphoenix would retire this hunk for both.
+
+--- a/lib/fpending.c
++++ b/lib/fpending.c
+@@ -36,7 +36,11 @@
+   /* Most systems provide FILE as a struct and the necessary bitmask in
+      <stdio.h>, because they need it for implementing getc() and putc() as
+      fast macros.  */
+-#if defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
++#if defined __phoenix__              /* Phoenix-RTOS libphoenix */
++  /* FILE: {fd,flags,mode,bufeof,bufpos,bufsz,buffer,lock,...};
++     F_WRITING = 1<<1, and bufpos counts the bytes staged in buffer[].  */
++  return (fp->flags & (1u << 1) /*F_WRITING*/) ? fp->bufpos : 0;
++#elif defined _IO_EOF_SEEN || defined _IO_ftrylockfile || __GNU_LIBRARY__ == 1
+   /* GNU libc, BeOS, Haiku, Linux libc5 */
+   return fp->_IO_write_ptr - fp->_IO_write_base;
+ #elif defined __sferror || defined __DragonFly__ || defined __ANDROID__
