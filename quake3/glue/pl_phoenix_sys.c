@@ -46,6 +46,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <time.h>
 #include <libgen.h>
 
 #include "qcommon/q_shared.h"
@@ -68,21 +69,52 @@ unsigned long sys_timeBase = 0;
      0x7fffffff ms - ~24 days
    although timeval:tv_usec is an int, I'm not sure whether it is actually used as an unsigned int
      (which would affect the wrap period) */
+/* Phoenix: MONOTONIC, not gettimeofday.
+ *
+ * psh sets the wall clock from the network shortly after a session starts, and
+ * on a board with no RTC that step is ~56 YEARS. This function anchors
+ * sys_timeBase to its first reading and subtracts later ones, so a step landing
+ * between the two produces a nonsense duration -- observed as
+ *
+ *     CL_InitCGame: -1201626.86 seconds
+ *
+ * after which Quake III never entered the game and rendered 0 frames
+ * (q3dm7arm-T1, 2026-09-19). The engine drives all of its timing off this, so
+ * the damage is not limited to the printed number.
+ *
+ * Phoenix's CLOCK_MONOTONIC is genuinely monotonic and not merely accepted:
+ * libphoenix's clock_gettime reads a raw timer plus a wall-clock OFFSET and
+ * adds the offset only for CLOCK_REALTIME (libphoenix time/time.c), and an NTP
+ * step moves only that offset.
+ *
+ * sys_timeBase is also no longer used as the "initialised" flag: with a
+ * monotonic clock tv_sec is legitimately 0 for the first second after boot,
+ * which would re-anchor on every call in that window. */
 int Sys_Milliseconds( void )
 {
-	struct timeval tp;
+	static int sys_timeBaseSet = 0;
+	struct timespec ts;
 	int curtime;
 
-	gettimeofday( &tp, NULL );
-	
-	if ( !sys_timeBase )
+	if ( clock_gettime( CLOCK_MONOTONIC, &ts ) != 0 )
 	{
-		sys_timeBase = tp.tv_sec;
-		return tp.tv_usec/1000;
+		/* Degrade to the wall clock rather than hand the engine a dead timer;
+		 * that is the old behaviour, step exposure included. */
+		struct timeval tp;
+		gettimeofday( &tp, NULL );
+		ts.tv_sec = tp.tv_sec;
+		ts.tv_nsec = tp.tv_usec * 1000;
 	}
 
-	curtime = (tp.tv_sec - sys_timeBase) * 1000 + tp.tv_usec / 1000;
-	
+	if ( !sys_timeBaseSet )
+	{
+		sys_timeBaseSet = 1;
+		sys_timeBase = ts.tv_sec;
+		return ts.tv_nsec / 1000000;
+	}
+
+	curtime = (ts.tv_sec - sys_timeBase) * 1000 + ts.tv_nsec / 1000000;
+
 	return curtime;
 }
 
