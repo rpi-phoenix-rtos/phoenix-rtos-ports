@@ -1,6 +1,6 @@
 --- a/lib/irrlicht/include/irrTypes.h
 +++ b/lib/irrlicht/include/irrTypes.h
-@@ -260,5 +260,103 @@
+@@ -260,5 +260,114 @@
  #define _strcmpi(a,b) strcmpi(a,b)
  #endif
  
@@ -92,7 +92,7 @@
 +}
 +
 +static inline int __attribute__((unused))
-+swprintf(wchar_t *out, size_t n, const wchar_t *fmt, ...)
++irr_phoenix_swprintf(wchar_t *out, size_t n, const wchar_t *fmt, ...)
 +{
 +	va_list ap;
 +	va_start(ap, fmt);
@@ -100,6 +100,17 @@
 +	va_end(ap);
 +	return r;
 +}
++// Redirect Irrlicht's call sites by MACRO rather than by defining a function
++// called swprintf. libphoenix gained a real swprintf on 2026-09-23, and a
++// `static` definition of a name already declared `extern` in <wchar.h> is a
++// hard error in C++ ("declared 'extern' and later 'static'").
++//
++// The shim still earns its place: Irrlicht passes wchar_t* to %s, which the
++// standard defines as a MULTIBYTE string (%ls is the wide one). libphoenix
++// follows the standard, so handing these call sites the real swprintf would
++// reinterpret every wide string. Closing TD-STK-SWPRINTF means fixing
++// Irrlicht's format strings, not deleting this patch.
++#define swprintf irr_phoenix_swprintf
 +#endif // __phoenix__ && __cplusplus
 +
  #endif // __IRR_TYPES_H_INCLUDED__
