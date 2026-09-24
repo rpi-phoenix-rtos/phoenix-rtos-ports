@@ -260,15 +260,29 @@ p_build() {
 	# covers STK's OWN crypto use, not curl's TLS use. An incremental tree hid
 	# this because its curl predated the mbedtls port and had no TLS backend at
 	# all. All three go in the group so curl <-> mbedtls back-references resolve.
-	( cd "${build}" && mkdir -p bin && eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
+	local elf="${build}/bin/supertuxkart"
+
+	# Delete any previous ELF before relinking, and check the linker's own exit
+	# status -- not just that a file exists afterwards.
+	#
+	# The existence test alone is only meaningful on a CLEAN tree. On an
+	# INCREMENTAL one a stale supertuxkart from an earlier build is already
+	# sitting in bin/, so a relink that fails still leaves `[ -f ]` true: the port
+	# would install and ship the OLD binary and report success. That failure mode
+	# is invisible in exactly the situation where it matters most -- iterating on a
+	# source change and measuring the result, where the measurement would silently
+	# be of the previous build.
+	rm -f "${elf}"
+	if ! ( cd "${build}" && mkdir -p bin && eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
 		-Wl,--start-group '${sdllib}' '${gllib}' '${v3dlib}' \
 		'${pfx}/lib/libz.a' '${pfx}/lib/libogg.a' '${pfx}/lib/libvorbis.a' \
 		'${pfx}/lib/libvorbisfile.a' '${pfx}/lib/libvorbisenc.a' \
 		'${pfx}/lib/libmbedtls.a' '${pfx}/lib/libmbedx509.a' '${pfx}/lib/libmbedcrypto.a' \
-		-Wl,--end-group -Wl,-z,stack-size=8388608" )
+		-Wl,--end-group -Wl,-z,stack-size=8388608" ); then
+		b_die "supertuxkart: final group-link FAILED (see link errors above). No ELF installed."
+	fi
 
-	local elf="${build}/bin/supertuxkart"
-	[ -f "${elf}" ] || b_die "supertuxkart: final link produced no ELF (see link errors above)."
+	[ -f "${elf}" ] || b_die "supertuxkart: final link reported success but produced no ELF."
 
 	# Install the engine binary. The ~1 GB art assets (stk-assets) are a separate
 	# RUNTIME concern staged outside the port (see the port plan §6).
