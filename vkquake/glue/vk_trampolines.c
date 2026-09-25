@@ -210,17 +210,35 @@ void vkCmdPipelineBarrier(VkCommandBuffer commandBuffer, VkPipelineStageFlags sr
 	fp(commandBuffer, srcStageMask, dstStageMask, dependencyFlags, memoryBarrierCount, pMemoryBarriers, bufferMemoryBarrierCount, pBufferMemoryBarriers, imageMemoryBarrierCount, pImageMemoryBarriers);
 }
 
+/* Mesa's common runtime entry point, defined in libv3dv-phoenix.a. It records
+ * the depth bias into the command buffer's dynamic graphics state, which is what
+ * we actually want; only the ROUTE to it was broken. */
+extern void vk_common_CmdSetDepthBias2EXT(VkCommandBuffer commandBuffer, const VkDepthBiasInfoEXT *pDepthBiasInfo);
+
 void vkCmdSetDepthBias(VkCommandBuffer commandBuffer, float depthBiasConstantFactor, float depthBiasClamp, float depthBiasSlopeFactor)
 {
-	/* BRING-UP NO-OP (TODO vkquake-port): vkGetDeviceProcAddr("vkCmdSetDepthBias") resolves to the
-	 * mesa runtime shim vk_common_CmdSetDepthBias, which forwards through
-	 * device dispatch_table.CmdSetDepthBias2EXT — an entry V3DV's generated device dispatch table
-	 * leaves UNPOPULATED (VK_EXT_depth_bias_control not advertised), so the indirect call jumps to
-	 * garbage (observed PC = ASCII "_emit_li") → PC-alignment fault on the first world brush-draw
-	 * frame. Depth bias is polygon-offset z-fighting cosmetics; skip it for the first world render.
-	 * PROPER FIX (deferred, tracked): populate V3DV's dispatch CmdSetDepthBias2EXT =
-	 * vk_common_CmdSetDepthBias2EXT (records dynamic state), or fix the dispatch-table generation. */
-	(void)commandBuffer; (void)depthBiasConstantFactor; (void)depthBiasClamp; (void)depthBiasSlopeFactor;
+	/* This used to be a bring-up no-op, costing polygon-offset z-fighting.
+	 *
+	 * The hazard was never the recording itself: vkGetDeviceProcAddr("vkCmdSetDepthBias")
+	 * resolves to mesa's vk_common_CmdSetDepthBias, which forwards through
+	 * dispatch_table.CmdSetDepthBias2EXT — an entry V3DV's GENERATED device dispatch
+	 * table leaves unpopulated (it does not advertise VK_EXT_depth_bias_control), so
+	 * the indirect call jumped to garbage (observed PC = ASCII "_emit_li") and
+	 * PC-alignment-faulted on the first world brush-draw frame.
+	 *
+	 * Since the driver is linked into this process, we can call the common
+	 * implementation DIRECTLY and never touch that empty dispatch slot. That fixes
+	 * the route without patching V3DV's generated table, so the change stays inside
+	 * the port's glue. */
+	VkDepthBiasInfoEXT info;
+
+	info.sType = VK_STRUCTURE_TYPE_DEPTH_BIAS_INFO_EXT;
+	info.pNext = NULL;
+	info.depthBiasConstantFactor = depthBiasConstantFactor;
+	info.depthBiasClamp = depthBiasClamp;
+	info.depthBiasSlopeFactor = depthBiasSlopeFactor;
+
+	vk_common_CmdSetDepthBias2EXT(commandBuffer, &info);
 }
 
 void vkCmdSetScissor(VkCommandBuffer commandBuffer, uint32_t firstScissor, uint32_t scissorCount, const VkRect2D* pScissors)
