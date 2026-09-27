@@ -1,0 +1,181 @@
+From dad8f6b901781e14b234c06097c4ca1a55dca7ba Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 11:47:24 +0200
+Subject: [PATCH] frontend, compositor: WLPHX_TRACE shutdown-step trace
+
+With WLPHX_TRACE=1 in the environment, print one
+"WLPHX shutdown step=<name>" line on stderr at each major step between
+the end of wl_display_run() and the end of the exit handlers, so a
+compositor that does not exit after SIGTERM shows where it stopped.
+Off by default; stderr rather than weston_log() because the log scopes
+are torn down during the same shutdown.
+---
+ frontend/main.c        | 18 +++++++++++++++
+ libweston/compositor.c |  5 +++++
+ shared/phoenix-trace.h | 50 ++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 73 insertions(+)
+ create mode 100644 shared/phoenix-trace.h
+
+diff --git a/frontend/main.c b/frontend/main.c
+index d135e77..53d7647 100644
+--- a/frontend/main.c
++++ b/frontend/main.c
+@@ -51,6 +51,7 @@
+ #include <libweston/libweston.h>
+ #include "shared/os-compatibility.h"
+ #include "shared/helpers.h"
++#include "shared/phoenix-trace.h"
+ #include "shared/process-util.h"
+ #include "shared/string-helpers.h"
+ #include "shared/xalloc.h"
+@@ -824,6 +825,12 @@ usage(int error_code)
+ 	exit(error_code);
+ }
+ 
++static void
++phoenix_trace_exit_handlers_done(void)
++{
++	phoenix_trace_step("exit-handlers-done");
++}
++
+ static int on_term_signal(int signal_number, void *data)
+ {
+ 	struct wl_display *display = data;
+@@ -4534,6 +4541,10 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
+ 	weston_log("Flight recorder: %s\n", flight_rec ? "enabled" : "disabled");
+ 	verify_xdg_runtime_dir();
+ 
++	/* registered first, so it runs after every exit handler registered later
++	 * (Mesa's among them) */
++	atexit(phoenix_trace_exit_handlers_done);
++
+ 	display = wl_display_create();
+ 	if (display == NULL) {
+ 		weston_log("fatal: failed to create display\n");
+@@ -4775,6 +4786,7 @@ wet_main(int argc, char *argv[], const struct weston_testsuite_data *test_data)
+ 	}
+ 
+ 	wl_display_run(display);
++	phoenix_trace_step("loop-exit");
+ 
+ 	/* Allow for setting return exit code after
+ 	* wl_display_run returns normally. This is
+@@ -4798,7 +4810,9 @@ out:
+ 
+ 	if (wet.output_created_listener.notify)
+ 		wl_list_remove(&wet.output_created_listener.link);
++	phoenix_trace_step("compositor-destroy");
+ 	weston_compositor_destroy(wet.compositor);
++	phoenix_trace_step("compositor-destroyed");
+ 	wet_compositor_destroy_layout(&wet);
+ 	weston_log_scope_destroy(protocol_scope);
+ 	protocol_scope = NULL;
+@@ -4807,11 +4821,14 @@ out:
+ 		wet_process_destroy(process, 0, false);
+ 
+ out_signals:
++	phoenix_trace_step("signals-remove");
+ 	for (i = ARRAY_LENGTH(signals) - 1; i >= 0; i--)
+ 		if (signals[i])
+ 			wl_event_source_remove(signals[i]);
+ 
++	phoenix_trace_step("display-destroy");
+ 	wl_display_destroy(display);
++	phoenix_trace_step("display-destroyed");
+ 
+ out_display:
+ 	weston_log_scope_destroy(log_scope);
+@@ -4834,5 +4851,6 @@ out_display:
+ 	free(log_scopes);
+ 	free(modules);
+ 
++	phoenix_trace_step("main-return");
+ 	return ret;
+ }
+diff --git a/libweston/compositor.c b/libweston/compositor.c
+index 25ec3a6..6fd5368 100644
+--- a/libweston/compositor.c
++++ b/libweston/compositor.c
+@@ -68,6 +68,7 @@
+ #include "single-pixel-buffer-v1-server-protocol.h"
+ #include "shared/fd-util.h"
+ #include "shared/helpers.h"
++#include "shared/phoenix-trace.h"
+ #include "shared/os-compatibility.h"
+ #include "shared/string-helpers.h"
+ #include "shared/timespec-util.h"
+@@ -10150,11 +10151,15 @@ weston_compositor_destroy(struct weston_compositor *compositor)
+ 
+ 	weston_compositor_xkb_destroy(compositor);
+ 
++	phoenix_trace_step("backends-shutdown");
+ 	weston_compositor_shutdown_backends(compositor);
+ 
++	phoenix_trace_step("compositor-shutdown");
+ 	weston_compositor_shutdown(compositor);
+ 
++	phoenix_trace_step("backends-destroy");
+ 	weston_compositor_destroy_backends(compositor);
++	phoenix_trace_step("backends-destroyed");
+ 
+ 	/* The backend is responsible for destroying the heads. */
+ 	assert(wl_list_empty(&compositor->head_list));
+diff --git a/shared/phoenix-trace.h b/shared/phoenix-trace.h
+new file mode 100644
+index 0000000..1e2cfdb
+--- /dev/null
++++ b/shared/phoenix-trace.h
+@@ -0,0 +1,50 @@
++/*
++ * Copyright 2026 Phoenix Systems
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining
++ * a copy of this software and associated documentation files (the
++ * "Software"), to deal in the Software without restriction, including
++ * without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to
++ * permit persons to whom the Software is furnished to do so, subject to
++ * the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the
++ * next paragraph) shall be included in all copies or substantial
++ * portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef WESTON_PHOENIX_TRACE_H
++#define WESTON_PHOENIX_TRACE_H
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* WLPHX_TRACE=1: one "WLPHX shutdown step=<name>" line on stderr per shutdown
++ * step, so a compositor that does not exit shows where it stopped. stderr and
++ * not weston_log(): the log scopes are torn down during the same shutdown. */
++static inline void
++phoenix_trace_step(const char *step)
++{
++	static int on = -1;
++
++	if (on < 0) {
++		const char *e = getenv("WLPHX_TRACE");
++
++		on = e && e[0] != '\0' && strcmp(e, "0") != 0;
++	}
++	if (on)
++		fprintf(stderr, "WLPHX shutdown step=%s\n", step);
++}
++
++#endif
+-- 
+2.53.0
+

@@ -1,0 +1,71 @@
+From 52c5f60fb66dc0264f3d4c103d3afcb1eab53fe4 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 08:45:15 +0200
+Subject: [PATCH] compositor: builtin-module table for programs without a
+ dynamic linker
+
+A statically linked Weston (Phoenix-RTOS has no dynamic linker for these
+modules) links its backend, renderer and shell in and supplies a table
+{file name, entry point, address}. weston_load_module() consults it (a weak
+symbol: absent in ordinary builds) before dlopen(), so the module options,
+weston.ini and the frontend work unchanged.
+---
+ libweston/compositor.c | 35 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/libweston/compositor.c b/libweston/compositor.c
+index 84c25b6..25ec3a6 100644
+--- a/libweston/compositor.c
++++ b/libweston/compositor.c
+@@ -9994,6 +9994,35 @@ weston_module_path_from_env(const char *name, char *path, size_t path_len)
+  * \return the address of the module specified the entry point, or NULL otherwise
+  *
+  */
++/* Programs linked statically (systems without a dynamic linker, such as
++ * Phoenix-RTOS) link their modules in and supply this table, terminated by a
++ * NULL name; weston_load_module() consults it before dlopen(). A module is
++ * matched by its file name ("drm-backend.so") and entry point. */
++extern const struct weston_builtin_module {
++	const char *name;
++	const char *entrypoint;
++	void *init;
++} weston_builtin_modules[] __attribute__((weak));
++
++static void *
++weston_builtin_module_lookup(const char *name, const char *entrypoint)
++{
++	const struct weston_builtin_module *m;
++	const char *base = strrchr(name, '/');
++
++	if (!weston_builtin_modules)
++		return NULL;
++
++	base = base ? base + 1 : name;
++	for (m = weston_builtin_modules; m->name; m++) {
++		if (strcmp(m->name, base) == 0 &&
++		    strcmp(m->entrypoint, entrypoint) == 0)
++			return m->init;
++	}
++
++	return NULL;
++}
++
+ WL_EXPORT void *
+ weston_load_module(const char *name, const char *entrypoint,
+ 		   const char *module_dir)
+@@ -10020,6 +10049,12 @@ weston_load_module(const char *name, const char *entrypoint,
+ 	if (len >= sizeof path)
+ 		return NULL;
+ 
++	init = weston_builtin_module_lookup(name, entrypoint);
++	if (init) {
++		weston_log("Module '%s': linked into the program\n", name);
++		return init;
++	}
++
+ 	module = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+ 	if (module) {
+ 		weston_log("Module '%s' already loaded\n", path);
+-- 
+2.53.0
+

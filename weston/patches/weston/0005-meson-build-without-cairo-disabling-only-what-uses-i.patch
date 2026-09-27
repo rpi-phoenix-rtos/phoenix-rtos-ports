@@ -1,0 +1,95 @@
+From 69af5c4f1eb6cde9a363fc6cffa6e35a608b9bf5 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 09:09:01 +0200
+Subject: [PATCH] meson: build without cairo, disabling only what uses it
+
+cairo and libpng were required even when nothing that uses them is built
+(DRM backend + GL renderer + kiosk shell + simple clients). Without them
+the cairo-shared library becomes a disabler, which turns off exactly its
+users (toytoolkit clients, the screenshooter, the desktop shell,
+nested-backend borders). libutil is optional for the same reason (systems
+without it, e.g. Phoenix-RTOS).
+---
+ clients/meson.build |  4 ++--
+ shared/meson.build  | 34 +++++++++++++++++++++-------------
+ 2 files changed, 23 insertions(+), 15 deletions(-)
+
+diff --git a/clients/meson.build b/clients/meson.build
+index 44a84b9..a9b2ecb 100644
+--- a/clients/meson.build
++++ b/clients/meson.build
+@@ -27,7 +27,7 @@ deps_toytoolkit = [
+ 	dep_matrix_c,
+ 	dep_xkbcommon,
+ 	dependency('wayland-cursor'),
+-	cc.find_library('util'),
++	cc.find_library('util', required: false),
+ ]
+ lib_toytoolkit = static_library(
+ 	'toytoolkit',
+@@ -391,7 +391,7 @@ if get_option('shell-desktop')
+ 	env_modmap += 'weston-desktop-shell=@0@;'.format(exe_shell_desktop.full_path())
+ endif
+ 
+-if get_option('shell-desktop') or get_option('shell-fullscreen') or get_option('shell-kiosk') or get_option('shell-ivi')
++if (get_option('shell-desktop') or get_option('shell-fullscreen') or get_option('shell-kiosk') or get_option('shell-ivi')) and not is_disabler(dep_toytoolkit)
+ 	exe_shooter = executable(
+ 		'weston-screenshooter',
+ 		'screenshot.c',
+diff --git a/shared/meson.build b/shared/meson.build
+index daff424..03dd180 100644
+--- a/shared/meson.build
++++ b/shared/meson.build
+@@ -48,10 +48,14 @@ srcs_cairo_shared = [
+ 	'frame.c',
+ ]
+ 
++# Only the cairo-based parts (toytoolkit clients, the desktop shell, window
++# borders of the nested backends) need cairo; a build without it disables them.
++dep_cairo = dependency('cairo', required: false)
++dep_libpng = dependency('libpng', required: false)
+ deps_cairo_shared = [
+ 	dep_libshared,
+-	dependency('cairo'),
+-	dependency('libpng'),
++	dep_cairo,
++	dep_libpng,
+ 	dep_pixman,
+ 	dep_libm,
+ ]
+@@ -87,17 +91,21 @@ if get_option('image-webp')
+ 	config_h.set('HAVE_WEBP', '1')
+ endif
+ 
+-lib_cairo_shared = static_library(
+-	'cairo-shared',
+-	srcs_cairo_shared,
+-	include_directories: common_inc,
+-	dependencies: deps_cairo_shared,
+-	install: false
+-)
+-dep_lib_cairo_shared = declare_dependency(
+-	link_with: lib_cairo_shared,
+-	dependencies: deps_cairo_shared
+-)
++if dep_cairo.found() and dep_libpng.found()
++	lib_cairo_shared = static_library(
++		'cairo-shared',
++		srcs_cairo_shared,
++		include_directories: common_inc,
++		dependencies: deps_cairo_shared,
++		install: false
++	)
++	dep_lib_cairo_shared = declare_dependency(
++		link_with: lib_cairo_shared,
++		dependencies: deps_cairo_shared
++	)
++else
++	dep_lib_cairo_shared = disabler()
++endif
+ 
+ dep_matrix_c = declare_dependency(
+ 	sources: 'matrix.c',
+-- 
+2.53.0
+
