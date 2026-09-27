@@ -43,10 +43,8 @@
 	license="MIT AND BSD-3-Clause AND BSD-2-Clause"
 	license_file="COPYING"
 
-	# Not a real incompatibility: a declared conflict gives the port its own prefix,
-	# versioned-ports/<name>-<version>/, instead of the shared _build/<target>/
-	# {lib,include} (see dbus/port.def.sh). "newlane_shared_prefix" names no port.
-	conflicts="newlane_shared_prefix>=0.0"
+	# NEW GPU LANE: private install prefix (see dbus/port.def.sh).
+	conflicts="wayland_phoenix!=${version}"
 	# libffi (libwayland), expat (xorg_fonts), pixman 0.42 (xorg_libs), zlib
 	depends="libffi xorg_fonts xorg_libs zlib"
 

@@ -21,13 +21,12 @@
 	license="AFL-2.1 OR GPL-2.0-or-later"
 	license_file="COPYING"
 
-	# NOT a real incompatibility: a port that declares a conflict gets its own
-	# prefix, versioned-ports/<name>-<version>/, instead of the shared
+	# NEW GPU LANE: conflicting with its own other versions only gives the port a
+	# private prefix, versioned-ports/<name>-<version>/, instead of the shared
 	# _build/<target>/{lib,include} (phoenix-rtos-build port_manager,
-	# InstallableCandidate.install_path). The new-lane ports install there so that
-	# nothing they build is visible to the configure probes of the image's ports.
-	# "newlane_shared_prefix" names no port. openssl111 uses the same idiom.
-	conflicts="newlane_shared_prefix>=0.0"
+	# InstallableCandidate.install_path): nothing it builds is visible to the configure
+	# probes of the image's ports. (openssl111 uses the same mechanism.)
+	conflicts="dbus!=${version}"
 	# expat (libexpat.a + headers) is built by xorg_fonts into the shared prefix.
 	depends="xorg_fonts"
 
