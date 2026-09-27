@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 08:00:00 +0200
+Subject: [PATCH] cube: take vkGetInstanceProcAddr from a linked-in ICD on
+ Phoenix-RTOS
+
+Phoenix-RTOS has no Vulkan loader and cannot dlopen() a driver, so the
+program links the ICD (Mesa v3dv) statically and a small loader
+stand-in, phxvk_GetInstanceProcAddr(), hands out its entry points.
+vkcube already resolves every Vulkan function through
+vkGetInstanceProcAddr/vkGetDeviceProcAddr, so the change is: take that
+pointer from the stand-in instead of dlsym(), do not dlclose() on exit,
+and build the POSIX main() (the display WSI path) on Phoenix too.
+Other platforms are unchanged.
+---
+ cube/cube.c           |  3 ++-
+ cube/cube_functions.h | 13 +++++++++++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/cube/cube.c b/cube/cube.c
+--- a/cube/cube.c
++++ b/cube/cube.c
+@@ -5098,7 +5098,8 @@
+         }
+     }
+ }
+-#elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__QNX__) || defined(__GNU__)
++#elif defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__QNX__) || defined(__GNU__) || \
++    defined(__phoenix__)
+ int main(int argc, char **argv) {
+     struct demo demo;
+ 
+diff --git a/cube/cube_functions.h b/cube/cube_functions.h
+--- a/cube/cube_functions.h
++++ b/cube/cube_functions.h
+@@ -23,6 +23,9 @@
+ // Need to include relevant system headers to open the dynamic library
+ #if defined(_WIN32)
+ #include <windows.h>
++#elif defined(__phoenix__)
++// Phoenix-RTOS: no Vulkan loader, no dlopen of a driver -- the ICD is linked in
++// statically and a small loader stand-in hands out its entry points.
+ #elif defined(__APPLE__)
+ #include <stdlib.h>
+ #include <dlfcn.h>
+@@ -37,6 +40,10 @@
+ 
+ #include <vulkan/vulkan.h>
+ 
++#if defined(__phoenix__)
++extern VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL phxvk_GetInstanceProcAddr(VkInstance instance, const char* pName);
++#endif
++
+ void* vulkan_library;
+ 
+ // Global Functions
+@@ -181,6 +188,10 @@
+     if (library == NULL) return VK_ERROR_INITIALIZATION_FAILED;
+ 
+     vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)(void (*)(void))GetProcAddress(library, "vkGetInstanceProcAddr");
++#elif defined(__phoenix__)
++    static char linked_in;  // non-NULL "library" handle; never dlclose()d
++    void* library = &linked_in;
++    vkGetInstanceProcAddr = phxvk_GetInstanceProcAddr;
+ #elif defined(__APPLE__)
+     void* library = dlopen("libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
+     if (library == NULL) {
+@@ -220,6 +231,8 @@
+     if (vulkan_library != NULL) {
+ #if defined(WIN32)
+         FreeLibrary((HMODULE)vulkan_library);
++#elif defined(__phoenix__)
++        // statically linked: nothing to unload
+ #else
+         dlclose(vulkan_library);
+ #endif
+-- 
+2.43.0
+

@@ -1,0 +1,32 @@
+vkQuake: no GPU timestamp queries on Phoenix until the render server serves SUBMIT_CPU (G5).
+
+NEW for vkquake-drm (not from the port, whose fb0 shim never reached this code). vkQuake
+creates a timestamp query pool whenever the device reports timestampComputeAndGraphics
+(v3dv does) and then, EVERY frame, records vkCmdResetQueryPool + two vkCmdWriteTimestamp.
+v3dv executes both as CPU jobs through DRM_IOCTL_V3D_SUBMIT_CPU
+(v3dv_queue.c handle_reset_query_cpu_job / handle_timestamp_query_cpu_job, because
+rpi4-v3d-async advertises DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE -- v3dv refuses a device
+without it). The server answers SUBMIT_CPU with -ENOSYS (M3 gap G5), so the first
+frame's submit would end in vk_queue_set_lost("V3D_SUBMIT_CPU failed"). The pool only
+feeds scr_speeds' GPU-time readout, so it is not created on Phoenix; remove this patch
+when the server implements SUBMIT_CPU.
+
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -1565,8 +1565,16 @@
+ 	}
+ 
+ 	// GPU frame time for scr_speeds
++#if defined(__phoenix__)
++	/* Phoenix-RTOS (new GPU lane): v3dv runs timestamp-query resets and writes as CPU jobs
++	 * through DRM_IOCTL_V3D_SUBMIT_CPU, which the render server does not serve yet (gap G5,
++	 * -ENOSYS), so the first frame's vkCmdResetQueryPool would lose the device. The pool only
++	 * feeds scr_speeds' GPU time: leave it unset until the server gains SUBMIT_CPU. */
++	if (0)
++#else
+ 	if ((timestamp_query_pool == VK_NULL_HANDLE) && vulkan_globals.device_properties.limits.timestampComputeAndGraphics &&
+ 		(vulkan_globals.device_properties.limits.timestampPeriod > 0.0f))
++#endif
+ 	{
+ 		ZEROED_STRUCT (VkQueryPoolCreateInfo, query_pool_create_info);
+ 		query_pool_create_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
