@@ -1,0 +1,95 @@
+Phoenix-RTOS: SDL's stock KMSDRM video driver, statically linked (new GPU lane).
+
+The PHOENIX cmake branch (patch 0002) deliberately skips the generic UNIX host
+probes. This adds exactly the two it needs for KMSDRM -- CheckEGL() and
+CheckKMSDRM() -- which find libdrm (libdrm-phoenix), gbm and egl (Mesa's DRM
+build) through pkg-config; the build points PKG_CONFIG_LIBDIR at those cross
+prefixes only, never the host. Everything is static on Phoenix:
+
+ * SDL_KMSDRM_SHARED must be OFF (enforced): SDL_kmsdrmdyn.c then binds
+   KMSDRM_drm*/gbm_* to the real functions instead of SDL_LoadObject().
+ * SDL_egl.c: Phoenix takes the branch the statically linked ANGLE and Vita
+   builds take -- LOAD_FUNC() references the EGL functions directly and the
+   libGL/libEGL SDL_LoadObject() block is skipped. GL entry points are then
+   resolved with eglGetProcAddress() (Mesa reports EGL 1.5, which returns core
+   and extension GL functions alike), so libSDL2.a has no GL link dependency.
+
+SDL_VIDEO_OPENGL / _RENDER_OGL (desktop GL, what quakespasm asks for) and
+SDL_VIDEO_OPENGL_ES2 / _RENDER_OGL_ES2 are set directly: they only enable
+SDL's attribute plumbing and renderers, all of which go through
+SDL_GL_GetProcAddress. Pure zlib; the application links Mesa + libdrm.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1485,6 +1485,40 @@
+     set(HAVE_SDL_AUDIO TRUE)
+   endif()
+ 
++  # Phoenix-RTOS video: SDL's stock KMSDRM driver over the DRM-shaped servers
++  # (rpi4-kms = card0, rpi4-v3d-async = renderD128) through libdrm-phoenix,
++  # with Mesa's GBM + EGL. Everything is linked statically (Phoenix programs are
++  # static), so SDL_KMSDRM_SHARED must be OFF -- KMSDRM then calls libdrm/gbm
++  # directly -- and EGL is bound statically in SDL_egl.c. Headers come from
++  # pkg-config (libdrm gbm egl) of the cross prefixes the build points
++  # PKG_CONFIG_LIBDIR at, never the host's. No udev/evdev on Phoenix.
++  if(SDL_VIDEO)
++    if(SDL_KMSDRM_SHARED)
++      message_error("SDL_KMSDRM_SHARED must be OFF on Phoenix-RTOS (static linking only)")
++    endif()
++    CheckEGL()
++    if(NOT HAVE_OPENGL_EGL)
++      message_error("Phoenix-RTOS KMSDRM needs <EGL/egl.h> from the cross prefix (pkg-config egl)")
++    endif()
++    CheckKMSDRM()
++    if(NOT HAVE_KMSDRM)
++      message_error("Phoenix-RTOS KMSDRM needs libdrm + gbm + egl from the cross prefixes (pkg-config)")
++    endif()
++    # SDL resolves GL entry points with eglGetProcAddress (EGL 1.5), so neither
++    # flag adds a link dependency to libSDL2.a; the application links Mesa.
++    if(SDL_OPENGL)
++      set(SDL_VIDEO_OPENGL 1)
++      set(SDL_VIDEO_RENDER_OGL 1)
++      set(HAVE_OPENGL TRUE)
++    endif()
++    if(SDL_OPENGLES)
++      set(SDL_VIDEO_OPENGL_ES2 1)
++      set(SDL_VIDEO_RENDER_OGL_ES2 1)
++      set(HAVE_OPENGLES TRUE)
++    endif()
++    set(HAVE_SDL_VIDEO TRUE)
++  endif()
++
+ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+   if(SDL_AUDIO)
+     if(SYSV5 OR SOLARIS OR HPUX)
+--- a/src/video/SDL_egl.c
++++ b/src/video/SDL_egl.c
+@@ -116,7 +116,8 @@
+ #define EGL_PLATFORM_DEVICE_EXT 0x0
+ #endif
+ 
+-#if defined(SDL_VIDEO_STATIC_ANGLE) || defined(SDL_VIDEO_DRIVER_VITA)
++/* Phoenix-RTOS links Mesa's EGL statically (no shared libEGL/libGL to load). */
++#if defined(SDL_VIDEO_STATIC_ANGLE) || defined(SDL_VIDEO_DRIVER_VITA) || defined(__phoenix__)
+ #define LOAD_FUNC(NAME) \
+     _this->egl_data->NAME = (void *)NAME;
+ #else
+@@ -333,7 +334,7 @@
+     }
+ #endif
+ 
+-#if !defined(SDL_VIDEO_STATIC_ANGLE) && !defined(SDL_VIDEO_DRIVER_VITA)
++#if !defined(SDL_VIDEO_STATIC_ANGLE) && !defined(SDL_VIDEO_DRIVER_VITA) && !defined(__phoenix__)
+     /* A funny thing, loading EGL.so first does not work on the Raspberry, so we load libGL* first */
+     path = SDL_getenv("SDL_VIDEO_GL_DRIVER");
+     if (path) {
+@@ -419,6 +420,9 @@
+ #endif
+ 
+     _this->egl_data->egl_dll_handle = egl_dll_handle;
++#ifdef __phoenix__
++    (void)opengl_dll_handle; /* statically linked EGL + GL: nothing was loaded */
++#endif
+ #ifdef SDL_VIDEO_DRIVER_VITA
+     _this->egl_data->opengl_dll_handle = opengl_dll_handle;
+ #endif

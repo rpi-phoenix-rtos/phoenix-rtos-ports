@@ -1,0 +1,28 @@
+Phoenix-RTOS: KMSDRM scans out XRGB8888 instead of ARGB8888.
+
+rpi4-kms stacks the primary plane above the firmware console framebuffer and
+passes ARGB8888 to the firmware as a per-pixel-alpha layer, so a GL game that
+leaves alpha < 1 in its back buffer (glClear alpha 0, blended passes) could
+show the console text through the picture. SDL_EGL_SetRequiredVisualId()
+takes the same variable, so the EGLConfig becomes the XRGB8888 one Mesa's GBM
+platform also offers (kmscube's default). Phoenix-only.
+
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.c
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.c
+@@ -1195,7 +1195,16 @@
+     SDL_VideoDisplay *display = SDL_GetDisplayForWindow(window);
+     SDL_DisplayData *dispdata = (SDL_DisplayData *)display->driverdata;
+ 
++#ifdef __phoenix__
++    /* rpi4-kms stacks the primary plane ABOVE the firmware console framebuffer
++       and hands ARGB8888 to the firmware as a blended (per-pixel alpha) layer,
++       so an application that leaves alpha < 1 in its back buffer (most GL games
++       do) could show the console through the picture. Scan out an opaque
++       format instead (also what kmscube uses). */
++    uint32_t surface_fmt = GBM_FORMAT_XRGB8888;
++#else
+     uint32_t surface_fmt = GBM_FORMAT_ARGB8888;
++#endif
+     uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+ 
+     EGLContext egl_context;

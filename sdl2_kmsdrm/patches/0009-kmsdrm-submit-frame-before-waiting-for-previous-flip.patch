@@ -1,0 +1,120 @@
+KMSDRM: submit the frame to the GPU before waiting for the previous page flip.
+
+KMSDRM_GLES_SwapWindow() waited for the pending page flip first and only then
+called eglSwapBuffers(). On a tiled GPU the swap's flush is where the frame's
+render job is submitted, so the GPU sat idle from the end of the previous
+frame's job until the previous flip completed, and each frame's render could
+start only at a vblank. Any frame whose GPU time plus the display's latch
+margin exceeded one vblank interval was then shown on every second vblank:
+exactly 30.00 fps at 60 Hz, although the CPU and the GPU could each keep up
+with 60 (docs/gpu-new-lane/frame-pacing.md: quake2-drm, 8.8 ms CPU + 14.8 ms
+GPU per frame, 30.00 fps in every window).
+
+Swap first, lock the new front buffer, then wait for the pending flip, release
+the old front buffer and queue the new flip. At most one flip is still pending
+at a time and no buffer is released before the flip that replaces it on screen
+has completed, so there is no tearing; the surface needs three buffers (on
+screen, queued, being rendered), which GBM provides. SDL_VIDEO_DOUBLE_BUFFER=1
+keeps its extra wait right after the flip. Not Phoenix-specific.
+
+--- a/src/video/kmsdrm/SDL_kmsdrmopengles.c
++++ b/src/video/kmsdrm/SDL_kmsdrmopengles.c
+@@ -92,6 +92,7 @@
+     SDL_DisplayData *dispdata = (SDL_DisplayData *)SDL_GetDisplayForWindow(window)->driverdata;
+     SDL_VideoData *viddata = ((SDL_VideoData *)_this->driverdata);
+     KMSDRM_FBInfo *fb_info;
++    struct gbm_bo *new_bo;
+     int ret = 0;
+ 
+     /* Always wait for the previous issued flip before issuing a new one,
+@@ -110,45 +111,56 @@
+         KMSDRM_CreateSurfaces(_this, window);
+     }
+ 
+-    /* Wait for confirmation that the next front buffer has been flipped, at which
+-       point the previous front buffer can be released */
+-    if (!KMSDRM_WaitPageflip(_this, windata)) {
+-        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Wait for previous pageflip failed");
+-        return 0;
+-    }
+-
+-    /* Release the previous front buffer */
+-    if (windata->bo) {
+-        KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
+-        windata->bo = NULL;
+-    }
+-
+-    windata->bo = windata->next_bo;
+-
+-    /* Mark a buffer to become the next front buffer.
+-       This won't happen until pagelip completes. */
++    /* Hand this frame to the GPU before waiting for the previous flip.
++       eglSwapBuffers() flushes the frame's rendering -- for a tiled GPU such as
++       V3D that flush is where the whole frame is submitted -- and marks its
++       buffer as the next front buffer; it does not wait for a flip. Waiting for
++       the previous flip first would keep the GPU idle until that flip completes,
++       so a frame whose GPU time exceeds what is left of the vblank interval
++       could never make the next vblank, and presentation would drop to every
++       second vblank although the CPU and the GPU could each keep up. This needs
++       a third buffer (rendered into while one is on screen and one is queued),
++       which a GBM surface provides. */
+     if (!(_this->egl_data->eglSwapBuffers(_this->egl_data->egl_display,
+                                           windata->egl_surface))) {
+         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "eglSwapBuffers failed");
+         return 0;
+     }
+ 
+-    /* From the GBM surface, get the next BO to become the next front buffer,
+-       and lock it so it can't be allocated as a back buffer (to prevent EGL
+-       from drawing into it!) */
+-    windata->next_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->gs);
+-    if (!windata->next_bo) {
++    /* From the GBM surface, get the BO to become the next front buffer, and
++       lock it so it can't be allocated as a back buffer (to prevent EGL from
++       drawing into it!) */
++    new_bo = KMSDRM_gbm_surface_lock_front_buffer(windata->gs);
++    if (!new_bo) {
+         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not lock front buffer on GBM surface");
+         return 0;
+     }
+ 
+     /* Get an actual usable fb for the next front buffer. */
+-    fb_info = KMSDRM_FBFromBO(_this, windata->next_bo);
++    fb_info = KMSDRM_FBFromBO(_this, new_bo);
+     if (!fb_info) {
+         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not get a framebuffer");
++        KMSDRM_gbm_surface_release_buffer(windata->gs, new_bo);
+         return 0;
+     }
+ 
++    /* Wait for confirmation that the pending front buffer has been flipped, at
++       which point the previous front buffer can be released */
++    if (!KMSDRM_WaitPageflip(_this, windata)) {
++        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Wait for previous pageflip failed");
++        KMSDRM_gbm_surface_release_buffer(windata->gs, new_bo);
++        return 0;
++    }
++
++    /* Release the previous front buffer */
++    if (windata->bo) {
++        KMSDRM_gbm_surface_release_buffer(windata->gs, windata->bo);
++        windata->bo = NULL;
++    }
++
++    windata->bo = windata->next_bo;
++    windata->next_bo = new_bo;
++
+     if (!windata->bo) {
+         /* On the first swap, immediately present the new front buffer. Before
+            drmModePageFlip can be used the CRTC has to be configured to use
+@@ -188,8 +200,8 @@
+         }
+ 
+         /* Wait immediately for vsync (as if we only had two buffers).
+-           Even if we are already doing a WaitPageflip at the beginning of this
+-           function, this is NOT redundant because here we wait immediately
++           Even if we are already doing a WaitPageflip before queuing this
++           flip, this is NOT redundant because here we wait immediately
+            after submitting the image to the screen, reducing lag, and if
+            we have waited here, there won't be a pending pageflip so the
+            WaitPageflip at the beginning of this function will be a no-op.

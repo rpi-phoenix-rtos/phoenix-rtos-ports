@@ -1,0 +1,63 @@
+Phoenix-RTOS: let SDL's KMSDRM driver offer Vulkan (VK_KHR_display) when asked.
+
+SDL_VULKAN was a dependent option gated on ANDROID/APPLE/LINUX/WINDOWS, so on
+Phoenix it was forced OFF whatever the command line said, and the PHOENIX
+platform branch (patch 0002/0006) never set SDL_VIDEO_VULKAN. This adds PHOENIX
+to the option's condition and sets SDL_VIDEO_VULKAN in the Phoenix video block
+when -DSDL_VULKAN=ON: SDL_kmsdrmvulkan.c (stock) then provides
+SDL_Vulkan_GetInstanceExtensions (VK_KHR_surface + VK_KHR_display) and
+SDL_Vulkan_CreateSurface (vkCreateDisplayPlaneSurfaceKHR on the display's
+mode and plane). No source change: the Vulkan "library" is supplied by the
+application (a static ICD; see tools/gpu-lane/sdl2-drm/vkqdrm/vkqdrm_hooks.c):
+SDL_vulkan_internal.h refuses a build whose loadso is the dummy one, which is
+exactly Phoenix's (no dlopen), so that gate is lifted for __phoenix__ -- the
+program interposes SDL_LoadObject/SDL_LoadFunction at link time
+(-Wl,--wrap=...) and hands SDL its vkGetInstanceProcAddr.
+
+Applied ONLY by build-vkquake-drm.sh, to its own copy of the sdl2-drm source,
+after patches/0001-0009 and the overlay: the default sdl2-drm libSDL2.a (and
+its SDL_VULKAN=OFF build) is unchanged.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -474,7 +474,7 @@
+ set_option(SDL_RENDER_D3D          "Enable the Direct3D render driver" ${WINDOWS})
+ set_option(SDL_RENDER_METAL        "Enable the Metal render driver" ${APPLE})
+ set_option(SDL_VIVANTE             "Use Vivante EGL video driver" ${UNIX_SYS})
+-dep_option(SDL_VULKAN              "Enable Vulkan support" ON "ANDROID OR APPLE OR LINUX OR WINDOWS" OFF)
++dep_option(SDL_VULKAN              "Enable Vulkan support" ON "ANDROID OR APPLE OR LINUX OR WINDOWS OR PHOENIX" OFF)
+ set_option(SDL_METAL               "Enable Metal support" ${APPLE})
+ set_option(SDL_KMSDRM              "Use KMS DRM video driver" ${UNIX_SYS})
+ dep_option(SDL_KMSDRM_SHARED       "Dynamically load KMS DRM support" ON "SDL_KMSDRM" OFF)
+@@ -1518,6 +1518,17 @@
+     endif()
+     set(HAVE_SDL_VIDEO TRUE)
+ 
++    # Vulkan on KMSDRM (VK_KHR_display): SDL's stock KMSDRM Vulkan code. It needs
++    # no link dependency either -- SDL takes vkGetInstanceProcAddr from the
++    # "Vulkan library" it loads, which the application provides (Phoenix has no
++    # loader: the program links Mesa's v3dv ICD statically and answers SDL's
++    # SDL_LoadObject("libvulkan.so.1") / SDL_LoadFunction("vkGetInstanceProcAddr")
++    # itself). Off unless -DSDL_VULKAN=ON.
++    if(SDL_VULKAN)
++      set(SDL_VIDEO_VULKAN 1)
++      set(HAVE_VULKAN TRUE)
++    endif()
++
+     # Keyboard + mouse for KMSDRM from the Phoenix HID nodes /dev/kbd0 and
+     # /dev/mouse0 (raw boot-protocol reports), polled from KMSDRM_PumpEvents.
+     # Sources: src/core/phoenix/ (copied in by the build's overlay step).
+--- a/src/video/SDL_vulkan_internal.h
++++ b/src/video/SDL_vulkan_internal.h
+@@ -26,7 +26,10 @@
+ #include "SDL_stdinc.h"
+ 
+ #ifdef SDL_VIDEO_VULKAN
+-#if defined(SDL_LOADSO_DISABLED) || defined(SDL_LOADSO_DUMMY)
++/* Phoenix-RTOS programs are static and have no dlopen()-able Vulkan loader: the program
++   links its ICD and answers SDL_LoadObject("libvulkan.so.1") + SDL_LoadFunction(
++   "vkGetInstanceProcAddr") itself (link-time interposition of the dummy loadso). */
++#if (defined(SDL_LOADSO_DISABLED) || defined(SDL_LOADSO_DUMMY)) && !defined(__phoenix__)
+ #error You should not be here.
+ #endif
+ 

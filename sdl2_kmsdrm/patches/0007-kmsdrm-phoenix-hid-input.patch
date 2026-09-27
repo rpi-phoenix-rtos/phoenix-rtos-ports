@@ -1,0 +1,86 @@
+Phoenix-RTOS: keyboard + mouse input for the KMSDRM driver.
+
+KMSDRM gets its input from evdev (SDL_INPUT_LINUXEV) on Linux and from wscons
+on OpenBSD; Phoenix has neither. SDL_INPUT_PHOENIX adds a third source in the
+same three places (KMSDRM_VideoInit / KMSDRM_PumpEvents / KMSDRM_VideoQuit):
+src/core/phoenix/SDL_phoenixhid.c (new file, copied in by the build's overlay
+step) drains the raw HID boot-protocol reports of /dev/kbd0 and /dev/mouse0
+non-blocking -- the report handling the old lane's phoenix video driver
+proved on hardware, detached from that driver (events go to the focused
+window).
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1517,6 +1517,13 @@
+       set(HAVE_OPENGLES TRUE)
+     endif()
+     set(HAVE_SDL_VIDEO TRUE)
++
++    # Keyboard + mouse for KMSDRM from the Phoenix HID nodes /dev/kbd0 and
++    # /dev/mouse0 (raw boot-protocol reports), polled from KMSDRM_PumpEvents.
++    # Sources: src/core/phoenix/ (copied in by the build's overlay step).
++    set(SDL_INPUT_PHOENIX 1)
++    file(GLOB CORE_PHOENIX_SOURCES ${SDL2_SOURCE_DIR}/src/core/phoenix/*.c)
++    list(APPEND SOURCE_FILES ${CORE_PHOENIX_SOURCES})
+   endif()
+ 
+ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)
+--- a/include/SDL_config.h.cmake
++++ b/include/SDL_config.h.cmake
+@@ -336,6 +336,7 @@
+ #cmakedefine SDL_INPUT_LINUXKD @SDL_INPUT_LINUXKD@
+ #cmakedefine SDL_INPUT_FBSDKBIO @SDL_INPUT_FBSDKBIO@
+ #cmakedefine SDL_INPUT_WSCONS @SDL_INPUT_WSCONS@
++#cmakedefine SDL_INPUT_PHOENIX @SDL_INPUT_PHOENIX@
+ #cmakedefine SDL_JOYSTICK_ANDROID @SDL_JOYSTICK_ANDROID@
+ #cmakedefine SDL_JOYSTICK_HAIKU @SDL_JOYSTICK_HAIKU@
+ #cmakedefine SDL_JOYSTICK_WGI @SDL_JOYSTICK_WGI@
+--- a/src/video/kmsdrm/SDL_kmsdrmevents.c
++++ b/src/video/kmsdrm/SDL_kmsdrmevents.c
+@@ -30,6 +30,8 @@
+ #include "../../core/linux/SDL_evdev.h"
+ #elif defined SDL_INPUT_WSCONS
+ #include "../../core/openbsd/SDL_wscons.h"
++#elif defined SDL_INPUT_PHOENIX
++#include "../../core/phoenix/SDL_phoenixhid.h"
+ #endif
+ 
+ void KMSDRM_PumpEvents(_THIS)
+@@ -38,6 +40,8 @@
+     SDL_EVDEV_Poll();
+ #elif defined SDL_INPUT_WSCONS
+     SDL_WSCONS_PumpEvents();
++#elif defined SDL_INPUT_PHOENIX
++    SDL_PHOENIX_HID_Poll();
+ #endif
+ }
+ 
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.c
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.c
+@@ -36,6 +36,8 @@
+ #include "../../core/linux/SDL_evdev.h"
+ #elif defined SDL_INPUT_WSCONS
+ #include "../../core/openbsd/SDL_wscons.h"
++#elif defined SDL_INPUT_PHOENIX
++#include "../../core/phoenix/SDL_phoenixhid.h"
+ #endif
+ 
+ /* KMS/DRM declarations */
+@@ -1318,6 +1320,8 @@
+     SDL_EVDEV_SetVTSwitchCallbacks(KMSDRM_ReleaseVT, _this, KMSDRM_AcquireVT, _this);
+ #elif defined(SDL_INPUT_WSCONS)
+     SDL_WSCONS_Init();
++#elif defined(SDL_INPUT_PHOENIX)
++    SDL_PHOENIX_HID_Init();
+ #endif
+ 
+     viddata->video_init = SDL_TRUE;
+@@ -1338,6 +1342,8 @@
+     SDL_EVDEV_Quit();
+ #elif defined(SDL_INPUT_WSCONS)
+     SDL_WSCONS_Quit();
++#elif defined(SDL_INPUT_PHOENIX)
++    SDL_PHOENIX_HID_Quit();
+ #endif
+ 
+     /* Clear out the window list */
