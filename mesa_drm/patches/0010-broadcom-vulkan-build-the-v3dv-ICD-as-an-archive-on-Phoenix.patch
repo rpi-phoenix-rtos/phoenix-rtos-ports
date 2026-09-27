@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 07:00:00 +0200
+Subject: [PATCH 10/10] broadcom/vulkan: build the v3dv ICD as an archive on
+ Phoenix
+
+Phoenix-RTOS has no Vulkan loader and no usable dlopen() for a driver
+(libphoenix is not PIC; its dlopen resolves no TLS relocations), so a
+Vulkan program links the ICD statically and calls its loader-interface
+entry point vk_icdGetInstanceProcAddr() where it would call the
+loader's vkGetInstanceProcAddr() (the same pattern as patch 0002 for the
+GL stack).
+
+libvulkan_broadcom becomes library(), which follows default_library:
+unchanged for the usual default_library=shared, an archive with the
+Phoenix cross file's default_library=static. meson bundles the internal
+static libraries it links (Vulkan runtime + WSI incl. VK_KHR_display,
+Vulkan util, NIR, SPIR-V, the broadcom compiler) into the installed
+archive. The ICD version script (vulkan_icd_link_args) does not apply
+to an archive; nothing else changes.
+---
+ src/broadcom/vulkan/meson.build | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/broadcom/vulkan/meson.build b/src/broadcom/vulkan/meson.build
+--- a/src/broadcom/vulkan/meson.build
++++ b/src/broadcom/vulkan/meson.build
+@@ -115,7 +115,11 @@
+ )
+ endforeach
+ 
+-libvulkan_broadcom = shared_library(
++# Phoenix-RTOS links programs statically (no Vulkan loader, no dlopen of an
++# ICD): library() follows default_library, so the Phoenix cross file's
++# default_library=static makes the ICD an archive that a program links and
++# calls through vk_icdGetInstanceProcAddr. Unchanged for default_library=shared.
++libvulkan_broadcom = library(
+   'vulkan_broadcom',
+   [libv3dv_files, v3dv_entrypoints, v3dv_drirc, sha1_h],
+   include_directories : [
+-- 
+2.43.0
+

@@ -1,0 +1,77 @@
+From ca678a740ee79a97c65f21b25886e036ba286cf1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 03:55:16 +0200
+Subject: [PATCH 3/7] gbm: use the linked-in dri backend on Phoenix instead of
+ dlopen()
+
+Mesa 26 links libEGL/libGLESv2/dri_gbm against libgallium directly; the one
+dlopen() left on the GBM/EGL/KMS path is GBM's backend loader
+(loader_open_driver_lib("dri") + dlsym(gbmint_get_backend)). On a
+static-only system that links but fails at runtime, so gbm_create_device()
+would return NULL.
+
+With GBM_BUILTIN_DRI_BACKEND (set by meson for host system 'phoenix'),
+_gbm_create_device() calls the linked gbmint_get_backend() and creates the
+device through a static descriptor with lib == NULL, which
+_gbm_device_destroy() already skips when freeing descriptors.
+---
+ src/gbm/main/backend.c | 23 +++++++++++++++++++++++
+ src/gbm/meson.build    |  6 ++++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/src/gbm/main/backend.c b/src/gbm/main/backend.c
+index 7eb835d371c..bde8b167316 100644
+--- a/src/gbm/main/backend.c
++++ b/src/gbm/main/backend.c
+@@ -143,11 +143,34 @@ fail:
+    return NULL;
+ }
+ 
++#ifdef GBM_BUILTIN_DRI_BACKEND
++/* The dri backend linked into the program (static-only systems, where
++ * load_backend_by_name() cannot dlopen dri_gbm). */
++struct gbm_backend *gbmint_get_backend(const struct gbm_core *gbm_core);
++
++static struct gbm_device *
++load_builtin_backend(int fd)
++{
++   /* lib == NULL: never passed to free_backend_desc() (see
++    * _gbm_device_destroy), so the descriptor lives for the process. */
++   static struct gbm_backend_desc builtin_desc = { .name = "dri" };
++
++   if (!builtin_desc.backend)
++      builtin_desc.backend = gbmint_get_backend(&gbm_core);
++
++   return backend_create_device(&builtin_desc, fd);
++}
++#endif
++
+ struct gbm_device *
+ _gbm_create_device(int fd)
+ {
+    struct gbm_device *dev = NULL;
+ 
++#ifdef GBM_BUILTIN_DRI_BACKEND
++   return load_builtin_backend(fd);
++#endif
++
+    const char *b = os_get_option("GBM_BACKEND");
+    if (b) {
+       dev = load_backend_by_name(b, fd, true);
+diff --git a/src/gbm/meson.build b/src/gbm/meson.build
+index 156af659d60..f7fa7064a6f 100644
+--- a/src/gbm/meson.build
++++ b/src/gbm/meson.build
+@@ -15,6 +15,12 @@ args_gbm = [
+ ]
+ incs_gbm = [include_directories('main'), inc_loader, inc_gallium, inc_util]
+ 
++if host_machine.system() == 'phoenix'
++  # Static-only system: gbm_create_device() uses the dri backend linked into
++  # the program instead of dlopen()ing dri_gbm.
++  args_gbm += '-DGBM_BUILTIN_DRI_BACKEND'
++endif
++
+ libgbm_name = 'gbm'
+ 
+ if with_platform_android and get_option('platform-sdk-version') >= 30

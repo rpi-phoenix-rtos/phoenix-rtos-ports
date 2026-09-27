@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 10:20:00 +0200
+Subject: [PATCH] meson: no dril_dri shared stub on Phoenix-RTOS
+
+The X11 platform (or GLX=dri) always builds gallium/targets/dril: the
+<driver>_dri.so stub an X server's AIGLX loads with dlopen(). Phoenix-RTOS
+builds Mesa static-only (patch 0002: the gallium megadriver is an archive
+linked into every program) and has no dynamic linker to load the stub, so the
+shared_library() link fails (libphoenix is not PIC). Skip the target there;
+EGL on X11 (DRI3) does not use it.
+---
+ src/meson.build | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/meson.build b/src/meson.build
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -161,7 +161,11 @@
+   subdir('egl')
+ endif
+ if with_gallium
+-  if with_glx == 'dri' or with_platform_x11
++  # dril_dri is the shared-object stub an X server's AIGLX dlopen()s as
++  # <driver>_dri.so; a static-only system (Phoenix-RTOS: no dynamic linker,
++  # the gallium megadriver is linked into every program) cannot build it and
++  # has no loader for it.
++  if (with_glx == 'dri' or with_platform_x11) and host_machine.system() != 'phoenix'
+     subdir('gallium/targets/dril')
+   endif
+ endif

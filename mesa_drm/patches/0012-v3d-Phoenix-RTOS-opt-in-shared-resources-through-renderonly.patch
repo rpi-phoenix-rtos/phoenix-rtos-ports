@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 09:00:00 +0200
+Subject: [PATCH] v3d: Phoenix-RTOS opt-in: allocate shared resources through
+ renderonly (V3D_PHOENIX_SHARED_SCANOUT)
+
+The new GPU lane's render server cannot yet export a BO it allocated itself
+(gap G4), so Wayland/DRI3 client buffers (PIPE_BIND_SHARED, exported as a
+dma-buf for the compositor) fail at the export. With
+V3D_PHOENIX_SHARED_SCANOUT=1, a kmsro screen allocates shared resources like
+scanout ones: linear, on the display device (rpi4-kms dumb pool), imported
+into v3d -- the path the kms buffer namespace (/kmsbuf) already exports and
+the render server already imports (G1). Default off: no behaviour change.
+Remove once G4 lands.
+---
+ src/gallium/drivers/v3d/v3d_resource.c | 32 ++++++++++++++++++++++++++++++---
+ 1 file changed, 30 insertions(+), 2 deletions(-)
+
+--- a/src/gallium/drivers/v3d/v3d_resource.c
++++ b/src/gallium/drivers/v3d/v3d_resource.c
+@@ -33,6 +33,8 @@
+ #include "util/u_upload_mgr.h"
+ #include "util/format/u_format_zs.h"
+ #include "util/u_drm.h"
++#include "util/detect_os.h"
++#include "util/u_debug.h"
+ 
+ #include "drm-uapi/drm_fourcc.h"
+ #include "v3d_screen.h"
+@@ -802,6 +804,24 @@
+         return rsc;
+ }
+ 
++#if DETECT_OS_PHOENIX
++/* Phoenix-RTOS: the render server cannot yet export a BO it allocated itself
++ * (new GPU lane gap G4), so a dma-buf shared with another process -- Wayland
++ * or DRI3 client buffers -- can only come from the display device. Opt-in
++ * (V3D_PHOENIX_SHARED_SCANOUT=1): shared resources are then allocated like
++ * scanout ones, through renderonly (linear, in the display server's pool).
++ */
++static bool
++v3d_phoenix_shared_via_renderonly(void)
++{
++        static int enabled = -1;
++
++        if (enabled < 0)
++                enabled = debug_get_bool_option("V3D_PHOENIX_SHARED_SCANOUT", false);
++        return enabled;
++}
++#endif
++
+ static struct pipe_resource *
+ v3d_resource_create_with_modifiers(struct pipe_screen *pscreen,
+                                    const struct pipe_resource *tmpl,
+@@ -814,6 +834,14 @@
+         struct pipe_resource *prsc = &rsc->base;
+         /* Use a tiled layout if we can, for better 3D performance. */
+         bool should_tile = true;
++        /* Allocated on the display device and imported (kmsro). */
++        bool via_renderonly = screen->ro && (tmpl->bind & PIPE_BIND_SCANOUT);
++
++#if DETECT_OS_PHOENIX
++        if (screen->ro && (tmpl->bind & PIPE_BIND_SHARED) &&
++            v3d_phoenix_shared_via_renderonly())
++                via_renderonly = true;
++#endif
+ 
+         assert(tmpl->target != PIPE_BUFFER ||
+                (tmpl->format == PIPE_FORMAT_NONE ||
+@@ -844,7 +872,7 @@
+         /* If using the old-school SCANOUT flag, we don't know what the screen
+          * might support other than linear. Just force linear.
+          */
+-        if (tmpl->bind & PIPE_BIND_SCANOUT)
++        if ((tmpl->bind & PIPE_BIND_SCANOUT) || via_renderonly)
+                 should_tile = false;
+ 
+         /* No user-specified modifier; determine our own. */
+@@ -865,7 +893,7 @@
+ 
+         v3d_setup_slices(screen, rsc, 0, tmpl->bind & PIPE_BIND_SHARED);
+ 
+-        if (screen->ro && (tmpl->bind & PIPE_BIND_SCANOUT)) {
++        if (via_renderonly) {
+                 assert(!rsc->tiled);
+                 struct winsys_handle handle;
+                 uint32_t scanout_height =
+-- 
+2.47.0

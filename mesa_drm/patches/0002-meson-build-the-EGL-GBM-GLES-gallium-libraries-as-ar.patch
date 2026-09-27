@@ -1,0 +1,123 @@
+From 31790bdb47982404a49ee8f1021b47d67ba63182 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 01:04:40 +0200
+Subject: [PATCH 2/7] meson: build the EGL/GBM/GLES/gallium libraries as
+ archives on Phoenix
+
+Phoenix-RTOS links programs statically: libphoenix is not PIC (a -shared
+link of libgallium/libgbm fails on relocations against libc), and its
+dlopen() resolves no TLS relocations, while GL dispatch and EGL current
+state are initial-exec TLS. So the DRM stack is one static "megadriver"
+linked into each program.
+
+Turn the six shared_library() targets of that stack (libgallium, libEGL,
+libgbm, dri_gbm, libGLESv2, libGLESv1_CM) into library(), which follows
+default_library: unchanged for the usual default_library=shared, archives
+with the Phoenix cross file's default_library=static. link_whole: libdri
+keeps the DRI frontend inside the libgallium archive. On Phoenix the
+"shared-library" suffix is 'a', so libgallium's name_suffix yields an
+ordinary archive name.
+---
+ meson.build                         | 5 +++++
+ src/egl/meson.build                 | 2 +-
+ src/gallium/targets/dri/meson.build | 2 +-
+ src/gbm/backends/dri/meson.build    | 2 +-
+ src/gbm/meson.build                 | 2 +-
+ src/mesa/glapi/es1api/meson.build   | 2 +-
+ src/mesa/glapi/es2api/meson.build   | 2 +-
+ 7 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 80253d1b782..70eb6e09ba7 100644
+--- a/meson.build
++++ b/meson.build
+@@ -26,6 +26,11 @@ if host_machine.system() == 'darwin'
+ elif host_machine.system() == 'windows'
+   libname_prefix = ''
+   libname_suffix = 'dll'
++elif host_machine.system() == 'phoenix'
++  # Static-only: libphoenix is not PIC and its dlopen resolves no TLS
++  # relocations, so the "shared" targets below are archives.
++  libname_prefix = 'lib'
++  libname_suffix = 'a'
+ else
+   libname_prefix = 'lib'
+   libname_suffix = 'so'
+diff --git a/src/egl/meson.build b/src/egl/meson.build
+index 4e62ee41e4e..e1f0430e7c2 100644
+--- a/src/egl/meson.build
++++ b/src/egl/meson.build
+@@ -204,7 +204,7 @@ if egl_native_platform != ''
+   c_args_for_egl += '-D_EGL_NATIVE_PLATFORM=_EGL_PLATFORM_@0@'.format(egl_native_platform.to_upper())
+ endif
+ 
+-libegl = shared_library(
++libegl = library(
+   egl_lib_name,
+   files_egl,
+   c_args : [
+diff --git a/src/gallium/targets/dri/meson.build b/src/gallium/targets/dri/meson.build
+index c526ffef4a1..49c8b569298 100644
+--- a/src/gallium/targets/dri/meson.build
++++ b/src/gallium/targets/dri/meson.build
+@@ -39,7 +39,7 @@ else
+   libgallium_name = 'gallium-@0@'.format(meson.project_version())
+ endif
+ 
+-libgallium_dri = shared_library(
++libgallium_dri = library(
+   libgallium_name,
+   files('dri_target.c'),
+   include_directories : [
+diff --git a/src/gbm/backends/dri/meson.build b/src/gbm/backends/dri/meson.build
+index 5c33a3a907e..4875a4c06ed 100644
+--- a/src/gbm/backends/dri/meson.build
++++ b/src/gbm/backends/dri/meson.build
+@@ -12,7 +12,7 @@ if with_platform_wayland
+   endif
+ endif
+ 
+-shared_library(
++library(
+   'dri_gbm',
+   files('gbm_dri.c', 'gbm_driint.h'),
+   include_directories : [inc_gallium, incs_gbm_dri, inc_loader, inc_st_dri, inc_gallium_aux],
+diff --git a/src/gbm/meson.build b/src/gbm/meson.build
+index fbfdfb20f26..156af659d60 100644
+--- a/src/gbm/meson.build
++++ b/src/gbm/meson.build
+@@ -21,7 +21,7 @@ if with_platform_android and get_option('platform-sdk-version') >= 30
+   libgbm_name = 'gbm_mesa'
+ endif
+ 
+-libgbm = shared_library(
++libgbm = library(
+   libgbm_name,
+   files_gbm,
+   include_directories : incs_gbm,
+diff --git a/src/mesa/glapi/es1api/meson.build b/src/mesa/glapi/es1api/meson.build
+index 3ae36ff12aa..04f2dd66f21 100644
+--- a/src/mesa/glapi/es1api/meson.build
++++ b/src/mesa/glapi/es1api/meson.build
+@@ -22,7 +22,7 @@ gles1_def = custom_target(
+   command : gen_vs_module_defs_normal_command,
+ )
+ 
+-libglesv1_cm = shared_library(
++libglesv1_cm = library(
+   'GLESv1_CM' + get_option('gles-lib-suffix'),
+   ['libgles1_public.c', es1_glapi_mapi_tmp_h],
+   vs_module_defs : gles1_def,
+diff --git a/src/mesa/glapi/es2api/meson.build b/src/mesa/glapi/es2api/meson.build
+index be999c1ab3b..d9558910468 100644
+--- a/src/mesa/glapi/es2api/meson.build
++++ b/src/mesa/glapi/es2api/meson.build
+@@ -22,7 +22,7 @@ gles2_def = custom_target(
+   command : gen_vs_module_defs_normal_command,
+ )
+ 
+-libgles2 = shared_library(
++libgles2 = library(
+   'GLESv2' + get_option('gles-lib-suffix'),
+   ['libgles2_public.c', es2_glapi_mapi_tmp_h],
+   vs_module_defs : gles2_def,

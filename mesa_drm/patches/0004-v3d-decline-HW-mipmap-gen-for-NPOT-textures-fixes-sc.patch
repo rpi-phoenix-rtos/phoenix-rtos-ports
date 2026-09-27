@@ -1,0 +1,58 @@
+From 9511abbb5b7603721af83ce1e849631a313e3793 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Tue, 25 Aug 2026 20:05:04 +0200
+Subject: [PATCH 4/7] v3d: decline HW mipmap-gen for NPOT textures (fixes
+ scrambled Q2 model skins on Pi4)
+
+The TFU multi-level mipmap generator supplies OPAD only for level 0 and infers
+the tiling of levels >=1 internally; that inference only matches
+v3d_setup_slices / the TMU sampler for power-of-two bases. NPOT bases (with
+ub_pad + pot_width/pot_height padding on the small UBLINEAR/LINEARTILE levels)
+get a generated layout that diverges from the sampled layout, so distant NPOT
+textures (Quake II model skins: banner 260x195, gibs, soldier 288x195...) read
+as garbage while the base level and all POT textures render correctly.
+
+Decline NPOT in v3d_generate_mipmap so st_generate_mipmap falls back to the
+render-based util_gen_mipmap path (per-level-correct surfaces). POT keeps the
+fast TFU path (no-op guard).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+(cherry picked from commit e4be1163240fe63c3892744cb3d815f9603a9fdc)
+---
+ src/gallium/drivers/v3d/v3d_blit.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/gallium/drivers/v3d/v3d_blit.c b/src/gallium/drivers/v3d/v3d_blit.c
+index c5c07d1deb0..68c38ad1092 100644
+--- a/src/gallium/drivers/v3d/v3d_blit.c
++++ b/src/gallium/drivers/v3d/v3d_blit.c
+@@ -26,6 +26,7 @@
+ #include "util/perf/cpu_trace.h"
+ #include "util/u_surface.h"
+ #include "util/u_blitter.h"
++#include "util/bitscan.h"
+ #include "compiler/nir/nir_builder.h"
+ #include "v3d_context.h"
+ #include "broadcom/common/v3d_tiling.h"
+@@ -252,6 +253,21 @@ v3d_generate_mipmap(struct pipe_context *pctx,
+         if (prsc->target == PIPE_TEXTURE_3D)
+                 return false;
+ 
++        /* Phoenix/RPi4 workaround (Quake II NPOT model skins rendered scrambled
++         * at distance): the TFU multi-level mipmap generator supplies OPAD only
++         * for level 0 and INFERS the tiling of levels >=1 internally. That
++         * inference only matches what v3d_setup_slices/the TMU sampler
++         * reconstruct when the base dimensions are powers of two; for NPOT bases
++         * (which carry ub_pad and pot_width/pot_height padding on the small
++         * UBLINEAR/LINEARTILE levels) the generated layout diverges from the
++         * sampled layout, so those mip levels read as garbage. Decline NPOT here
++         * so st_generate_mipmap falls back to the render-based util_gen_mipmap
++         * path, which lays out each level via its own correctly-tiled surface.
++         * POT textures keep the fast TFU path (this guard is a no-op for them). */
++        if (!util_is_power_of_two_or_zero(prsc->width0) ||
++            !util_is_power_of_two_or_zero(prsc->height0))
++                return false;
++
+         struct v3d_context *v3d = v3d_context(pctx);
+         struct v3d_screen *screen = v3d->screen;
+         struct v3d_device_info *devinfo = &screen->devinfo;

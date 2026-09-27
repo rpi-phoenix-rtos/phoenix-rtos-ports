@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 07:30:00 +0200
+Subject: [PATCH 11/11] vulkan, v3dv: Phoenix-RTOS OS gates -- DRM format
+ modifiers and a build-id-free UUID
+
+Two things v3dv needs on a POSIX KMS/DRM system that is neither Linux
+nor BSD and links statically:
+
+* vk_image: struct vk_image::drm_format_mod and the
+  VK_EXT_image_drm_format_modifier plumbing are compiled only for
+  DETECT_OS_LINUX || DETECT_OS_BSD, yet v3dv uses them unconditionally
+  (v3dv_image.c) and the KMS WSI (wsi_common_display.c, wsi_common_drm.c)
+  depends on them. Phoenix-RTOS speaks the Linux DRM uapi through
+  libdrm (patch 0001 makes it a KMS/DRM system), so add
+  DETECT_OS_PHOENIX to the four gates.
+
+* v3dv init_uuids() finds the driver's ELF build-id note with
+  build_id_find_nhdr_for_addr(), which util/build_id.h only declares
+  with HAVE_DL_ITERATE_PHDR (or on Apple). Without it, derive the build
+  identity from the version string (PACKAGE_VERSION + MESA_GIT_SHA1)
+  hashed with BLAKE3: deterministic per build, which is all the
+  pipeline-cache UUID, driver UUID and disk-cache key need. Systems with
+  a build-id are unchanged.
+---
+  src/broadcom/vulkan/v3dv_device.c | 21 +++++++++++++++++++--
+  src/vulkan/runtime/vk_image.c     |  6 +++---
+  src/vulkan/runtime/vk_image.h     |  2 +-
+  3 files changed, 23 insertions(+), 6 deletions(-)
+
+diff --git a/src/broadcom/vulkan/v3dv_device.c b/src/broadcom/vulkan/v3dv_device.c
+index 2ee6acafc7f..06b36b643d5 100644
+--- a/src/broadcom/vulkan/v3dv_device.c
++++ b/src/broadcom/vulkan/v3dv_device.c
+@@ -864,6 +864,7 @@ device_has_expected_features(struct v3dv_physical_device *device)
+ static VkResult
+ init_uuids(struct v3dv_physical_device *device)
+ {
++#if HAVE_BUILD_ID
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(init_uuids);
+    if (!note) {
+@@ -880,6 +881,22 @@ init_uuids(struct v3dv_physical_device *device)
+    }
+ 
+    copy_build_id_to_sha1(device->driver_build_sha1, note);
++   const uint8_t *build_id = build_id_data(note);
++#else
++   /* No ELF build-id note to find at run time (no dl_iterate_phdr, e.g. the
++    * static binaries of Phoenix-RTOS): identify the build by its version
++    * string instead. Same uses (pipeline-cache and memory-sharing UUIDs,
++    * disk-cache key), same determinism per build.
++    */
++   static const char build_str[] = "v3dv " PACKAGE_VERSION MESA_GIT_SHA1;
++   uint8_t build_id[BLAKE3_KEY_LEN];
++   blake3_hasher build_ctx;
++   _mesa_blake3_init(&build_ctx);
++   _mesa_blake3_update(&build_ctx, build_str, sizeof(build_str) - 1);
++   _mesa_blake3_final(&build_ctx, build_id);
++   memcpy(device->driver_build_sha1, build_id, sizeof(device->driver_build_sha1));
++   const unsigned build_id_len = sizeof(build_id);
++#endif
+ 
+    uint32_t vendor_id = v3dv_physical_device_vendor_id(device);
+    uint32_t device_id = v3dv_physical_device_device_id(device);
+@@ -892,7 +909,7 @@ init_uuids(struct v3dv_physical_device *device)
+     * invalid.  It needs both a driver build and the PCI ID of the device.
+     */
+    _mesa_blake3_init(&blake3_ctx);
+-   _mesa_blake3_update(&blake3_ctx, build_id_data(note), build_id_len);
++   _mesa_blake3_update(&blake3_ctx, build_id, build_id_len);
+    _mesa_blake3_update(&blake3_ctx, &device_id, sizeof(device_id));
+    _mesa_blake3_final(&blake3_ctx, blake3);
+    memcpy(device->pipeline_cache_uuid, blake3, VK_UUID_SIZE);
+@@ -902,7 +919,7 @@ init_uuids(struct v3dv_physical_device *device)
+     * share memory need to also check the device UUID (below) so all this
+     * needs to be is the build-id.
+     */
+-   memcpy(device->driver_uuid, build_id_data(note), VK_UUID_SIZE);
++   memcpy(device->driver_uuid, build_id, VK_UUID_SIZE);
+ 
+    /* The device UUID uniquely identifies the given device within the machine.
+     * Since we never have more than one device, this doesn't need to be a real
+diff --git a/src/vulkan/runtime/vk_image.c b/src/vulkan/runtime/vk_image.c
+index bda7fc77d1b..720651aad8e 100644
+--- a/src/vulkan/runtime/vk_image.c
++++ b/src/vulkan/runtime/vk_image.c
+@@ -23,7 +23,7 @@
+ 
+ #include "vk_image.h"
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_PHOENIX
+ #include <drm-uapi/drm_fourcc.h>
+ #endif
+ 
+@@ -105,7 +105,7 @@ vk_image_init(struct vk_device *device,
+       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
+    image->wsi_legacy_scanout = wsi_info && wsi_info->scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_PHOENIX
+    image->drm_format_mod = ((1ULL << 56) - 1) /* DRM_FORMAT_MOD_INVALID */;
+ #endif
+ 
+@@ -185,7 +185,7 @@ vk_image_destroy(struct vk_device *device,
+    vk_object_free(device, alloc, image);
+ }
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_PHOENIX
+ VKAPI_ATTR VkResult VKAPI_CALL
+ vk_common_GetImageDrmFormatModifierPropertiesEXT(UNUSED VkDevice device,
+                                                  VkImage _image,
+diff --git a/src/vulkan/runtime/vk_image.h b/src/vulkan/runtime/vk_image.h
+index f560519c16f..437dc9a75ee 100644
+--- a/src/vulkan/runtime/vk_image.h
++++ b/src/vulkan/runtime/vk_image.h
+@@ -77,7 +77,7 @@ struct vk_image {
+    /* wsi_image_create_info::scanout */
+    bool wsi_legacy_scanout;
+ 
+-#if DETECT_OS_LINUX || DETECT_OS_BSD
++#if DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_PHOENIX
+    /* VK_EXT_drm_format_modifier
+     *
+     * Initialized by vk_image_create/init() to DRM_FORMAT_MOD_INVALID.  It's
+-- 
+2.43.0
+

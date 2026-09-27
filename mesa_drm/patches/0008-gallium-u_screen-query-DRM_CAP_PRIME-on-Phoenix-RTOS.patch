@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 06:00:00 +0200
+Subject: [PATCH 8/9] gallium/u_screen: query DRM_CAP_PRIME on Phoenix-RTOS too
+
+u_init_pipe_screen_caps() fills caps.dmabuf from drmGetCap(DRM_CAP_PRIME)
+only on Linux, the BSDs and managarm. On Phoenix-RTOS (libdrm-phoenix) the
+query was compiled out, so every screen reported caps.dmabuf = 0, and with it:
+
+- gbm_dri: has_dmabuf_export = false, so gbm_dri_bo_create() allocated every
+  GBM surface buffer as a dumb buffer without a DRI image; the EGL GBM
+  platform then handed that NULL image to dri2_allocate_textures() (a NULL
+  dereference at the first eglMakeCurrent -- kmscube, first Pi run);
+- dri_screen: dmabuf_import/has_dmabuf = false;
+- EGL: no EGL_EXT_image_dma_buf_import(_modifiers)/EGL_MESA_image_dma_buf_export.
+
+libdrm-phoenix answers DRM_CAP_PRIME (IMPORT | EXPORT on the v3d render node),
+so the generic query is correct here as it is on the other DRM systems.
+---
+ src/gallium/auxiliary/util/u_screen.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/auxiliary/util/u_screen.c b/src/gallium/auxiliary/util/u_screen.c
+index da9cdfcec5c..5aa33fb317e 100644
+--- a/src/gallium/auxiliary/util/u_screen.c
++++ b/src/gallium/auxiliary/util/u_screen.c
+@@ -132,7 +132,8 @@ u_init_pipe_screen_caps(struct pipe_screen *pscreen, int accel)
+ 
+    caps->throttle = true;
+ 
+-#if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_MANAGARM)
++#if defined(HAVE_LIBDRM) && (DETECT_OS_LINUX || DETECT_OS_BSD || DETECT_OS_MANAGARM || \
++                             DETECT_OS_PHOENIX)
+    if (pscreen->get_screen_fd) {
+       uint64_t cap;
+       int fd = pscreen->get_screen_fd(pscreen);
+-- 
+2.43.0
+

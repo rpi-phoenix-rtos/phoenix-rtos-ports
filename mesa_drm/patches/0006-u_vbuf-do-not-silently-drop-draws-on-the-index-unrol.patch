@@ -1,0 +1,98 @@
+From bf9ff7129c3075d73d02925f204c0c51387f4a94 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Mon, 7 Sep 2026 04:59:04 +0200
+Subject: [PATCH 6/7] u_vbuf: do not silently drop draws on the index-unrolling
+ path (Phoenix RPi4)
+
+u_vbuf_translate_begin() failing makes the caller `goto out`, which skips
+pipe->draw_vbo() entirely -- the draw is dropped with no trace, because
+debug_warn_once() is inert in release builds.  On the Pi 4 that surfaced as
+Quake III's world rendering BLACK during a bot match while player models stayed
+correct.
+
+Instrumented readback proved the GL state was identical in the working and
+failing cases, so the loss was below the API.  Made the failure report itself,
+and it named the trigger exactly:
+
+  u_vbuf: TRANSLATE FAILED - DRAW DROPPED unroll=1 incompat_vb=0x0
+          incompat_elem=0x0 misaligned=0x0 nelem=3
+
+incompatible_vb_mask, incompatible_elem_mask and misaligned are all zero, so the
+ONLY reason u_vbuf entered the translate path was the index-unrolling
+optimisation.  Unrolling is a pure upload-ratio heuristic, so declining it is
+always correct and the draw takes the ordinary indexed path instead.
+
+Two changes: decline unrolling on Phoenix, and keep the failure loud so this
+class can never again fail silently.
+
+HW: multitexture ENABLED, world renders fully, 0 dropped draws, 0 faults.
+Still open upstream-wise: why translate_generic cannot build that key here
+(aarch64 has no translate_sse, so it is the only path).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+(cherry picked from commit aa916f2f060e4180cc208e1b6b2fe0025b4103ff)
+---
+ src/gallium/auxiliary/util/u_vbuf.c | 43 ++++++++++++++++++++++++++++-
+ 1 file changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/auxiliary/util/u_vbuf.c b/src/gallium/auxiliary/util/u_vbuf.c
+index f6c64334d4c..ae7dfe409e5 100644
+--- a/src/gallium/auxiliary/util/u_vbuf.c
++++ b/src/gallium/auxiliary/util/u_vbuf.c
+@@ -1681,6 +1681,20 @@ void u_vbuf_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *inf
+              * performance. */
+             if (!indirect &&
+                 !new_info.primitive_restart &&
++#if defined(__phoenix__)
++                /* Phoenix-RTOS RPi4: do NOT take the index-unrolling
++                 * optimisation.  On HW it is the ONLY reason u_vbuf enters the
++                 * translate path for Quake III's world surfaces (the report says
++                 * incompat_vb=0, incompat_elem=0, misaligned=0, unroll=1), and
++                 * u_vbuf_translate_begin() then fails and SKIPS pipe->draw_vbo
++                 * entirely -- the surface is silently dropped, which is why the
++                 * world rendered black.  Unrolling is a pure upload-ratio
++                 * optimisation, so declining it is always correct; the draw takes
++                 * the ordinary indexed path instead.  (Why translate_generic
++                 * cannot build that key here is still open -- aarch64 has no
++                 * translate_sse, so the generic path is the only one.) */
++                false &&
++#endif
+                 util_is_vbo_upload_ratio_too_large(new_draw.count, num_vertices) &&
+                 !u_vbuf_mapping_vertex_buffer_blocks(mgr, misaligned)) {
+                unroll_indices = true;
+@@ -1706,7 +1720,34 @@ void u_vbuf_draw_vbo(struct pipe_context *pipe, const struct pipe_draw_info *inf
+          if (!u_vbuf_translate_begin(mgr, &new_info, &new_draw,
+                                      start_vertex, num_vertices,
+                                      min_index, unroll_indices, misaligned, &releasebuf)) {
+-            debug_warn_once("u_vbuf_translate_begin() failed");
++            /* Phoenix-RTOS RPi4: this failure path SKIPS pipe->draw_vbo entirely,
++             * so the draw is silently dropped -- which on HW showed up as Quake
++             * III's world rendering BLACK during a bot match (the multitexture
++             * path adds a second texcoord element).  debug_warn_once is a no-op in
++             * release builds, so it failed with no trace at all.  Say so, once,
++             * unconditionally, and name the element that could not be translated. */
++            {
++               static bool phx_reported = false;
++
++               if (!phx_reported) {
++                  unsigned i;
++
++                  phx_reported = true;
++                  fprintf(stderr, "u_vbuf: TRANSLATE FAILED - DRAW DROPPED "
++                          "unroll=%d incompat_vb=0x%x incompat_elem=0x%x "
++                          "misaligned=0x%x nelem=%u\n",
++                          (int)unroll_indices, incompatible_vb_mask,
++                          mgr->ve->incompatible_elem_mask, misaligned,
++                          mgr->ve->count);
++                  for (i = 0; i < mgr->ve->count; i++) {
++                     fprintf(stderr, "u_vbuf:   ve[%u] fmt=%s off=%u stride=%u vb=%u\n",
++                             i, util_format_short_name(mgr->ve->ve[i].src_format),
++                             mgr->ve->ve[i].src_offset,
++                             mgr->ve->ve[i].src_stride,
++                             mgr->ve->ve[i].vertex_buffer_index);
++                  }
++               }
++            }
+             goto out;
+          }
+ 

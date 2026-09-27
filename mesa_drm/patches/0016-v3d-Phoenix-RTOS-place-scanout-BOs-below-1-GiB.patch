@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:00:00 +0200
+Subject: [PATCH] v3d: Phoenix-RTOS: ask the render server to place scan-out
+ BOs below 1 GiB
+
+The Raspberry Pi 4 firmware display plane fetches nothing at or above 1 GiB,
+and the Phoenix render server (rpi4-v3d-async) places a BO wherever the
+kernel's page allocator puts its contiguous block. A Wayland client's buffer
+that Weston could put on the plane directly (the linear one Mesa allocates
+with __DRI_IMAGE_USE_SCANOUT from a scan-out dma-buf feedback tranche) then
+sometimes lands above 1 GiB, rpi4-kms refuses it at ADDFB2 and Weston
+composites it with GL instead.
+
+On Phoenix, a resource with PIPE_BIND_SCANOUT that is allocated on the render
+device (not through renderonly) is created with a Phoenix-only
+DRM_IOCTL_V3D_CREATE_BO flag, V3D_PHOENIX_CREATE_BO_SCANOUT (libdrm-phoenix
+DRM_PHOENIX_V3D_CREATE_BO_SCANOUT); libdrm-phoenix turns it into the render
+server's V3DA_BO_LOWMEM. Such BOs bypass the BO cache (a cached BO may lie
+anywhere). A libdrm that refuses the flag (EINVAL) gets the request again
+without it: the placement is a hint. Linux: no change (the flag is never set).
+---
+ src/gallium/drivers/v3d/v3d_bufmgr.c   | 21 +++++++++++++++++++--
+ src/gallium/drivers/v3d/v3d_bufmgr.h   |  8 ++++++++
+ src/gallium/drivers/v3d/v3d_resource.c | 13 +++++++++++--
+ 3 files changed, 38 insertions(+), 4 deletions(-)
+
+--- a/src/gallium/drivers/v3d/v3d_bufmgr.c
++++ b/src/gallium/drivers/v3d/v3d_bufmgr.c
+@@ -118,6 +118,13 @@
+ struct v3d_bo *
+ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
+ {
++        return v3d_bo_alloc_flags(screen, size, name, 0);
++}
++
++struct v3d_bo *
++v3d_bo_alloc_flags(struct v3d_screen *screen, uint32_t size, const char *name,
++                   uint32_t flags)
++{
+         struct v3d_bo *bo;
+         int ret;
+ 
+@@ -127,7 +134,10 @@
+ 
+         size = align(size, 4096);
+ 
+-        bo = v3d_bo_from_cache(screen, size, name);
++        /* A placement-constrained BO never comes from the cache: a cached BO
++         * may lie anywhere.
++         */
++        bo = flags ? NULL : v3d_bo_from_cache(screen, size, name);
+         if (bo) {
+                 if (dump_stats) {
+                         mesa_logd("Allocated %s %dkb from cache:", name, size / 1024);
+@@ -147,13 +157,20 @@
+         bo->private = true;
+ 
+         struct drm_v3d_create_bo create = {
+-                .size = size
++                .size = size,
++                .flags = flags,
+         };
+ 
+  retry:
+         ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_CREATE_BO, &create);
+         MESA_TRACE_SCOPE("%s size=%u name=\"%s\"", __func__, size, name);
+ 
++        if (ret != 0 && create.flags != 0 && errno == EINVAL) {
++                /* A libdrm without the flag: the placement is a hint. */
++                create.flags = 0;
++                goto retry;
++        }
++
+         if (ret != 0) {
+                 if (!list_is_empty(&screen->bo_cache.time_list)) {
+                         v3d_bo_cache_free_all(&screen->bo_cache);
+--- a/src/gallium/drivers/v3d/v3d_bufmgr.h
++++ b/src/gallium/drivers/v3d/v3d_bufmgr.h
+@@ -56,8 +56,16 @@
+         bool private;
+ };
+ 
++/* Phoenix-RTOS only (libdrm-phoenix DRM_PHOENIX_V3D_CREATE_BO_SCANOUT, same value):
++ * the BO may be scanned out by the display plane, which fetches nothing above
++ * 1 GiB, so the render server places it below. Linux v3d defines no create flags.
++ */
++#define V3D_PHOENIX_CREATE_BO_SCANOUT (1u << 31)
++
+ struct v3d_bo *v3d_bo_alloc(struct v3d_screen *screen, uint32_t size,
+                             const char *name);
++struct v3d_bo *v3d_bo_alloc_flags(struct v3d_screen *screen, uint32_t size,
++                                  const char *name, uint32_t flags);
+ void v3d_bo_last_unreference(struct v3d_bo *bo);
+ void v3d_bo_last_unreference_locked_timed(struct v3d_bo *bo, time_t time);
+ struct v3d_bo *v3d_bo_open_name(struct v3d_screen *screen, uint32_t name);
+--- a/src/gallium/drivers/v3d/v3d_resource.c
++++ b/src/gallium/drivers/v3d/v3d_resource.c
+@@ -112,8 +112,17 @@
+          */
+         uint32_t padding =
+                 rsc->base.target == PIPE_BUFFER ? 4 : V3D_TFU_READAHEAD_SIZE;
+-        bo = v3d_bo_alloc(v3d_screen(pscreen), rsc->size + padding,
+-                          "resource");
++        uint32_t flags = 0;
++#if DETECT_OS_PHOENIX
++        /* Phoenix-RTOS: a scan-out resource allocated here (not through
++         * renderonly: a Wayland or DRI3 client's buffer on the render node)
++         * must lie where the display plane can fetch it.
++         */
++        if (prsc->bind & PIPE_BIND_SCANOUT)
++                flags |= V3D_PHOENIX_CREATE_BO_SCANOUT;
++#endif
++        bo = v3d_bo_alloc_flags(v3d_screen(pscreen), rsc->size + padding,
++                                "resource", flags);
+         if (bo) {
+                 v3d_bo_unreference(&rsc->bo);
+                 rsc->bo = bo;
+-- 
+2.47.0
