@@ -1,0 +1,53 @@
+From 5b744e6046cb0fae036c12c148b2aa23755d77cf Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 05:48:06 +0200
+Subject: [PATCH 8/8] xfree86: allow a framebuffer-slot probe in builds without
+ libpciaccess
+
+xf86PostProbe() aborts with "Cannot run in framebuffer mode. Please
+specify busIDs for all framebuffer devices" when a framebuffer slot was
+claimed together with a slot on a real bus (PCI, SBus, platform).  Without
+XSERVER_LIBPCIACCESS the PCI term of that test was the constant TRUE, so
+*any* framebuffer-slot claim was fatal: a driver's legacy Probe() -- the
+only probe path when the server has neither libpciaccess nor udev (no
+platform bus), e.g. modesetting on an SoC with Option "kmsdev" -- could
+never bring up a screen, and no BusID can help because the test does not
+look at one.  xf86ClaimFbSlot() already refuses a framebuffer slot once a
+bus slot is claimed; with no PCI support no PCI slot can exist, so the term
+is FALSE.
+
+Seen on Phoenix-RTOS (-Dpciaccess=false -Dudev=false): modesetting's
+Probe() claimed /dev/dri/card0 and the server exited in xf86PostProbe().
+---
+ hw/xfree86/common/xf86Bus.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/hw/xfree86/common/xf86Bus.c b/hw/xfree86/common/xf86Bus.c
+index fd144db..21b9414 100644
+--- a/hw/xfree86/common/xf86Bus.c
++++ b/hw/xfree86/common/xf86Bus.c
+@@ -556,6 +556,12 @@ xf86GetDevFromEntity(int entityIndex, int instance)
+ void
+ xf86PostProbe(void)
+ {
++    /*
++     * Fatal only when a framebuffer slot and a slot on a real bus were both
++     * claimed.  Without libpciaccess no PCI slot can have been claimed, so the
++     * PCI term is FALSE -- it used to be TRUE, which made every legacy
++     * (framebuffer-slot) probe fatal in builds without PCI support.
++     */
+     if (fbSlotClaimed && (
+ #if (defined(__sparc__) || defined(__sparc)) && !defined(__OpenBSD__)
+                              sbusSlotClaimed ||
+@@ -566,7 +572,7 @@ xf86PostProbe(void)
+ #ifdef XSERVER_LIBPCIACCESS
+                              pciSlotClaimed
+ #else
+-                             TRUE
++                             FALSE
+ #endif
+         ))
+         FatalError("Cannot run in framebuffer mode. Please specify busIDs "
+-- 
+2.53.0
+

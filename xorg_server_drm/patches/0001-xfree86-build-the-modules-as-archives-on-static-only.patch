@@ -1,0 +1,207 @@
+From edffafc1e6b589d32e4b89c9f2adad21ccd99779 Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 04:38:35 +0200
+Subject: [PATCH 1/8] xfree86: build the modules as archives on static-only
+ systems
+
+Phoenix-RTOS programs are statically linked; there is no dynamic linker
+for system libraries, so Xorg cannot dlopen() modesetting_drv.so,
+libglamoregl.so or libshadow.so.  On host_machine.system() == 'phoenix'
+(xorg_static_modules):
+
+ * the modesetting driver, glamoregl (with glamor linked whole) and shadow
+   modules become static archives instead of shared modules;
+ * everything the Xorg executable links becomes one archive,
+   libxorgserver_static.a, so a program that embeds the modules can link
+   the server and its modules together;
+ * the shared-only targets are not defined (exa, fbdevhw, shadowfb, wfb and
+   the libxorgserver.so used by the module symbol tests): they cannot be
+   built from non-PIC archives and nothing links them;
+ * -DXORG_BUILTIN_MODULES selects the loader's builtin-module table
+   (next patch).
+
+Other systems are unchanged.
+---
+ hw/xfree86/dixmods/meson.build             | 11 +++++++
+ hw/xfree86/drivers/modesetting/meson.build | 25 ++++++++++++----
+ hw/xfree86/glamor_egl/meson.build          | 16 ++++++++++
+ hw/xfree86/meson.build                     | 34 ++++++++++++++++++++--
+ 4 files changed, 78 insertions(+), 8 deletions(-)
+
+diff --git a/hw/xfree86/dixmods/meson.build b/hw/xfree86/dixmods/meson.build
+index a1afbe8..503b2f9 100644
+--- a/hw/xfree86/dixmods/meson.build
++++ b/hw/xfree86/dixmods/meson.build
+@@ -1,3 +1,13 @@
++if xorg_static_modules
++xorg_module_shadow = static_library('shadow',
++    'shmodule.c',
++    include_directories: [inc, xorg_inc],
++    c_args: xorg_c_args,
++    dependencies: common_dep,
++    link_whole: libxserver_miext_shadow,
++    install: false,
++)
++else
+ shared_module(
+     'wfb',
+     'fbmodule.c',
+@@ -41,3 +51,4 @@ if build_glx
+         install_dir: join_paths(module_dir, 'extensions')
+     )
+ endif
++endif
+diff --git a/hw/xfree86/drivers/modesetting/meson.build b/hw/xfree86/drivers/modesetting/meson.build
+index 02852a7..360c1e2 100644
+--- a/hw/xfree86/drivers/modesetting/meson.build
++++ b/hw/xfree86/drivers/modesetting/meson.build
+@@ -8,6 +8,20 @@ modesetting_srcs = [
+     'vblank.c',
+ ]
+ 
++if xorg_static_modules
++xorg_module_modesetting = static_library('modesetting_drv',
++    modesetting_srcs,
++    include_directories: [inc, xorg_inc],
++    c_args: xorg_c_args,
++    dependencies: [
++        common_dep,
++        udev_dep,
++        libdrm_dep,
++        gbm_dep,
++    ],
++    install: false,
++)
++else
+ shared_module(
+     'modesetting_drv',
+     modesetting_srcs,
+@@ -36,13 +50,14 @@ if gbm_dep.found()
+ endif
+ symbol_test_args += join_paths(xorg_build_root, 'drivers', 'modesetting', 'modesetting_drv.so')
+ 
++test('modesetting symbol test',
++    xorg_symbol_test,
++    args: symbol_test_args,
++)
++endif
++
+ install_man(configure_file(
+     input: 'modesetting.man',
+     output: 'modesetting.4',
+     configuration: manpage_config,
+ ))
+-
+-test('modesetting symbol test',
+-    xorg_symbol_test,
+-    args: symbol_test_args,
+-)
+diff --git a/hw/xfree86/glamor_egl/meson.build b/hw/xfree86/glamor_egl/meson.build
+index 7eae058..3bac3a8 100644
+--- a/hw/xfree86/glamor_egl/meson.build
++++ b/hw/xfree86/glamor_egl/meson.build
+@@ -4,6 +4,21 @@ glamoregl_src = [
+     'glamor_xf86_xv.c',
+ ]
+ 
++if xorg_static_modules
++xorg_module_glamoregl = static_library('glamoregl',
++    glamoregl_src,
++    include_directories: [inc, xorg_inc],
++    c_args: xorg_c_args,
++    dependencies: [
++        common_dep,
++        dependency('libdrm', version: '>= 2.4.46'),
++        gbm_dep,
++        epoxy_dep,
++    ],
++    link_whole: glamor,
++    install: false,
++)
++else
+ shared_module(
+     'glamoregl',
+     glamoregl_src,
+@@ -20,3 +35,4 @@ shared_module(
+     install: true,
+     install_dir: module_dir,
+ )
++endif
+diff --git a/hw/xfree86/meson.build b/hw/xfree86/meson.build
+index c4db85c..caa1725 100644
+--- a/hw/xfree86/meson.build
++++ b/hw/xfree86/meson.build
+@@ -17,6 +17,14 @@ xorg_c_args = []
+ xorg_c_args += '-DHAVE_XORG_CONFIG_H'
+ xorg_c_args += '-DXORG_NO_SDKSYMS'
+ 
++# Static-only systems (no dynamic linker for system libraries): the modules Xorg
++# would dlopen() are built as archives and linked into the server, which finds
++# them through a builtin-module table (XORG_BUILTIN_MODULES, loader/loadmod.c).
++xorg_static_modules = host_machine.system() == 'phoenix'
++if xorg_static_modules
++    xorg_c_args += '-DXORG_BUILTIN_MODULES'
++endif
++
+ pciaccess_dep = []
+ if get_option('pciaccess')
+     pciaccess_dep = dependency('pciaccess', version: '>= 0.12.901')
+@@ -114,10 +122,26 @@ e = executable(
+     implib: true,
+ )
+ 
++if xorg_static_modules
++    # Everything the Xorg executable links, as one archive: the program that
++    # embeds the builtin modules links it together with the module archives.
++    xorgserver_static = static_library('xorgserver_static',
++        srcs_xorg,
++        include_directories: [inc, xorg_inc],
++        link_whole: xorg_link,
++        dependencies: xorg_deps,
++        c_args: xorg_c_args,
++        install: false,
++    )
++endif
++
+ # subdirs for modules loadable by Xorg
+ subdir('dixmods')
+-subdir('exa')
+-subdir('fbdevhw')
++if not xorg_static_modules
++    # shared modules only (not used by modesetting)
++    subdir('exa')
++    subdir('fbdevhw')
++endif
+ if gbm_dep.found()
+     subdir('glamor_egl')
+ endif
+@@ -127,7 +151,9 @@ if int10 != 'false'
+     endif
+     subdir('int10')
+ endif
+-subdir('shadowfb')
++if not xorg_static_modules
++    subdir('shadowfb')
++endif
+ if build_vgahw
+     subdir('vgahw')
+ endif
+@@ -179,6 +205,7 @@ executable('gtf',
+     install: true,
+ )
+ 
++if not xorg_static_modules
+ # For symbol presence testing only
+ xorgserver_lib = shared_library(
+     'xorgserver',
+@@ -192,6 +219,7 @@ xorgserver_lib = shared_library(
+ )
+ 
+ xorgserver_dep = declare_dependency(link_with: xorgserver_lib)
++endif
+ 
+ install_man(configure_file(
+     input: 'man/Xorg.man',
+-- 
+2.53.0
+

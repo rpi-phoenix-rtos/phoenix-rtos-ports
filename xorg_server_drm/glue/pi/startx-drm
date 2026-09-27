@@ -1,0 +1,245 @@
+#!/bin/bash
+#
+# startx-drm -- the X desktop on the new GPU lane. Run ON THE Pi at the psh prompt:
+#
+#     /bin/bash /bin/startx-drm [--servers] [action|wmaker]
+#
+# The new-lane counterpart of the old lane's `startx_gpu <mode>` (pl_phoenix_xlaunch:
+# tools/x11-port/launcher/pl_phoenix_xlaunch.c), docs/gpu-new-lane/MIGRATION.md §3 blocker 3.
+# The old launcher started the old GPU daemon (rpi4-v3d) and the kdrive Xphoenix-glamor-daemon;
+# this one starts Xorg-drm :1 (X.Org modesetting + glamor on rpi4-kms / rpi4-v3d-async, phxhid
+# input on /dev/kbd0 + /dev/mouse0 -- M4-xorg-modesetting.md) and then the same clients.
+# psh has no '&', no ';' and no quoting, so this script does the job control.
+#
+# Modes:
+#   action (default)  the showcase desktop, xlaunch's `action` layout on 1920x1080:
+#                       Window Maker (dock + clip), the GL window "Phoenix V3D GL" (eglx11-demo:
+#                       EGL on X11 through DRI3/Present, in place of the old gl-x11-window-daemon),
+#                       xterm running Conway's Life in CPython, xclock, xbill, xterm running top.
+#                       Every client animates by itself; no input is needed.
+#   wmaker            Window Maker alone (the default `startx` session).
+#
+# Servers. By default the three new-lane servers are expected to run already (earlier psh
+# commands, or the boot config once MIGRATION.md §4 item 7 lands):
+#   /bin/rpi4-v3d-async-low -r 1 -m serial -i   (render; -m serial orders client renders before
+#                                                the server's Present copy, M4 §P2.1 step 7)
+#   /bin/rpi4-kms-g7 -G -p 96 -C                 (display; -C hands the HDMI console over, which
+#                                                frees /dev/kbd0 for phxhid)
+#   /bin/shmsrv                                  (/shm: the xshmfence pages of DRI3 clients)
+# `--servers` starts whichever of them is not running (same commands; V3DA_CMD, KMS_CMD,
+# SHMSRV override), so a single psh command brings the whole desktop up.
+#
+# Environment knobs (psh `export NAME=value` before the command):
+#   HOLD        seconds the desktop stays up, then the clean teardown (default 200: startup +
+#               hold + teardown fit the showcase gate's 300 s per command). 0 = until the window
+#               manager exits (interactive use; xlaunch's behaviour).
+#   XSRV CONF   server binary / config (default /bin/Xorg-drm-noshim, /etc/X11/xorg-drm.conf)
+#   XVERB       Xorg -verbose level on the UART (default 3); DRMPHX_TRACE libdrm-phoenix ioctl
+#               trace in the server (default 0)
+#   GLDEMO      the GL client (default /bin/eglx11-demo-x); GLGEOM (default 640x480+300+180,
+#               where the old lane's GL window is on screen); GLINTERVAL swap interval (default 1)
+#   WM_SETTLE   seconds between Window Maker and the first managed client (default 3)
+#   CLIENT_GAP  seconds between the other clients (default 1)
+#
+# Every line of ours starts with "XDRM " (grading).
+#
+# Copyright 2026 Phoenix Systems
+#
+# This file is part of Phoenix-RTOS.
+#
+# %LICENSE%
+
+# psh wires a program's stdout to the console but not always its stderr: send the server's
+# and the clients' diagnostics to the UART too (as xlaunch's dup2).
+exec 2>&1
+
+start_servers=0
+mode=action
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--servers) start_servers=1 ;;
+		action|wmaker) mode=$1 ;;
+		*) echo "XDRM usage: startx-drm [--servers] [action|wmaker] (got '$1')"; echo "XDRM done rc=2"; exit 2 ;;
+	esac
+	shift
+done
+
+XSRV=${XSRV:-/bin/Xorg-drm-noshim}
+CONF=${CONF:-/etc/X11/xorg-drm.conf}
+HOLD=${HOLD:-200}
+XVERB=${XVERB:-3}
+GLDEMO=${GLDEMO:-/bin/eglx11-demo-x}
+GLGEOM=${GLGEOM:-640x480+300+180}
+GLINTERVAL=${GLINTERVAL:-1}
+WM_SETTLE=${WM_SETTLE:-3}
+CLIENT_GAP=${CLIENT_GAP:-1}
+V3DA_CMD=${V3DA_CMD:-/bin/rpi4-v3d-async-low -r 1 -m serial -i}
+KMS_CMD=${KMS_CMD:-/bin/rpi4-kms-g7 -G -p 96 -C}
+SHMSRV=${SHMSRV:-/bin/shmsrv}
+DISP=:1
+SOCK=/tmp/.X11-unix/X1
+
+# What pl_phoenix_xlaunch gives the old lane's clients (psh exports neither HOME nor PATH;
+# libXt/libX11's compiled-in data paths point at the host build prefix).
+export HOME=/root
+export PATH=/bin
+export XFILESEARCHPATH=/usr/share/X11/app-defaults/%N
+export XLOCALEDIR=/usr/share/X11/locale
+
+echo "XDRM start mode=${mode} server=${XSRV} conf=${CONF} hold=${HOLD} servers=$([ "${start_servers}" = 1 ] && echo start-missing || echo expect-running)"
+
+# --- servers --------------------------------------------------------------------------------
+# /dev/v3d-async and /dev/kms are devfs nodes (stat works); /shm is a port name, asked with
+# shmsrv's own stats request (rc 0 = a server answered). Names outlive a dead server within a
+# boot, so "up" means "was started"; each server refuses a second instance by itself.
+v3da_up() { [ -e /dev/v3d-async ]; }
+kms_up() { [ -e /dev/kms ]; }
+shm_up() { "${SHMSRV}" -s > /dev/null 2>&1; }
+state() { "$1" && echo up || echo missing; }
+
+if [ "${start_servers}" = 1 ]; then
+	# Order matters: rpi4-kms -G connects to the render server at start-up.
+	if ! v3da_up; then echo "XDRM server start: ${V3DA_CMD}"; ${V3DA_CMD}; fi
+	if ! kms_up; then echo "XDRM server start: ${KMS_CMD}"; ${KMS_CMD}; fi
+	if ! shm_up; then echo "XDRM server start: ${SHMSRV}"; "${SHMSRV}"; fi
+fi
+echo "XDRM precheck v3d-async=$(state v3da_up) kms=$(state kms_up) shm=$(state shm_up)"
+
+# --- job helpers (bash's own job table: the image has no ps/pkill, and no kill -0 probe) -----
+alive() {
+	local p
+	for p in $(jobs -rp); do
+		[ "${p}" = "$1" ] && return 0
+	done
+	return 1
+}
+
+names=()
+pids=()
+# launch <name> <command...>: start one X client in the background.
+launch() {
+	local name=$1
+	shift
+	DISPLAY=${DISP} "$@" &
+	names+=("${name}")
+	pids+=($!)
+	echo "XDRM client start name=${name} pid=$! t=${SECONDS}: $*"
+}
+
+live_clients() {
+	local i n=0
+	for i in "${!pids[@]}"; do
+		alive "${pids[$i]}" && n=$((n + 1))
+	done
+	echo "${n}"
+}
+
+# --- X server -------------------------------------------------------------------------------
+# #66: a leftover lock names a pid the kernel may already have reused (lowest-free pid
+# allocation); we are the only X launcher on this one-display board.
+rm -f /tmp/.X1-lock "${SOCK}"
+mkdir -p /tmp/.X11-unix
+
+DRMPHX_TRACE=${DRMPHX_TRACE:-0} "${XSRV}" "${DISP}" -config "${CONF}" -logfile /var/log/Xorg-drm.1.log \
+	-verbose "${XVERB}" -nolisten tcp -ac -terminate &
+xpid=$!
+echo "XDRM server pid=${xpid}"
+
+# The listening socket exists before the screens are initialised (dix creates it first); a
+# client that connects early waits for the first Dispatch. Stop waiting once the server died.
+i=0
+while [ ! -e "${SOCK}" ] && [ "${i}" -lt 90 ] && alive "${xpid}"; do
+	sleep 1
+	i=$((i + 1))
+done
+if [ ! -e "${SOCK}" ]; then
+	alive "${xpid}" && st=running || st=exited
+	echo "XDRM socket=missing wait_s=${i} server=${st} t=${SECONDS}"
+	if [ "${st}" = exited ]; then
+		wait "${xpid}" 2>/dev/null
+		echo "XDRM server exited rc=$? before its socket appeared; see (EE) above and /var/log/Xorg-drm.1.log"
+	else
+		kill "${xpid}" 2>/dev/null
+		wait "${xpid}" 2>/dev/null
+		echo "XDRM server killed rc=$? (no socket after ${i} s)"
+	fi
+	echo "XDRM done rc=1"
+	exit 1
+fi
+echo "XDRM socket=up wait_s=${i} t=${SECONDS}"
+# xlaunch's settle after the server starts accepting: the first client (the WM) then wins the
+# handshake with a single XOpenDisplay attempt.
+sleep 1
+
+# --- clients --------------------------------------------------------------------------------
+# The window manager first, so it reparents and decorates the others as they map. Geometries
+# are xlaunch's `action` ones (WM decorations: ~24 px title bar). The GL window: the old
+# gl-x11-window-daemon ignored -geometry and hinted 640x480 at (300,180) itself -- that is
+# where it is in every old-lane gate frame, so GLGEOM defaults to it; eglx11-demo sets the
+# geometry as USPosition|USSize hints, which Window Maker honours.
+launch wmaker /bin/wmaker
+sleep "${WM_SETTLE}"
+if [ "${mode}" = action ]; then
+	XDEMO_GEOM=${GLGEOM} XDEMO_INTERVAL=${GLINTERVAL} XDEMO_TITLE="Phoenix V3D GL" XDEMO_EGL_DEBUG=0 \
+		launch gl "${GLDEMO}"
+	sleep "${CLIENT_GAP}"
+	# life.py --log: a Python exception goes to the xterm's stderr, which nothing captures.
+	launch xterm-life /bin/xterm -geometry 96x28+20+560 -e /bin/python3 /usr/share/demo/life.py \
+		--log /var/log/life.log
+	sleep "${CLIENT_GAP}"
+	launch xclock /bin/xclock -geometry 190x190+1500+30
+	sleep "${CLIENT_GAP}"
+	# xbill applies the size but not the position (Xt sets PPosition; Window Maker auto-places
+	# it at about (945,0)); the request matches where it lands, as in xlaunch.
+	launch xbill /bin/xbill -geometry 400x460+945+30
+	sleep "${CLIENT_GAP}"
+	launch xterm-top /bin/xterm -geometry 96x24+690+560 -e /bin/top
+fi
+echo "XDRM desktop up mode=${mode} clients=${#pids[@]} live=$(live_clients) t=${SECONDS}"
+
+# --- hold -----------------------------------------------------------------------------------
+# Checked every second (the WM's Exit menu ends the session promptly); heartbeat every 10 s:
+# psh-interact ends a command after --idle-secs of UART silence.
+held=0
+why=hold
+while :; do
+	if ! alive "${xpid}"; then why=server-exited; break; fi
+	if ! alive "${pids[0]}"; then why=wm-exited; break; fi
+	if [ "${HOLD}" -gt 0 ] && [ "${held}" -ge "${HOLD}" ]; then why=hold-done; break; fi
+	sleep 1
+	held=$((held + 1))
+	[ $((held % 10)) -eq 0 ] && echo "XDRM hold t=${SECONDS} held=${held}s live=$(live_clients)/${#pids[@]}"
+done
+echo "XDRM teardown reason=${why} t=${SECONDS}"
+
+# --- teardown -------------------------------------------------------------------------------
+# Clients in reverse start order, the window manager last (it would otherwise see its clients
+# vanish one by one while it still manages them); each wait reports the client's exit status
+# (eglx11-demo: 0 after SIGTERM, 142 if a stuck swap needed its alarm).
+for ((i = ${#pids[@]} - 1; i >= 0; i--)); do
+	p=${pids[$i]}
+	if alive "${p}"; then
+		kill "${p}" 2>/dev/null
+		wait "${p}" 2>/dev/null
+		echo "XDRM client exited name=${names[$i]} rc=$? (terminated) t=${SECONDS}"
+	else
+		wait "${p}" 2>/dev/null
+		echo "XDRM client exited name=${names[$i]} rc=$? (earlier) t=${SECONDS}"
+	fi
+done
+
+# -terminate: the server exits by itself after its last client; give it 15 s, then TERM.
+i=0
+while alive "${xpid}" && [ "${i}" -lt 15 ]; do
+	sleep 1
+	i=$((i + 1))
+done
+if alive "${xpid}"; then
+	echo "XDRM server still up after ${i}s: sending TERM"
+	kill "${xpid}" 2>/dev/null
+	sleep 5
+fi
+wait "${xpid}" 2>/dev/null
+rc=$?
+echo "XDRM server exited rc=${rc} socket=$([ -e "${SOCK}" ] && echo left || echo gone) t=${SECONDS}"
+echo "XDRM done rc=0 reason=${why}"

@@ -1,0 +1,74 @@
+From 47fc346b7688c66c6042d2ab4c1b4146e689be80 Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 04:47:16 +0200
+Subject: [PATCH 7/8] glamor: build glamor_glx.c only when epoxy has GLX
+
+glamor_glx.c includes <epoxy/glx.h>, which an EGL-only libepoxy
+(-Dglx=no) does not install.  Its only entry point,
+glamor_glx_screen_init(), serves glamor_init() callers that pass no
+GLAMOR_USE_EGL_SCREEN (Xephyr); Xorg's glamor runs on EGL.  Compile it
+when epoxy.pc says epoxy_has_glx=1 (the default when the variable is
+missing, so existing builds are unchanged); otherwise define
+GLAMOR_NO_GLX, and glamor_init() fails cleanly for a GLX-screen request.
+---
+ glamor/glamor.c    |  5 +++++
+ glamor/meson.build | 11 ++++++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/glamor/glamor.c b/glamor/glamor.c
+index 192b1ac..f43b21e 100644
+--- a/glamor/glamor.c
++++ b/glamor/glamor.c
+@@ -669,8 +669,13 @@ glamor_init(ScreenPtr screen, unsigned int flags)
+     if (flags & GLAMOR_USE_EGL_SCREEN) {
+         glamor_egl_screen_init(screen, &glamor_priv->ctx);
+     } else {
++#ifdef GLAMOR_NO_GLX
++        ErrorF("glamor: built without GLX; an EGL screen is required\n");
++        goto fail;
++#else
+         if (!glamor_glx_screen_init(&glamor_priv->ctx))
+             goto fail;
++#endif
+     }
+ 
+     glamor_make_current(glamor_priv);
+diff --git a/glamor/meson.build b/glamor/meson.build
+index 268af59..bea96f2 100644
+--- a/glamor/meson.build
++++ b/glamor/meson.build
+@@ -4,7 +4,6 @@ srcs_glamor = [
+     'glamor_core.c',
+     'glamor_dash.c',
+     'glamor_font.c',
+-    'glamor_glx.c',
+     'glamor_composite_glyphs.c',
+     'glamor_image.c',
+     'glamor_lines.c',
+@@ -40,6 +39,15 @@ endif
+ 
+ epoxy_dep = dependency('epoxy')
+ 
++# glamor_glx.c (glamor_glx_screen_init, used by Xephyr) needs epoxy's GLX
++# dispatch; an EGL-only epoxy has no <epoxy/glx.h>.
++glamor_c_args = []
++if epoxy_dep.get_pkgconfig_variable('epoxy_has_glx', default: '1') == '1'
++    srcs_glamor += 'glamor_glx.c'
++else
++    glamor_c_args += '-DGLAMOR_NO_GLX'
++endif
++
+ glamor = static_library('glamor',
+     srcs_glamor,
+     include_directories: inc,
+@@ -47,6 +55,7 @@ glamor = static_library('glamor',
+         common_dep,
+         epoxy_dep,
+     ],
++    c_args: glamor_c_args,
+ )
+ 
+ glamor_egl_stubs = static_library('glamor_egl_stubs',
+-- 
+2.53.0
+
