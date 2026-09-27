@@ -1,0 +1,44 @@
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Subject: [PATCH] sysdeps-unix: Phoenix-RTOS libc constants
+
+MSG_CTRUNC, SOMAXCONN and the _SC_GETPW/GR_R_SIZE_MAX sysconf keys are not
+defined by libphoenix. Define them, guarded, for __phoenix__ only.
+---
+diff --git a/dbus/dbus-sysdeps-unix.h b/dbus/dbus-sysdeps-unix.h
+index b400cf8..d48cf83 100644
+--- a/dbus/dbus-sysdeps-unix.h
++++ b/dbus/dbus-sysdeps-unix.h
+@@ -33,6 +33,33 @@
+ #error "Don't include this on Windows"
+ #endif
+ 
++#ifdef __phoenix__
++/* Phoenix-RTOS: constants its libc does not define (yet). Each is guarded so that a libc
++ * which gains it wins. */
++#include <sys/socket.h>
++#include <unistd.h>
++
++/* recvmsg() output flag "control data truncated". The Phoenix kernel reports no output
++ * flags (msg_flags is always 0), so the bit only has to differ from the MSG_* input flags. */
++#ifndef MSG_CTRUNC
++#define MSG_CTRUNC 0x100
++#endif
++
++/* listen() backlog; the kernel clamps it to its own limit. */
++#ifndef SOMAXCONN
++#define SOMAXCONN 128
++#endif
++
++/* sysconf() keys the libc does not know: sysconf() fails with EINVAL and the callers fall
++ * back to a 1024-byte getpw*_r/getgr*_r buffer, grown on ERANGE. */
++#ifndef _SC_GETPW_R_SIZE_MAX
++#define _SC_GETPW_R_SIZE_MAX 0x7ff0
++#endif
++#ifndef _SC_GETGR_R_SIZE_MAX
++#define _SC_GETGR_R_SIZE_MAX 0x7ff1
++#endif
++#endif /* __phoenix__ */
++
+ DBUS_BEGIN_DECLS
+ 
+ /**
