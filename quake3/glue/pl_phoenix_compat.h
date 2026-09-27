@@ -30,10 +30,11 @@
 #include <sys/msg.h>      /* belt-and-braces: ensure the guard is set */
 #undef msg_t
 
-/* Phoenix's <netinet/in.h> provides sockaddr_in6 / IN6_* / IPV6_* but not
- * struct ipv6_mreq (used by net_ip.c's IPv6 multicast join). Field names
- * match the BSD/glibc layout. Same gap the yQuake2 port fills. */
-#ifndef _PL_PHOENIX_IPV6_MREQ
+/* Phoenix's <netinet/in.h> provides sockaddr_in6 / IN6_* / IPV6_* but, before
+ * libphoenix 17c4fae, not struct ipv6_mreq (used by net_ip.c's IPv6 multicast
+ * join). Field names match the BSD/glibc layout. Same gap the yQuake2 port
+ * fills; libphoenix adds the struct together with IPV6_ADD_MEMBERSHIP. */
+#if !defined(_PL_PHOENIX_IPV6_MREQ) && !defined(IPV6_ADD_MEMBERSHIP)
 #define _PL_PHOENIX_IPV6_MREQ
 struct ipv6_mreq {
 	struct in6_addr ipv6mr_multiaddr;

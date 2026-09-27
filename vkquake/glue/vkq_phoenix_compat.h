@@ -56,10 +56,10 @@ float  fmaxf(float x, float y);
 /* --- libphoenix <netinet/in.h> gap: struct ipv6_mreq (net_udp.c IPv6 multicast) ---
  * libphoenix has struct in6_addr + IPV6_JOIN_GROUP/IPPROTO_IPV6 but not ipv6_mreq.
  * Only the IPv6 multiplayer path uses it; single-player runs over the loopback net
- * driver and never reaches it. Declared here so net_udp.c compiles; the upstreamable
- * fix is to add ipv6_mreq to libphoenix netinet/in.h. */
+ * driver and never reaches it. Declared here so net_udp.c compiles when the sysroot
+ * lacks it; libphoenix 17c4fae adds the struct together with IPV6_ADD_MEMBERSHIP. */
 #include <netinet/in.h>
-#ifndef __PHOENIX_HAVE_IPV6_MREQ
+#if !defined(__PHOENIX_HAVE_IPV6_MREQ) && !defined(IPV6_ADD_MEMBERSHIP)
 #define __PHOENIX_HAVE_IPV6_MREQ 1
 struct ipv6_mreq {
 	struct in6_addr ipv6mr_multiaddr;

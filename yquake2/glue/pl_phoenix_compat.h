@@ -11,8 +11,9 @@
  *     the real prototypes are in scope (no 64-bit pointer truncation).
  *
  *  2. Phoenix's <netinet/in.h> provides sockaddr_in6 / IN6_IS_ADDR_* /
- *     IPV6_* but not struct ipv6_mreq (used by the IPv6 multicast join in
- *     network.c). Supply it; the field names match the BSD/glibc layout.
+ *     IPV6_* but, before libphoenix 17c4fae, not struct ipv6_mreq (used by
+ *     the IPv6 multicast join in network.c). Supply it when the sysroot lacks
+ *     it: libphoenix adds the struct together with IPV6_ADD_MEMBERSHIP.
  */
 #ifndef PL_PHOENIX_COMPAT_H
 #define PL_PHOENIX_COMPAT_H
@@ -20,10 +21,12 @@
 #include <unistd.h>
 #include <netinet/in.h>
 
+#ifndef IPV6_ADD_MEMBERSHIP
 struct ipv6_mreq {
 	struct in6_addr ipv6mr_multiaddr;
 	unsigned int    ipv6mr_interface;
 };
+#endif
 
 /* network.c's NET_Sleep uses MAX(), which the Unix backend only gets from
  * <sys/param.h> on glibc (or its own __sun fallback). Phoenix's sys/param.h
