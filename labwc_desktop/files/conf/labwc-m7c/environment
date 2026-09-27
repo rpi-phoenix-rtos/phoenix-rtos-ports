@@ -1,0 +1,5 @@
+# labwc environment on Phoenix-RTOS (M7): stage as /etc/xdg/labwc-m7c/environment.
+# Exported to labwc and every client it starts.
+XKB_DEFAULT_LAYOUT=us
+FONTCONFIG_FILE=/etc/fonts/fonts.conf
+TERM=xterm-256color

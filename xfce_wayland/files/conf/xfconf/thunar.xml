@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Thunar defaults on Phoenix-RTOS (M7): stage as
+  /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/thunar.xml (xfconfd reads XDG_CONFIG_DIRS
+  for a channel's defaults). No thumbnails (there is no tumbler thumbnailer service on
+  the bus), no side-pane network/trash sections (no gvfs), the icon view.
+-->
+<channel name="thunar" version="1.0">
+  <property name="misc-thumbnail-mode" type="string" value="THUNAR_THUMBNAIL_MODE_NEVER"/>
+  <property name="default-view" type="string" value="ThunarIconView"/>
+  <property name="last-window-width" type="int" value="900"/>
+  <property name="last-window-height" type="int" value="560"/>
+  <property name="last-window-maximized" type="bool" value="false"/>
+  <property name="misc-volume-management" type="bool" value="false"/>
+</channel>

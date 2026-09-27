@@ -1,0 +1,38 @@
+From 534b71f7501885bb319edca3595f6298f54957a8 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:47:56 +0200
+Subject: [PATCH] meson: build the programs only natively
+
+The utilities, examples, tests and tools link the whole library stack as
+programs; a static cross build for a target without GIO needs only the
+libraries.
+---
+ meson.build | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index edd04e2..8244a76 100644
+--- a/meson.build
++++ b/meson.build
+@@ -539,10 +539,14 @@ configure_file(output: 'config.h', configuration: pango_conf)
+ root_inc = include_directories('.')
+ 
+ subdir('pango')
+-subdir('utils')
+-subdir('examples')
+-subdir('tests')
+-subdir('tools')
++# The programs (pango-view, examples, tests, tools) are built only natively: a
++# static cross build (Phoenix-RTOS) needs only the libraries.
++if not meson.is_cross_build()
++  subdir('utils')
++  subdir('examples')
++  subdir('tests')
++  subdir('tools')
++endif
+ 
+ if get_option('gtk_doc')
+   subdir('docs')
+-- 
+2.53.0
+

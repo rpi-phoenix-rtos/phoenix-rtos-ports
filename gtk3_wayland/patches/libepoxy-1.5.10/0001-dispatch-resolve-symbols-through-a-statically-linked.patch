@@ -1,0 +1,170 @@
+From ea1be1346c9febe1d93e99e2209923a0579398b5 Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 04:35:55 +0200
+Subject: [PATCH] dispatch: resolve symbols through a statically linked EGL on
+ Phoenix-RTOS
+
+Phoenix-RTOS programs are statically linked and have no dynamic linker for
+system libraries, so libepoxy's dlopen("libEGL.so.1") / dlsym() cannot work.
+With EPOXY_STATIC_EGL (set by meson when host_machine.system() is 'phoenix')
+every library is reported present and every EGL and GL symbol is resolved
+through the linked implementation's eglGetProcAddress(), which Mesa answers
+for all EGL and GL entry points (EGL_KHR_get_all_proc_addresses).
+
+Requires -Degl=yes -Dglx=no.
+---
+ src/dispatch_common.c | 28 ++++++++++++++++++++++++++-
+ src/dispatch_common.h |  3 +++
+ src/dispatch_static.c | 44 +++++++++++++++++++++++++++++++++++++++++++
+ src/meson.build       | 11 +++++++++++
+ 4 files changed, 85 insertions(+), 1 deletion(-)
+ create mode 100644 src/dispatch_static.c
+
+diff --git a/src/dispatch_common.c b/src/dispatch_common.c
+index 153eb7c..610d6d0 100644
+--- a/src/dispatch_common.c
++++ b/src/dispatch_common.c
+@@ -289,12 +289,32 @@ library_init(void)
+     library_initialized = true;
+ }
+ 
++#ifdef EPOXY_STATIC_EGL
++/*
++ * Statically linked EGL (no dynamic linker, e.g. Phoenix-RTOS): the EGL/GL
++ * implementation is part of the program, so there is nothing to dlopen().
++ * Every "library" is reported present and every symbol, EGL or GL, core or
++ * extension, is resolved through the linked implementation's
++ * eglGetProcAddress() (EGL 1.5 / EGL_KHR_get_all_proc_addresses semantics,
++ * which Mesa provides for all EGL and GL entry points). See dispatch_static.c.
++ */
++static char epoxy_static_handle;
++#endif
++
+ static bool
+ get_dlopen_handle(void **handle, const char *lib_name, bool exit_on_fail, bool load)
+ {
+     if (*handle)
+         return true;
+ 
++#if defined(EPOXY_STATIC_EGL)
++    /* Nothing to load, and no dynamic-linker context to guard against
++     * (library_initialized is only a dlopen() safety check). */
++    (void)lib_name;
++    (void)exit_on_fail;
++    (void)load;
++    *handle = &epoxy_static_handle;
++#else
+     if (!library_initialized) {
+         fputs("Attempting to dlopen() while in the dynamic linker.\n", stderr);
+         abort();
+@@ -321,6 +341,7 @@ get_dlopen_handle(void **handle, const char *lib_name, bool exit_on_fail, bool l
+     }
+     pthread_mutex_unlock(&api.mutex);
+ #endif
++#endif /* EPOXY_STATIC_EGL */
+ 
+     return *handle != NULL;
+ }
+@@ -331,7 +352,12 @@ do_dlsym(void **handle, const char *name, bool exit_on_fail)
+     void *result;
+     const char *error = "";
+ 
+-#ifdef _WIN32
++#if defined(EPOXY_STATIC_EGL)
++    (void)handle;
++    result = epoxy_static_proc_address(name);
++    if (!result)
++        error = "not provided by the linked EGL/GL implementation";
++#elif defined(_WIN32)
+     result = GetProcAddress(*handle, name);
+ #else
+     result = dlsym(*handle, name);
+diff --git a/src/dispatch_common.h b/src/dispatch_common.h
+index a136943..171f4e5 100644
+--- a/src/dispatch_common.h
++++ b/src/dispatch_common.h
+@@ -164,6 +164,9 @@ void *epoxy_gles1_dlsym(const char *name);
+ void *epoxy_gles2_dlsym(const char *name);
+ void *epoxy_gles3_dlsym(const char *name);
+ void *epoxy_get_proc_address(const char *name);
++#ifdef EPOXY_STATIC_EGL
++void *epoxy_static_proc_address(const char *name);
++#endif
+ void *epoxy_get_core_proc_address(const char *name, int core_version);
+ void *epoxy_get_bootstrap_proc_address(const char *name);
+ 
+diff --git a/src/dispatch_static.c b/src/dispatch_static.c
+new file mode 100644
+index 0000000..0532cfd
+--- /dev/null
++++ b/src/dispatch_static.c
+@@ -0,0 +1,44 @@
++/*
++ * Copyright 2026 Phoenix Systems
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++/*
++ * Symbol resolution for a statically linked EGL implementation.
++ *
++ * This file deliberately includes the implementation's own <EGL/egl.h>, not
++ * epoxy's, so that eglGetProcAddress below is the linked function and not
++ * epoxy's dispatch macro.
++ */
++
++#include <string.h>
++#include <EGL/egl.h>
++
++void *epoxy_static_proc_address(const char *name);
++
++void *
++epoxy_static_proc_address(const char *name)
++{
++    if (strcmp(name, "eglGetProcAddress") == 0)
++        return (void *)eglGetProcAddress;
++
++    return (void *)eglGetProcAddress(name);
++}
+diff --git a/src/meson.build b/src/meson.build
+index e19a918..7dd3567 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -46,6 +46,17 @@ endforeach
+ 
+ epoxy_sources = sources + gen_sources
+ 
++# No dynamic linker (static-only targets such as Phoenix-RTOS): resolve every
++# symbol through the linked EGL implementation (dispatch_static.c).
++static_egl = host_system == 'phoenix'
++if static_egl
++  if not build_egl or build_glx
++    error('the static-EGL dispatch needs -Degl=yes -Dglx=no')
++  endif
++  epoxy_sources += [ 'dispatch_static.c' ]
++  common_cflags += [ '-DEPOXY_STATIC_EGL' ]
++endif
++
+ common_ldflags = []
+ 
+ if host_system == 'linux' and cc.get_id() == 'gcc'
+-- 
+2.53.0
+

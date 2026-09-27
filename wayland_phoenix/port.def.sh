@@ -121,7 +121,7 @@ p_prepare() {
 		b_die "wayland_phoenix: host wayland-scanner is not ${version}"
 
 	_wlphx_extract wayland "${PREFIX_PORT_WORKDIR%/}" "${sha256}"
-	local rec n file url sum
+	local n file url sum
 	while IFS='|' read -r n file url sum; do
 		_wlphx_extract "${n}" "$(_wlphx_fetch "${file}" "${url}" "${sum}")" "${sum}"
 	done < <(_wlphx_pkgs)
@@ -133,6 +133,7 @@ p_build() {
 	local B S TC PHXCC PHXCXX
 	B="${PREFIX_BUILD%/}"   # libffi, expat, pixman, zlib: the shared ports prefix
 	S="${PREFIX_BUILD%/}/sysroot"
+	# shellcheck disable=SC2153 # CROSS: the framework environment (aarch64-phoenix-)
 	TC="$(dirname "$(command -v "${CROSS}gcc")")/${CROSS%-}"
 	local F="${PREFIX_PORT}/files"
 	local COMPAT_INC="${F}/compat/include"

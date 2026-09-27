@@ -1,0 +1,39 @@
+From 6158fd5040259344c938110c620eeed717037eed Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 17:12:28 +0200
+Subject: [PATCH 2/2] meson: allow print_backends=none
+
+The 'file' print backend is required on Unix, but it needs cairo's PDF/PS
+surfaces, which a minimal cairo does not have. print_backends=none builds
+GTK without any print backend (the print dialog then lists no printers).
+---
+ modules/printbackends/meson.build | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/modules/printbackends/meson.build b/modules/printbackends/meson.build
+index 8977ca2..2bbac4d 100644
+--- a/modules/printbackends/meson.build
++++ b/modules/printbackends/meson.build
+@@ -23,7 +23,7 @@ else
+   wanted_print_backends = get_option('print_backends').split(',')
+   enabled_print_backends = []
+   foreach backend: wanted_print_backends
+-    if backend != ''
++    if backend != '' and backend != 'none'
+       if not all_print_backends.contains(backend)
+         error('print backend \'@0@\' unknown'.format(backend))
+       endif
+@@ -34,7 +34,9 @@ endif
+ 
+ print_backends = []
+ 
+-if not enabled_print_backends.contains('file')
++if get_option('print_backends') == 'none'
++  # no print backend at all (e.g. a system without a printing stack or cairo-pdf/ps)
++elif not enabled_print_backends.contains('file')
+   if os_unix
+     error('\'file\' print backed needs to be enabled')
+   endif
+-- 
+2.53.0
+

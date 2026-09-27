@@ -1,0 +1,26 @@
+From 71260af1e1aa6112316717dc8eb0671a366a5266 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 19:11:33 +0200
+Subject: [PATCH] windowlist: do not include gdkx.h
+
+windowlist.c uses no X11 GDK API. A GTK built without the X11 backend has
+no gdk/gdkx.h.
+---
+ src/windowlist.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/windowlist.c b/src/windowlist.c
+index f12897a..034ca98 100644
+--- a/src/windowlist.c
++++ b/src/windowlist.c
+@@ -34,7 +34,6 @@
+ #include <string.h>
+ #endif
+ 
+-#include <gdk/gdkx.h>
+ #include <gtk/gtk.h>
+ #include <libxfce4util/libxfce4util.h>
+ #include <libxfce4ui/libxfce4ui.h>
+-- 
+2.53.0
+

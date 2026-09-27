@@ -100,6 +100,7 @@ p_build() {
 	B="$(b_dependency_dir xorg_fonts)"
 	B="${B%/}"
 	S="${PREFIX_BUILD%/}/sysroot"
+	# shellcheck disable=SC2153 # CROSS: the framework environment (aarch64-phoenix-)
 	TC="$(dirname "$(command -v "${CROSS}gcc")")/${CROSS%-}"
 	D="${out}/deps"
 	local jobs
@@ -259,7 +260,7 @@ EOF
 
 	# --- install: this port's prefix ---
 	local I="${PREFIX_PORT_INSTALL%/}"
-	rm -rf "${I}/destdir" "${I}/bin" "${I}/stage"
+	rm -rf "${I:?}/destdir" "${I:?}/bin" "${I:?}/stage"
 	mkdir -p "${I}/bin"
 	cp -a "${out}/destdir" "${I}/destdir"
 	for o in "${PROGS[@]}"; do

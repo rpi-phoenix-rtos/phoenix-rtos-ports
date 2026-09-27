@@ -1,0 +1,34 @@
+From 6792f52009bfc52fd64205e7fe5f56331e7fb098 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 17:54:20 +0200
+Subject: [PATCH] session-client: include gdkx.h only with libSM
+
+The only X11 GDK call (gdk_x11_set_sm_client_id) is in the HAVE_LIBSM
+part. A GTK built without the X11 backend has no gdk/gdkx.h.
+---
+ thunar/thunar-session-client.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/thunar/thunar-session-client.c b/thunar/thunar-session-client.c
+index e79af95..aa43c51 100644
+--- a/thunar/thunar-session-client.c
++++ b/thunar/thunar-session-client.c
+@@ -34,6 +34,7 @@
+ 
+ #ifdef HAVE_LIBSM
+ #include <X11/SM/SMlib.h>
++#include <gdk/gdkx.h>
+ #endif
+ 
+ #include "thunar/thunar-application.h"
+@@ -42,7 +43,6 @@
+ #include "thunar/thunar-private.h"
+ #include "thunar/thunar-session-client.h"
+ 
+-#include <gdk/gdkx.h>
+ #include <glib/gstdio.h>
+ 
+ 
+-- 
+2.53.0
+

@@ -1,0 +1,75 @@
+From 8a1bd2ea48f041287fbd493516cee9324f8af990 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:54:37 +0200
+Subject: [PATCH] server: reap children with waitpid() where waitid() does not
+ exist
+
+waitid() with WNOWAIT lets the SIGCHLD handler leave Xwayland's child to
+wlroots. A libc without waitid() (Phoenix-RTOS) has no Xwayland either:
+reap the children with waitpid() there, with the same logging, prompt and
+primary-client handling.
+---
+ src/server.c | 40 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/src/server.c b/src/server.c
+index e1a91ec..a16c901 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -144,6 +144,45 @@ handle_sigterm(int signal, void *data)
+ 	return 0;
+ }
+ 
++#ifndef WNOWAIT
++/*
++ * Without waitid() (Phoenix-RTOS): reap with waitpid(). The waitid(WNOWAIT) peek
++ * below exists for Xwayland's lazy start-up, and such systems have no Xwayland.
++ */
++static int
++handle_sigchld(int signal, void *data)
++{
++	int status;
++	pid_t pid;
++
++	while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
++		if (WIFEXITED(status)) {
++			int code = WEXITSTATUS(status);
++			if (!action_check_prompt_result(pid, code)
++					&& !nag_check_pid(pid)) {
++				wlr_log(code == 0 ? WLR_DEBUG : WLR_ERROR,
++					"spawned child %ld exited with %d",
++					(long)pid, code);
++			}
++		} else if (WIFSIGNALED(status)) {
++			int sig = WTERMSIG(status);
++			const char *signame = strsignal(sig);
++			wlr_log(WLR_ERROR,
++				"spawned child %ld terminated with signal %d (%s)",
++				(long)pid, sig, signame ? signame : "unknown");
++			/* Allow cleanup of killed prompt */
++			action_check_prompt_result(pid, -sig);
++			nag_check_pid(pid);
++		}
++
++		if (pid == server.primary_client_pid) {
++			wlr_log(WLR_INFO, "primary client %ld exited", (long)pid);
++			wl_display_terminate(server.wl_display);
++		}
++	}
++	return 0;
++}
++#else
+ static int
+ handle_sigchld(int signal, void *data)
+ {
+@@ -236,6 +275,7 @@ check_next:
+ 	}
+ 	return 0;
+ }
++#endif
+ 
+ #if WLR_HAS_DRM_BACKEND
+ static void
+-- 
+2.53.0
+

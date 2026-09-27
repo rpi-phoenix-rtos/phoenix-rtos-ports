@@ -1,0 +1,27 @@
+From 3aac7fde65eeef7d446c9c983c89db2e545eba57 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:44:06 +0200
+Subject: [PATCH] meson: librt is optional
+
+Phoenix-RTOS has no librt: clock_gettime(), timer and shm functions live in its
+libc. find_library('rt') is required and fails the configuration there.
+---
+ meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index 41ce1ea..0278a22 100644
+--- a/meson.build
++++ b/meson.build
+@@ -121,7 +121,7 @@ pixman = dependency('pixman-1',
+ 	default_options: ['werror=false'],
+ )
+ math = cc.find_library('m')
+-rt = cc.find_library('rt')
++rt = cc.find_library('rt', required: false)
+ 
+ wlr_files = []
+ wlr_deps = [
+-- 
+2.53.0
+

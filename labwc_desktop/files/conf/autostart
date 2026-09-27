@@ -1,0 +1,5 @@
+# labwc autostart on Phoenix-RTOS (M7): stage as /etc/xdg/labwc/autostart.
+# labwc runs it with `sh` once the compositor is up. One terminal window; the
+# launcher script can skip it with LABWC_AUTOSTART=0 (it then passes another
+# config directory, see pi/labwc-desktop.sh).
+/bin/foot >/dev/null 2>&1 &

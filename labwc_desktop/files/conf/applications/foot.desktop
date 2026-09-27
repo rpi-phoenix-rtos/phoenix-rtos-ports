@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Foot
+GenericName=Terminal
+Comment=A fast Wayland terminal emulator
+Exec=/bin/foot
+Terminal=false
+Categories=System;TerminalEmulator;

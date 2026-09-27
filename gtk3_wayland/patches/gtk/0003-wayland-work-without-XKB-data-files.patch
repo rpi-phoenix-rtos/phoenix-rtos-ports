@@ -1,0 +1,121 @@
+From 67f3795cb335ffdcd795f540825fbcc13bee6f52 Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 17:24:49 +0200
+Subject: [PATCH] wayland: work without XKB data files
+
+libxkbcommon refuses to create a context when none of its include
+directories exists, as on a system without xkeyboard-config (Phoenix-RTOS);
+GDK then aborts in gdk_wayland_display_init() with "Failed to create XKB
+context". Retry with XKB_CONTEXT_NO_DEFAULT_INCLUDES: such a context still
+compiles the keymap strings a compositor sends. The default keymap, compiled
+from rule names before any wl_keyboard exists, falls back to a keymap
+compiled at build time when GDK_WAYLAND_BUILTIN_XKB_KEYMAP_H names a header
+defining gdk_wayland_builtin_xkb_keymap[].
+---
+ gdk/wayland/gdkdisplay-wayland.c |  2 +-
+ gdk/wayland/gdkkeys-wayland.c    | 35 ++++++++++++++++++++++++++++++--
+ gdk/wayland/gdkprivate-wayland.h |  1 +
+ 3 files changed, 35 insertions(+), 3 deletions(-)
+
+diff --git a/gdk/wayland/gdkdisplay-wayland.c b/gdk/wayland/gdkdisplay-wayland.c
+index c52744a..cd8dc12 100644
+--- a/gdk/wayland/gdkdisplay-wayland.c
++++ b/gdk/wayland/gdkdisplay-wayland.c
+@@ -1134,7 +1134,7 @@ gdk_wayland_display_class_init (GdkWaylandDisplayClass *class)
+ static void
+ gdk_wayland_display_init (GdkWaylandDisplay *display)
+ {
+-  display->xkb_context = xkb_context_new (0);
++  display->xkb_context = _gdk_wayland_xkb_context_new ();
+   if (G_UNLIKELY (!display->xkb_context))
+     g_error ("Failed to create XKB context");
+ 
+diff --git a/gdk/wayland/gdkkeys-wayland.c b/gdk/wayland/gdkkeys-wayland.c
+index 5452203..bd7770a 100644
+--- a/gdk/wayland/gdkkeys-wayland.c
++++ b/gdk/wayland/gdkkeys-wayland.c
+@@ -39,6 +39,12 @@
+ #include "gdkinternals.h"
+ #include "gdkkeysprivate.h"
+ 
++#ifdef GDK_WAYLAND_BUILTIN_XKB_KEYMAP_H
++/* static const char gdk_wayland_builtin_xkb_keymap[]: an evdev/pc105/us keymap compiled
++ * at build time, for systems without XKB data files */
++#include GDK_WAYLAND_BUILTIN_XKB_KEYMAP_H
++#endif
++
+ #include <xkbcommon/xkbcommon.h>
+ 
+ typedef struct _GdkWaylandKeymap          GdkWaylandKeymap;
+@@ -534,6 +540,21 @@ update_direction (GdkWaylandKeymap *keymap)
+     keymap->bidi = TRUE;
+ }
+ 
++/* libxkbcommon refuses a context when none of its include directories exists
++ * (a system without xkeyboard-config, e.g. Phoenix-RTOS). Such a context can still
++ * compile keymaps from strings -- which is how a Wayland compositor sends them. */
++struct xkb_context *
++_gdk_wayland_xkb_context_new (void)
++{
++  struct xkb_context *context;
++
++  context = xkb_context_new (XKB_CONTEXT_NO_FLAGS);
++  if (context == NULL)
++    context = xkb_context_new (XKB_CONTEXT_NO_DEFAULT_INCLUDES);
++
++  return context;
++}
++
+ GdkKeymap *
+ _gdk_wayland_keymap_new (void)
+ {
+@@ -543,7 +564,7 @@ _gdk_wayland_keymap_new (void)
+ 
+   keymap = g_object_new (_gdk_wayland_keymap_get_type(), NULL);
+ 
+-  context = xkb_context_new (0);
++  context = _gdk_wayland_xkb_context_new ();
+   if (G_UNLIKELY (!context))
+     g_error ("Failed to create XKB context");
+ 
+@@ -553,6 +574,16 @@ _gdk_wayland_keymap_new (void)
+   names.variant = "";
+   names.options = "";
+   keymap->xkb_keymap = xkb_keymap_new_from_names (context, &names, 0);
++#ifdef GDK_WAYLAND_BUILTIN_XKB_KEYMAP_H
++  if (keymap->xkb_keymap == NULL)
++    {
++      keymap->xkb_keymap = xkb_keymap_new_from_string (context, gdk_wayland_builtin_xkb_keymap,
++                                                       XKB_KEYMAP_FORMAT_TEXT_V1,
++                                                       XKB_KEYMAP_COMPILE_NO_FLAGS);
++      if (keymap->xkb_keymap != NULL)
++        g_message ("Using the built-in XKB keymap (evdev/pc105/us): no XKB data files");
++    }
++#endif
+   if (G_UNLIKELY (!keymap->xkb_keymap))
+     g_error ("Failed to create XKB keymap");
+ 
+@@ -617,7 +648,7 @@ _gdk_wayland_keymap_update_from_fd (GdkKeymap *keymap,
+   struct xkb_keymap *xkb_keymap;
+   char *map_str;
+ 
+-  context = xkb_context_new (0);
++  context = _gdk_wayland_xkb_context_new ();
+   if (G_UNLIKELY (!context))
+     g_error ("Failed to create XKB context");
+ 
+diff --git a/gdk/wayland/gdkprivate-wayland.h b/gdk/wayland/gdkprivate-wayland.h
+index 1916a12..b686a93 100644
+--- a/gdk/wayland/gdkprivate-wayland.h
++++ b/gdk/wayland/gdkprivate-wayland.h
+@@ -47,6 +47,7 @@
+ #define GDK_WINDOW_IS_WAYLAND(win)    (GDK_IS_WINDOW_IMPL_WAYLAND (((GdkWindow *)win)->impl))
+ 
+ GdkKeymap *_gdk_wayland_keymap_new (void);
++struct xkb_context *_gdk_wayland_xkb_context_new (void);
+ void       _gdk_wayland_keymap_update_from_fd (GdkKeymap *keymap,
+                                                uint32_t   format,
+                                                uint32_t   fd,
+-- 
+2.53.0
+

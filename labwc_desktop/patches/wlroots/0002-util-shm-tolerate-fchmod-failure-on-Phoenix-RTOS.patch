@@ -1,0 +1,48 @@
+From c2c41b5946aa474c377db4ba76c4b10e3507f0a1 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 17:05:55 +0200
+Subject: [PATCH] util/shm: tolerate fchmod() failure on Phoenix-RTOS
+
+allocate_shm_file_pair() removes every permission of the read-write object so
+that the read-only descriptor handed to clients cannot be re-opened read-write
+through /proc/self/fd. Phoenix-RTOS has no /proc, and its POSIX shared memory
+objects live in a user-space server without file modes, so fchmod() fails
+there and every keymap allocation with it (clients get no keymap). Keep going
+on Phoenix-RTOS; elsewhere the failure stays fatal.
+---
+ util/shm.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/util/shm.c b/util/shm.c
+index 5eb87bb..e0dcf22 100644
+--- a/util/shm.c
++++ b/util/shm.c
+@@ -6,6 +6,7 @@
+ #include <time.h>
+ #include <unistd.h>
+ #include <wlr/config.h>
++#include <wlr/util/log.h>
+ #include "util/shm.h"
+ 
+ #define RANDNAME_PATTERN "/wlroots-XXXXXX"
+@@ -76,9 +77,17 @@ bool allocate_shm_file_pair(size_t size, int *rw_fd_ptr, int *ro_fd_ptr) {
+ 	// Make sure the file cannot be re-opened in read-write mode (e.g. via
+ 	// "/proc/self/fd/" on Linux)
+ 	if (fchmod(rw_fd, 0) != 0) {
++#if defined(__phoenix__)
++		// Phoenix-RTOS has no /proc/self/fd, and its shared memory objects
++		// (a user-space server) have no mode to change. The read-only
++		// descriptor still maps read-only.
++		wlr_log(WLR_DEBUG, "fchmod() of a shared memory object failed: %s",
++			strerror(errno));
++#else
+ 		close(rw_fd);
+ 		close(ro_fd);
+ 		return false;
++#endif
+ 	}
+ 
+ 	int ret;
+-- 
+2.53.0
+

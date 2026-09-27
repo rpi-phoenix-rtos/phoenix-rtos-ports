@@ -1,0 +1,32 @@
+From 5a22d421646635d86bf2ecda719b921da74e3a65 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 17:15:09 +0200
+Subject: [PATCH] shm: no scrollable pool size without FALLOC_FL_PUNCH_HOLE
+
+A scrollable pool is sized to max_pool_size (512 MiB by default) before
+can_punch_hole is known, and only then shrunk when hole punching is
+unavailable. Where FALLOC_FL_PUNCH_HOLE does not exist at all (Phoenix-RTOS)
+scrolling pools are impossible, and the first ftruncate() of 512 MiB fails
+on a memfd backed by physically contiguous memory, so foot never gets a
+buffer. Size the pool as a scrollable one only when hole punching can be
+compiled in.
+---
+ shm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/shm.c b/shm.c
+index 5c1573a..4f43536 100644
+--- a/shm.c
++++ b/shm.c
+@@ -396,7 +396,7 @@ get_new_buffers(struct buffer_chain *chain, size_t count,
+ 
+     const size_t page_sz = page_size();
+ 
+-#if __SIZEOF_POINTER__ == 8
++#if __SIZEOF_POINTER__ == 8 && defined(FALLOC_FL_PUNCH_HOLE)
+     off_t offset = chain->scrollable && max_pool_size > 0
+         ? (max_pool_size / 4) & ~(page_sz - 1)
+         : 0;
+-- 
+2.53.0
+

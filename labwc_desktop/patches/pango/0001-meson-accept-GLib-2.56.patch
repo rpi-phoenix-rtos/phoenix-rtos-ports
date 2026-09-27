@@ -1,0 +1,29 @@
+From 388d667b2279f6ee51fdf5c54a7cce4d9f259187 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:47:56 +0200
+Subject: [PATCH] meson: accept GLib 2.56
+
+Pango 1.44 asks for GLib 2.59.2 but builds and works with 2.56 (the GLib the
+Phoenix-RTOS ports tree provides, the last autotools series): the only newer
+API it needs is covered where it is used. Lower the requirement so the static
+Phoenix build can link the ports GLib.
+---
+ meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index 81b4a35..edd04e2 100644
+--- a/meson.build
++++ b/meson.build
+@@ -188,7 +188,7 @@ endif
+ # Dependencies
+ pango_deps = []
+ 
+-glib_req_version = '>= 2.59.2'
++glib_req_version = '>= 2.56.4'
+ fribidi_req_version = '>= 0.19.7'
+ libthai_req_version = '>= 0.1.9'
+ harfbuzz_req_version = '>= 2.0.0'
+-- 
+2.53.0
+

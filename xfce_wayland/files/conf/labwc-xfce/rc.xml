@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<!--
+  labwc under XFCE on Phoenix-RTOS (new GPU lane, M7 m7h-xfce): stage as
+  /etc/xdg/labwc-xfce/rc.xml. As the m7c configuration (built-in theme, DejaVu Sans,
+  server-side decorations, Openbox-style default bindings) with the XFCE programs on
+  the keys: Super+Return foot, Super+E Thunar, Alt+F2 / Super+D the XFCE app finder.
+  xfwm4 is X11-only: labwc is the window manager of XFCE's Wayland session.
+-->
+<labwc_config>
+
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+  </core>
+
+  <theme>
+    <cornerRadius>6</cornerRadius>
+    <font place="ActiveWindow" name="DejaVu Sans" size="11" weight="bold" />
+    <font place="InactiveWindow" name="DejaVu Sans" size="11" />
+    <font place="MenuItem" name="DejaVu Sans" size="11" />
+    <font place="OnScreenDisplay" name="DejaVu Sans" size="11" />
+  </theme>
+
+  <keyboard>
+    <default />
+    <keybind key="W-Return">
+      <action name="Execute" command="/bin/foot" />
+    </keybind>
+    <keybind key="W-e">
+      <action name="Execute" command="/bin/thunar-wl" />
+    </keybind>
+    <keybind key="W-d">
+      <action name="Execute" command="/bin/xfce4-appfinder" />
+    </keybind>
+    <keybind key="A-F2">
+      <action name="Execute" command="/bin/xfce4-appfinder --collapsed" />
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <default />
+  </mouse>
+
+</labwc_config>

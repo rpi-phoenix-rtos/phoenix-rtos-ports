@@ -1,0 +1,31 @@
+From 560af18f5570dfdc3acaa977c38ad2ecac693a81 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 17:27:59 +0200
+Subject: [PATCH] meson: man pages only when scdoc is available
+
+doc/meson.build requires scdoc unconditionally. A build host without it (the
+Phoenix-RTOS cross build) cannot configure fuzzel at all, although the man
+pages are not needed there: build them only when scdoc exists.
+---
+ meson.build | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index b095c07..0ad4de6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -274,7 +274,10 @@ install_data(
+   install_dir: join_paths(get_option('datadir'), 'doc', 'fuzzel'))
+ 
+ subdir('completions')
+-subdir('doc')
++# man pages need scdoc on the build machine; a cross build without it skips them
++if find_program('scdoc', required: false, native: true).found()
++  subdir('doc')
++endif
+ 
+ summary(
+   {
+-- 
+2.53.0
+
