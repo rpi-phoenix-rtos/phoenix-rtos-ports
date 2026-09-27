@@ -21,10 +21,6 @@
  * here -- see the note in ftw.c, where keeping the definition was a build break.
  */
 
-/* directory listing helpers — POSIX, absent from libphoenix <dirent.h> */
-int alphasort(const struct dirent **a, const struct dirent **b);
-int scandir(const char *dirp, struct dirent ***namelist,
-	int (*filter)(const struct dirent *),
-	int (*compar)(const struct dirent **, const struct dirent **));
+/* scandir()/alphasort() come from libphoenix <dirent.h> (since 2026-09-27). */
 
 #endif /* _WMAKER_PHOENIX_COMPAT_H_ */
