@@ -1,0 +1,38 @@
+libdrm-phoenix 0003: meson: build the Phoenix backend when host_machine.system() == 'phoenix'
+
+The backend sources live in phoenix/ (copied from tools/gpu-lane/libdrm-phoenix/src
+and include/ by build.sh, together with the servers' wire headers v3da_proto.h
+and kms_proto.h). Base: upstream libdrm b97cbde. MIT.
+
+diff --git a/meson.build b/meson.build
+index ec3a0d5..56d7d78 100644
+--- a/meson.build
++++ b/meson.build
+@@ -249,6 +249,18 @@ libdrm_files = [files(
+   config_file, format_mod_static_table
+ ]
+ 
++# Phoenix-RTOS: no DRM kernel driver; drmIoctl() and device identity go to a
++# backend that talks to the userspace DRM servers (rpi4-kms, rpi4-v3d-async).
++inc_phoenix = []
++if host_machine.system() == 'phoenix'
++  libdrm_files += files(
++    'phoenix/xf86drm_phoenix.c', 'phoenix/drm_phoenix_kms.c',
++    'phoenix/drm_phoenix_v3d.c', 'phoenix/drm_phoenix_logic.c',
++    'phoenix/drm_phoenix_wrap.c',
++  )
++  inc_phoenix = [include_directories('phoenix')]
++endif
++
+ # Build an unversioned so on android
+ if android
+   libdrm_kw = {}
+@@ -261,7 +273,7 @@ libdrm = library(
+   libdrm_files,
+   c_args : libdrm_c_args,
+   dependencies : [dep_valgrind, dep_rt],
+-  include_directories : inc_drm,
++  include_directories : [inc_drm, inc_phoenix],
+   install : true,
+   kwargs : libdrm_kw,
+   gnu_symbol_visibility : 'hidden',

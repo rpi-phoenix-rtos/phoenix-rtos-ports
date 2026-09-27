@@ -1,0 +1,67 @@
+libdrm-phoenix 0001: Phoenix-RTOS ioctl header + drmPhoenixMmap declaration
+
+Phoenix-RTOS has no <sys/ioccom.h>; its _IO/_IOR/_IOW/_IOWR (<sys/ioctl.h>) use
+the BSD layout (IOCPARM_MASK 0x1fff, IOC_OUT/IOC_IN at bits 30/31), so the BSD
+branch of drm.h / xf86drm.h is right once it includes the right header (E7 2.1).
+Also declares drmPhoenixMmap()/drmPhoenixMunmap(): the Phoenix way to map a
+buffer whose MMAP_BO / MAP_DUMB token cannot be mmap()ed on the node descriptor.
+Base: upstream libdrm b97cbde (external/libdrm). MIT, as the files it touches.
+
+diff --git a/include/drm/drm.h b/include/drm/drm.h
+index 1666e91..c848f42 100644
+--- a/include/drm/drm.h
++++ b/include/drm/drm.h
+@@ -41,10 +41,14 @@
+ #include <asm/ioctl.h>
+ typedef unsigned int drm_handle_t;
+ 
+-#else /* One of the BSDs */
++#else /* One of the BSDs, or Phoenix-RTOS */
+ 
+ #include <stdint.h>
++#if defined(__phoenix__)
++#include <sys/ioctl.h>   /* _IO/_IOR/_IOW/_IOWR: the BSD layout (13-bit size field) */
++#else
+ #include <sys/ioccom.h>
++#endif
+ #include <sys/types.h>
+ typedef int8_t   __s8;
+ typedef uint8_t  __u8;
+diff --git a/xf86drm.h b/xf86drm.h
+index b9f4fd4..9e7567d 100644
+--- a/xf86drm.h
++++ b/xf86drm.h
+@@ -36,9 +36,13 @@ extern "C" {
+ #define DRM_IOC_READWRITE	_IOC_READ|_IOC_WRITE
+ #define DRM_IOC(dir, group, nr, size) _IOC(dir, group, nr, size)
+ 
+-#else /* One of the *BSDs */
++#else /* One of the *BSDs, or Phoenix-RTOS */
+ 
++#if defined(__phoenix__)
++#include <sys/ioctl.h>   /* the BSD _IOC layout */
++#else
+ #include <sys/ioccom.h>
++#endif
+ #define DRM_IOCTL_NR(n)         ((n) & 0xff)
+ #define DRM_IOC_VOID            IOC_VOID
+ #define DRM_IOC_READ            IOC_OUT
+@@ -964,6 +968,18 @@ drmGetFormatName(uint32_t format);
+        (((modifier) >> 56) & 0xff)
+ #endif
+ 
++#if defined(__phoenix__)
++/*
++ * Phoenix-RTOS: DRM nodes are served by userspace servers, and a node
++ * descriptor's object is not the buffer, so mmap(drm_fd, offset) cannot map a
++ * BO. MMAP_BO / MAP_DUMB answer a token; map it with drmPhoenixMmap() (same
++ * arguments as mmap(); any other descriptor falls through to mmap()), or link
++ * the program with -Wl,--wrap=mmap to have every mmap() call routed.
++ */
++extern void *drmPhoenixMmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
++extern int drmPhoenixMunmap(void *addr, size_t length);
++#endif
++
+ #if defined(__cplusplus)
+ }
+ #endif

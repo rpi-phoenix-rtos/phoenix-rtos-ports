@@ -1,0 +1,198 @@
+# shellcheck shell=bash
+#
+# Build helpers shared by the new-GPU-lane ports (libdrm_phoenix and every port that
+# depends on it). Sourced from p_build: libdrm_phoenix sources its own glue/ copy, the
+# others ${PORT_DEP_libdrm_phoenix}/share/phoenix-newlane/newlane.subr, so a change here
+# makes port_manager rebuild every dependent (recipe digest -> staleness propagation).
+#
+# Why the new-lane ports do NOT use the framework's CFLAGS/LDFLAGS: those carry
+# -I${PREFIX_BUILD}/include, the shared ports include directory, which also holds the OLD
+# lane's GL/, GLES/, EGL-less Mesa and X11 headers. Every new-lane build therefore uses the
+# exact flag set of the coordination repo's tools/gpu-lane build scripts (NL_TFLAGS) and
+# sees other ports' headers only through private, per-library prefixes. The flags are the
+# ones the Pi-verified binaries were built with.
+#
+# Copyright 2026 Phoenix Systems
+# SPDX-License-Identifier: BSD-3-Clause
+
+# nl_setup <work dir>
+#   NL_SYSROOT, NL_TFLAGS, NL_CC/NL_CXX, NL_PHXCC/NL_PHXCXX (the E7 wrappers: the Phoenix
+#   gcc rejects -pthread, which meson's threads dependency adds; pthreads live in libphoenix,
+#   so dropping the flag is exact), NL_AR NL_RANLIB NL_NM NL_STRIP NL_OBJCOPY NL_OBJDUMP
+#   NL_READELF NL_SIZE.
+nl_setup() {
+	local d="${1:?nl_setup: work dir}" t
+	# The framework exports its target CC/CFLAGS/LDFLAGS...: cmake would take them as its
+	# initial flags and meson (cross) as the BUILD machine's compiler. The tools builds ran
+	# without them; every new-lane build passes its compilers and flags explicitly.
+	unset CC CXX AR AS LD CPP CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+	NL_SYSROOT="${PREFIX_SYSROOT:-${PREFIX_BUILD%/}/sysroot}"
+	NL_SYSROOT="${NL_SYSROOT%/}"
+	NL_CC="$(command -v "${CROSS}gcc")" || b_die "no ${CROSS}gcc on PATH"
+	NL_CXX="$(command -v "${CROSS}g++")" || b_die "no ${CROSS}g++ on PATH"
+	NL_AR="${NL_CC%gcc}gcc-ar"
+	NL_RANLIB="${NL_CC%gcc}gcc-ranlib"
+	NL_NM="${NL_CC%gcc}nm"
+	NL_STRIP="${NL_CC%gcc}strip"
+	NL_OBJCOPY="${NL_CC%gcc}objcopy"
+	NL_OBJDUMP="${NL_CC%gcc}objdump"
+	NL_READELF="${NL_CC%gcc}readelf"
+	NL_SIZE="${NL_CC%gcc}size"
+	NL_TFLAGS=(-mcpu=cortex-a72 -mtune=cortex-a72 -mstrict-align -mno-outline-atomics -ffunction-sections
+		-fdata-sections --sysroot="${NL_SYSROOT}/" -B"${NL_SYSROOT}/lib/")
+	[ -f "${NL_SYSROOT}/lib/libphoenix.a" ] || b_die "no ${NL_SYSROOT}/lib/libphoenix.a"
+	mkdir -p "${d}/bin"
+	for t in gcc g++; do
+		cat > "${d}/bin/phx-${t}" <<EOF
+#!/bin/sh
+# E7: the aarch64-phoenix gcc rejects -pthread (meson's generic threads dep adds it).
+# Phoenix pthreads live in libphoenix, so dropping the flag is exact.
+for a; do shift; [ "\$a" = "-pthread" ] || set -- "\$@" "\$a"; done
+exec ${NL_CC%gcc}${t} "\$@"
+EOF
+		chmod +x "${d}/bin/phx-${t}"
+	done
+	NL_PHXCC="${d}/bin/phx-gcc"
+	NL_PHXCXX="${d}/bin/phx-g++"
+	# libphoenix symbols (stand-ins are compiled only while libphoenix lacks one)
+	NL_LIBC_SYMS="$("${NL_NM}" -g --defined-only "${NL_SYSROOT}/lib/libphoenix.a" 2>/dev/null || true)"
+	export NL_SYSROOT NL_CC NL_CXX NL_PHXCC NL_PHXCXX NL_AR NL_RANLIB NL_NM NL_STRIP NL_OBJCOPY NL_OBJDUMP \
+		NL_READELF NL_SIZE
+}
+
+# nl_host_python <work dir> <module>...
+#   Put a host python3 that can import the given modules first on PATH. The image build and
+#   scripts/build-port.sh put the project venv first, which lacks e.g. Mesa's mako; meson
+#   searches python3.16 ... python3.10, python3, python, so every name is shadowed.
+nl_host_python() {
+	local d="${1:?}/pybin" py="" c m n ok
+	shift
+	for c in /usr/bin/python3 "$(command -v python3 || true)"; do
+		[ -x "${c}" ] || continue
+		ok=1
+		for m in "$@"; do "${c}" -c "import ${m}" 2> /dev/null || { ok=0; break; }; done
+		[ "${ok}" = 1 ] && { py="${c}"; break; }
+	done
+	[ -n "${py}" ] || b_die "no host python3 with: $*"
+	mkdir -p "${d}"
+	for n in python python3 python3.10 python3.11 python3.12 python3.13 python3.14 python3.15 python3.16; do
+		ln -sfn "${py}" "${d}/${n}"
+	done
+	PATH="${d}:${PATH}"
+	export PATH
+}
+
+# nl_has_libc <symbol>: libphoenix defines it
+nl_has_libc() {
+	grep -qE " [TW] $1\$" <<< "${NL_LIBC_SYMS}"
+}
+
+# nl_pkgconfig <wrapper path> <PKG_CONFIG_LIBDIR> [strip-pthread]
+#   pkg-config restricted to the given directories (never the host's, never the shared ports
+#   prefix unless named), always --static. With a third argument it also removes -pthread from
+#   the output (Mesa's .pc files carry it).
+nl_pkgconfig() {
+	local w="${1:?}" libdir="${2:?}" strip_pthread="${3:-}"
+	if [ -n "${strip_pthread}" ]; then
+		cat > "${w}" <<EOF
+#!/bin/sh
+export PKG_CONFIG_LIBDIR=${libdir}
+unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
+o="\$(/usr/bin/pkg-config --static "\$@")" || exit \$?
+[ -z "\$o" ] || printf '%s\n' "\$o" | sed -e 's/\(^\| \)-pthread\( \|\$\)/\1/g'
+EOF
+	else
+		cat > "${w}" <<EOF
+#!/bin/sh
+export PKG_CONFIG_LIBDIR=${libdir}
+unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
+exec /usr/bin/pkg-config --static "\$@"
+EOF
+	fi
+	chmod +x "${w}"
+}
+
+# nl_meson_cross <file> <pkg-config> <extra c_args> <extra link args before max-page-size>
+#                [<extra link args after>] [<extra [properties] lines>]
+#   The extra arguments are meson list items ('a', 'b') without the brackets, or "".
+nl_meson_cross() {
+	local f="${1:?}" pkgc="${2:?}" cx="${3:-}" lpre="${4:-}" lpost="${5:-}" props="${6:-}"
+	local flags="'--sysroot=${NL_SYSROOT}/', '-B${NL_SYSROOT}/lib/', '-mcpu=cortex-a72', '-mtune=cortex-a72', '-mstrict-align', '-mno-outline-atomics', '-ffunction-sections', '-fdata-sections'${cx:+, ${cx}}"
+	local lflags="'--sysroot=${NL_SYSROOT}/', '-B${NL_SYSROOT}/lib/'${lpre:+, ${lpre}}, '-Wl,-z,max-page-size=0x1000'${lpost:+, ${lpost}}"
+	cat > "${f}" <<EOF
+# Generated by a new-GPU-lane port (aarch64-phoenix, Pi 4).
+[binaries]
+c = '${NL_PHXCC}'
+cpp = '${NL_PHXCXX}'
+ar = '${NL_AR}'
+nm = '${NL_NM}'
+strip = '${NL_STRIP}'
+objcopy = '${NL_OBJCOPY}'
+pkg-config = '${pkgc}'
+
+[host_machine]
+system = 'phoenix'
+cpu_family = 'aarch64'
+cpu = 'cortex-a72'
+endian = 'little'
+
+[properties]
+needs_exe_wrapper = true
+${props}
+
+[built-in options]
+c_args = [${flags}]
+cpp_args = [${flags}]
+c_link_args = [${lflags}]
+cpp_link_args = [${lflags}]
+default_library = 'static'
+EOF
+}
+
+# nl_has_sym <archive|elf> <symbol>: defined (T/t/W/w/D/d/R/r/B/b)
+#   (no `nm | grep -q` under pipefail: grep's early exit SIGPIPEs nm and fails the test)
+nl_has_sym() {
+	local s
+	s="$("${NL_NM}" "${1:?}" 2>/dev/null || true)"
+	grep -qE " [TtWwDdRrBb] ${2:?}\$" <<< "${s}"
+}
+
+# nl_no_undefined <elf>: a static program must have no undefined symbol and no PT_INTERP
+nl_no_undefined() {
+	local u
+	u="$("${NL_NM}" -u "${1:?}" || true)"
+	[ -z "${u}" ] || { printf '%s\n' "${u}" | head -20; b_die "$(basename "$1"): undefined symbols"; }
+	if "${NL_READELF}" -l "$1" | grep -q INTERP; then b_die "$(basename "$1"): PT_INTERP present"; fi
+}
+
+# nl_count_strings <file> <string>: occurrences (grep -a on the file itself; a
+# `strings | grep -q` pipeline dies of SIGPIPE under pipefail)
+nl_count_strings() {
+	grep -acF -- "${2:?}" "${1:?}" || true
+}
+
+# nl_forbid_old_lane <elf> [more strings...]: the old lane's strings must not be in a new-lane binary
+nl_forbid_old_lane() {
+	local e="${1:?}" s n bad=0
+	shift
+	for s in 'v3d-winsys:' 'v3da-winsys:' phoenix_v3d_ioctl peek_next_scanout v3d-srv "$@"; do
+		n="$(nl_count_strings "${e}" "${s}")"
+		[ "${n}" = 0 ] || { echo "old-lane string '${s}' in $(basename "${e}"): ${n}"; bad=1; }
+	done
+	[ "${bad}" = 0 ] || b_die "$(basename "${e}"): old-lane strings present"
+}
+
+# nl_private_view <dir> <pc name> <version> <Libs> <Cflags> [header files relative to <inc>...]
+#   with NL_VIEW_INC=<source include dir>: a private prefix exposing exactly those headers
+#   (never put the shared ports include/ on a search path: header poisoning).
+nl_private_view() {
+	local d="${1:?}" name="${2:?}" ver="${3:?}" libs="${4:?}" cflags="${5:-}" h
+	shift 5
+	mkdir -p "${d}/include" "${d}/lib/pkgconfig"
+	for h in "$@"; do
+		mkdir -p "${d}/include/$(dirname "${h}")"
+		cp -a "${NL_VIEW_INC:?}/${h}" "${d}/include/${h}"
+	done
+	printf '%s\n' "prefix=${d}" "Name: ${name}" "Description: ${name} (private view of the Phoenix ports prefix)" \
+		"Version: ${ver}" "Libs: ${libs}" "Cflags: ${cflags}" > "${d}/lib/pkgconfig/${name}.pc"
+}

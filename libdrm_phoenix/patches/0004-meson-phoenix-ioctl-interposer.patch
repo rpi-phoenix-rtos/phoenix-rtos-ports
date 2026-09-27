@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 09:00:00 +0200
+Subject: [PATCH 4/4] meson: phoenix backend -- the optional ioctl()
+ interposer
+
+phoenix/drm_phoenix_wrap_ioctl.c answers the Linux sync_file ioctls
+(SYNC_IOC_MERGE, SYNC_IOC_FILE_INFO) on the backend's in-process sync
+files for programs linked with -Wl,--wrap=ioctl (Mesa's libsync merges
+sync files with raw ioctl()s). Its own archive member, like
+drm_phoenix_wrap.c: a program linked without --wrap=ioctl never pulls it.
+---
+ meson.build | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -257,6 +257,7 @@ if host_machine.system() == 'phoenix'
+     'phoenix/xf86drm_phoenix.c', 'phoenix/drm_phoenix_kms.c',
+     'phoenix/drm_phoenix_v3d.c', 'phoenix/drm_phoenix_logic.c',
+     'phoenix/drm_phoenix_wrap.c',
++    'phoenix/drm_phoenix_wrap_ioctl.c',
+   )
+   inc_phoenix = [include_directories('phoenix')]
+ endif
+-- 
+2.43.0
+
