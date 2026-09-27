@@ -54,6 +54,16 @@ p_prepare() {
 	cp -v "${PREFIX_PORT}/files/phoenix_termcap.h" "${PREFIX_PORT_WORKDIR}/"
 }
 
+# Run by the framework when libphoenix.a (or the toolchain runtime) changed since
+# xterm was last linked. `make xterm` does not know about libphoenix.a, so it
+# would find the kept binary up to date and the port would ship it again -- which
+# is how xterm kept a tcsetattr() that sign-extends its ioctl request and died at
+# start with "fatal pty error errno=22" (2026-09-27). Removing the binary makes
+# `make xterm` relink it from the current objects; nothing is recompiled.
+p_relink() {
+	rm -f "${PREFIX_PORT_WORKDIR}/xterm"
+}
+
 p_build() {
 	# The compile-time fallback shell. On a netboot RAM root /bin/sh does not
 	# exist (the rootfs is mounted elsewhere); override accordingly per variant.
