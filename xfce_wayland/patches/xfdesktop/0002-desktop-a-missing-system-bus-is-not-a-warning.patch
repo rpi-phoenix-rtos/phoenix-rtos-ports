@@ -1,0 +1,33 @@
+From 7781d37838306edf329746654bdb37f86a4747e0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 21:11:22 +0200
+Subject: [PATCH] desktop: a missing system bus is not a warning
+
+set_accountsservice_user_bg() mirrors the backdrop into AccountsService
+(for a greeter) over the system bus. A session without AccountsService
+is logged at debug level only, but a session without a system bus at all
+-- a desktop with only a session bus, as on Phoenix-RTOS -- printed
+"Failed to get system bus" as a warning on every start. Both mean the
+same thing here: there is nobody to tell. Log it at debug level too.
+---
+ src/xfce-desktop.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/xfce-desktop.c b/src/xfce-desktop.c
+index 502d2f7..f377293 100644
+--- a/src/xfce-desktop.c
++++ b/src/xfce-desktop.c
+@@ -206,7 +206,9 @@ set_accountsservice_user_bg(const gchar *background)
+ 
+     bus = g_bus_get_sync (G_BUS_TYPE_SYSTEM, NULL, &error);
+     if (bus == NULL) {
+-        g_warning ("Failed to get system bus: %s", error->message);
++        // As when AccountsService is not running (below): the user's background
++        // is then just not mirrored there, which is no reason to warn
++        DBG("Failed to get system bus: %s", error->message);
+         g_error_free (error);
+         return;
+     }
+-- 
+2.53.0
+

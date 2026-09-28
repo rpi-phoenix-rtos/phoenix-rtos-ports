@@ -21,8 +21,10 @@
 #      defaults (/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/thunar.xml) read back
 #   4  labwc (-C /etc/xdg/labwc-xfce), wait for its socket
 #   5  the session's clients; hold with heartbeats that also list the org.xfce.* names
-#      on the bus (which XFCE programs registered)
-#   6  stop: SIGTERM to Thunar; `xfce4-panel --quit` and `xfdesktop --quit` (over the bus: the
+#      on the bus (which XFCE programs registered), until HOLD seconds are over, a logout is
+#      requested (the file $XFCE_LOGOUT_FLAG appears: the panel's Log Out through the
+#      xfce-demo `loginctl` stand-in) or labwc exits
+#   6  stop: `thunar --quit`; `xfce4-panel --quit` and `xfdesktop --quit` (over the bus: the
 #      panel saves its layout); SIGTERM to labwc, xfconfd (if started here), the bus;
 #      then the programs' own logs (the autostarted ones write to /tmp/xfce-logs/)
 #
@@ -32,11 +34,19 @@
 #   /bin/shmsrv -v                    (memfd_create/shm_open backing: wl_shm pools, keymaps)
 #
 # Environment knobs: RENDERER (pixman | gles2, default pixman), HOLD (seconds with the
-# session up, default 60), LABWC, CONF_DIR (default /etc/xdg/labwc-xfce), THUNAR (default
-# /bin/thunar-wl), THUNAR_DIR (default /), XFCONFD (default /usr/lib/xfce4/xfconf/xfconfd),
-# ACTIVATION (0 = skip bus activation, start xfconfd directly), VERBOSE (labwc -V, default 1),
-# G_DEBUG / G_MESSAGES_DEBUG (passed through), GDBUS_DEBUG (1 = G_DBUS_DEBUG=authentication
-# for the XFCE programs).
+# session up, default 60; 0 = until Log Out or labwc exits), LABWC, CONF_DIR (default
+# /etc/xdg/labwc-xfce), XFCE_BIN (a directory of XFCE programs put first on PATH; default none),
+# THUNAR / PANEL / XFDESKTOP (default /bin/thunar-wl, /bin/xfce4-panel, /bin/xfdesktop: the
+# programs this script starts or asks to quit), THUNAR_DIR (default /), THUNAR_START (0 = no
+# Thunar window at start), THUNAR_SECOND (a directory: once the session is up, open it with a
+# SECOND `thunar <dir>`, which forwards its command line to the running Thunar over the bus),
+# XFCE_CONFIG_DIRS / XFCE_DATA_DIRS (XDG_CONFIG_DIRS / XDG_DATA_DIRS, default /etc/xdg,
+# /usr/share), XFCE_HOME (the root of XDG_CONFIG_HOME & co., default /tmp/xfce-home),
+# LOGOUT_CMD (run when HOLD is over, default: create $XFCE_LOGOUT_FLAG), TZ (passed through:
+# GLib's clock and dates honour it, libphoenix's localtime() does not yet),
+# XFCONFD (default /usr/lib/xfce4/xfconf/xfconfd), ACTIVATION (0 = skip bus activation, start
+# xfconfd directly), VERBOSE (labwc -V, default 1), G_DEBUG / G_MESSAGES_DEBUG (passed
+# through), GDBUS_DEBUG (1 = G_DBUS_DEBUG=authentication for the XFCE programs).
 #
 # Every line of ours starts with "XFCE " (grading). GTK/GLib messages look like
 # "(thunar:12): Gtk-WARNING **: 12:00:00.000: ..."; wlroots lines "00:00:01.234 [file.c:1] ...".
@@ -55,6 +65,11 @@ LABWC=${LABWC:-/bin/labwc}
 CONF_DIR=${CONF_DIR:-/etc/xdg/labwc-xfce}
 THUNAR=${THUNAR:-/bin/thunar-wl}
 THUNAR_DIR=${THUNAR_DIR:-/}
+THUNAR_START=${THUNAR_START:-1}
+THUNAR_SECOND=${THUNAR_SECOND:-}
+PANEL=${PANEL:-/bin/xfce4-panel}
+XFDESKTOP=${XFDESKTOP:-/bin/xfdesktop}
+LOGOUT_CMD=${LOGOUT_CMD:-}
 XFCONFD=${XFCONFD:-/usr/lib/xfce4/xfconf/xfconfd}
 XFCONF_QUERY=${XFCONF_QUERY:-/bin/xfconf-query}
 DAEMON=${DAEMON:-/bin/dbus-daemon}
@@ -65,14 +80,17 @@ SOCK=/tmp/dbus-session
 LOGS=/tmp/xfce-logs
 
 export HOME=/root
-export PATH=/bin:/usr/bin
+export PATH=${XFCE_BIN:+${XFCE_BIN}:}/bin:/usr/bin
 export XDG_RUNTIME_DIR=/tmp/xdg
 export XDG_CONFIG_DIRS=${XFCE_CONFIG_DIRS:-/etc/xdg}   # (knob: the host test points it elsewhere)
-export XDG_DATA_DIRS=/usr/share
+export XDG_DATA_DIRS=${XFCE_DATA_DIRS:-/usr/share}
+# the panel's Log Out (through the xfce-demo loginctl stand-in) creates this file
+export XFCE_LOGOUT_FLAG=${XDG_RUNTIME_DIR}/xfce-logout
 # the programs write their settings, caches and state here, not on the NFS root
-export XDG_CONFIG_HOME=/tmp/xfce-home/config
-export XDG_CACHE_HOME=/tmp/xfce-home/cache
-export XDG_DATA_HOME=/tmp/xfce-home/data
+XFCE_HOME=${XFCE_HOME:-/tmp/xfce-home}
+export XDG_CONFIG_HOME=${XFCE_HOME}/config
+export XDG_CACHE_HOME=${XFCE_HOME}/cache
+export XDG_DATA_HOME=${XFCE_HOME}/data
 export XDG_CURRENT_DESKTOP=XFCE
 export XDG_SESSION_TYPE=wayland
 export DBUS_SESSION_BUS_ADDRESS=unix:path=${SOCK}
@@ -144,18 +162,41 @@ has_name() {
 	return 1
 }
 
+# bounded LOG SECS CMD...: run CMD (stdout+stderr to LOG), at most SECS seconds; its exit
+# status, or 124 when it had to be killed. (The remote-instance calls below wait for a bus
+# reply with no timeout of their own.)
+bounded() {
+	local log="$1" secs="$2" p i=0
+	shift 2
+	"$@" > "${log}" 2>&1 &
+	p=$!
+	while alive "${p}" && [ "${i}" -lt "${secs}" ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	if alive "${p}"; then
+		kill -TERM "${p}" 2>/dev/null
+		wait "${p}" 2>/dev/null
+		return 124
+	fi
+	wait "${p}"
+}
+
 mkdir -p "${XDG_RUNTIME_DIR}" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}" "${LOGS}" 2>/dev/null
 chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null
-rm -f "${XDG_RUNTIME_DIR}"/wayland-* "${SOCK}" "${LOGS}"/*.log 2>/dev/null
+rm -f "${XDG_RUNTIME_DIR}"/wayland-* "${SOCK}" "${LOGS}"/*.log "${XFCE_LOGOUT_FLAG}" 2>/dev/null
 
 staged=""
-for f in "${DAEMON}" "${SEND}" "${BUS_CONF}" "${XFCONFD}" "${XFCONF_QUERY}" "${LABWC}" "${THUNAR}" \
+progs="${THUNAR}"
+[ "${SESSION}" = xfce ] && progs="${progs} ${PANEL} ${XFDESKTOP}"
+for f in "${DAEMON}" "${SEND}" "${BUS_CONF}" "${XFCONFD}" "${XFCONF_QUERY}" "${LABWC}" ${progs} \
 		/usr/share/dbus-1/services/org.xfce.Xfconf.service /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/thunar.xml \
 		/usr/share/icons/Adwaita/icon-theme.cache /usr/share/icons/hicolor/icon-theme.cache /usr/share/mime/mime.cache \
 		/usr/share/glib-2.0/schemas/gschemas.compiled /etc/xdg/gtk-3.0/settings.ini; do
 	[ -e "${f}" ] || staged="${staged}${f},"
 done
-echo "XFCE start session=${SESSION} renderer=${RENDERER} input=${LIBINPUT_PHOENIX_DEVICES:-none} hold=${HOLD} conf=${CONF_DIR} thunar=${THUNAR} missing=${staged:-none} t=${SECONDS}"
+echo "XFCE start session=${SESSION} renderer=${RENDERER} input=${LIBINPUT_PHOENIX_DEVICES:-none} hold=${HOLD} conf=${CONF_DIR} labwc=${LABWC} thunar=${THUNAR} missing=${staged:-none} t=${SECONDS}"
+echo "XFCE env PATH=${PATH} XDG_CONFIG_DIRS=${XDG_CONFIG_DIRS} XDG_DATA_DIRS=${XDG_DATA_DIRS} TZ=${TZ:-unset}"
 
 # --- 1: the session bus ---------------------------------------------------------------------
 "${DAEMON}" --config-file="${BUS_CONF}" --nofork > "${LOGS}/dbus-daemon.log" 2>&1 &
@@ -271,40 +312,89 @@ if [ -n "${sock}" ]; then
 			# the panel and the desktop come from labwc's autostart; Thunar once the panel
 			# registered on the bus (or after 60 s)
 			i=0
-			while ! has_name org.xfce.Panel && [ "${i}" -lt 60 ]; do
+			while ! has_name org.xfce.Panel && [ "${i}" -lt 60 ] && alive "${lpid}"; do
 				sleep 5
 				i=$((i + 5))
 				echo "XFCE waiting for the panel t=${SECONDS} waited=${i}s names=$(bus_names)"
 			done
-			start_thunar
+			echo "XFCE session up panel=$(has_name org.xfce.Panel && echo registered || echo missing) t=${SECONDS}"
+			[ "${THUNAR_START}" = 1 ] && start_thunar
 			;;
 	esac
 fi
 
+# A second Thunar: GApplication forwards its command line to the running instance over the
+# bus (org.gtk.Application.CommandLine) and exits; the running Thunar opens a new window.
+# (Only once the first one owns org.xfce.Thunar: started earlier, the second would become
+# the primary itself.)
+if [ -n "${sock}" ] && [ -n "${THUNAR_SECOND}" ]; then
+	i=0
+	while ! has_name org.xfce.Thunar && [ "${i}" -lt 60 ]; do
+		sleep 2
+		i=$((i + 2))
+	done
+	sleep 3
+	s0=${SECONDS}
+	bounded "${LOGS}/thunar-second.log" 30 "${THUNAR}" "${THUNAR_SECOND}"
+	echo "XFCE thunar second instance dir=${THUNAR_SECOND} rc=$? took_s=$((SECONDS - s0)) waited_for_name_s=${i} names=$(bus_names) t=${SECONDS}"
+fi
+
+# Hold until HOLD seconds are over (then LOGOUT_CMD, or the logout file directly), the
+# panel's Log Out, or labwc's own exit (its root menu's Exit).
 held=0
-while [ -n "${sock}" ] && [ "${held}" -lt "${HOLD}" ]; do
-	sleep 10
-	held=$((held + 10))
-	t=none
-	[ -n "${tpid}" ] && { alive "${tpid}" && t=running || t=exited; }
-	l=exited
-	alive "${lpid}" && l=running
-	echo "XFCE hold t=${SECONDS} held=${held}s labwc=${l} thunar=${t} names=$(bus_names)"
+why=""
+while [ -n "${sock}" ] && [ -z "${why}" ]; do
+	sleep 5
+	held=$((held + 5))
+	if [ -e "${XFCE_LOGOUT_FLAG}" ]; then why=logout; break; fi
+	if ! alive "${lpid}"; then why=labwc-exited; break; fi
+	# a heartbeat every 10 s with a HOLD, every 60 s in an open-ended session
+	if [ $((held % ( HOLD > 0 ? 10 : 60 ) )) -eq 0 ]; then
+		t=none
+		[ -n "${tpid}" ] && { alive "${tpid}" && t=running || t=exited; }
+		echo "XFCE hold t=${SECONDS} held=${held}s labwc=running thunar=${t} names=$(bus_names)"
+	fi
+	if [ "${HOLD}" -gt 0 ] && [ "${held}" -ge "${HOLD}" ]; then
+		if [ -n "${LOGOUT_CMD}" ]; then
+			${LOGOUT_CMD} > "${LOGS}/logout-cmd.log" 2>&1
+			echo "XFCE hold over: ${LOGOUT_CMD} rc=$? t=${SECONDS}"
+		else
+			: > "${XFCE_LOGOUT_FLAG}"
+		fi
+		[ -e "${XFCE_LOGOUT_FLAG}" ] && why=logout || why=hold
+	fi
 done
+[ -n "${sock}" ] && echo "XFCE session end reason=${why} held=${held}s t=${SECONDS}"
 
 # --- 6: stop ----------------------------------------------------------------------------------
+lup=0
+alive "${lpid}" && lup=1
 if [ -n "${tpid}" ]; then
-	kill -TERM "${tpid}" 2>/dev/null
+	# Thunar saves nothing on SIGTERM; --quit asks the running instance (a remote command
+	# line, as THUNAR_SECOND). Without a display the remote cannot start: TERM then.
+	rc_q=skipped
+	if [ "${lup}" = 1 ]; then
+		bounded "${LOGS}/thunar-quit.log" 20 "${THUNAR}" --quit
+		rc_q=$?
+		i=0
+		while alive "${tpid}" && [ "${i}" -lt 10 ]; do
+			sleep 1
+			i=$((i + 1))
+		done
+	fi
+	alive "${tpid}" && kill -TERM "${tpid}" 2>/dev/null
 	wait "${tpid}" 2>/dev/null
-	echo "XFCE thunar exited rc=$? t=${SECONDS}"
+	echo "XFCE thunar exited rc=$? quit_rc=${rc_q} t=${SECONDS}"
 fi
 # The panel and the desktop are labwc's autostart children (no pid here). GTK programs
 # abort when their display goes away, and an aborted panel saves nothing: ask them to
 # quit over the bus first (each --quit is one more short-lived instance of the program).
-if [ "${SESSION}" = xfce ] && [ -n "${sock}" ]; then
-	/bin/xfce4-panel --quit > "${LOGS}/panel-quit.log" 2>&1
+if [ "${SESSION}" = xfce ] && [ -n "${sock}" ] && [ "${lup}" = 0 ]; then
+	echo "XFCE quit skipped: labwc is gone (the panel and the desktop lost their display) names=$(bus_names) t=${SECONDS}"
+elif [ "${SESSION}" = xfce ] && [ -n "${sock}" ]; then
+	bounded "${LOGS}/panel-quit.log" 20 "${PANEL}" --quit
 	rc_p=$?
-	/bin/xfdesktop --quit > "${LOGS}/xfdesktop-quit.log" 2>&1
+	bounded "${LOGS}/xfdesktop-quit.log" 20 "${XFDESKTOP}" --quit
 	rc_d=$?
 	i=0
 	while { has_name org.xfce.Panel || has_name org.xfce.xfdesktop; } && [ "${i}" -lt 15 ]; do

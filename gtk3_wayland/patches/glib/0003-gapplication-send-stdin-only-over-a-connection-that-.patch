@@ -1,0 +1,72 @@
+From f29b68661d2ea1e6f7c410847fd67ced65cda24c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 21:11:03 +0200
+Subject: [PATCH] gapplication: send stdin only over a connection that passes
+ fds
+
+g_application_impl_command_line() always attached fd 0 to the remote
+instance's CommandLine call. GDBus will not write a message carrying fds
+to a peer that did not agree to UNIX_FD passing: the write fails and the
+connection is closed ("The connection is closed"), so the remote
+instance's command never reaches the primary one -- `xfdesktop --quit`,
+a second `thunar` or anything else that forwards its command line.
+That happens on any bus without fd passing: a TCP bus, or a dbus-daemon
+on a platform where it cannot detect that the socket is AF_UNIX
+(Phoenix-RTOS: getsockname() on a UNIX socket does not fill in the
+address, so dbus-daemon never answers AGREE_UNIX_FD).
+
+Attach stdin only when the connection has
+G_DBUS_CAPABILITY_FLAGS_UNIX_FD_PASSING. The primary instance already
+handles a CommandLine call without fds: its stdin stream is then NULL.
+---
+ gio/gapplicationimpl-dbus.c | 23 +++++++++++++++--------
+ 1 file changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/gio/gapplicationimpl-dbus.c b/gio/gapplicationimpl-dbus.c
+index 90959ec..e029af3 100644
+--- a/gio/gapplicationimpl-dbus.c
++++ b/gio/gapplicationimpl-dbus.c
+@@ -853,17 +853,24 @@ g_application_impl_command_line (GApplicationImpl    *impl,
+ #ifdef G_OS_UNIX
+   {
+     GError *error = NULL;
+-    GUnixFDList *fd_list;
++    GUnixFDList *fd_list = NULL;
+ 
+     /* send along the stdin in case
+-     * g_application_command_line_get_stdin_data() is called
++     * g_application_command_line_get_stdin_data() is called -- if the
++     * connection can carry file descriptors at all: GDBus refuses to write a
++     * message with fds to a peer that did not agree to UNIX_FD passing, and
++     * closes the connection. The primary instance then sees no stdin (as
++     * over a TCP bus) instead of the remote instance failing.
+      */
+-    fd_list = g_unix_fd_list_new ();
+-    g_unix_fd_list_append (fd_list, 0, &error);
+-    if (error != NULL)
++    if (g_dbus_connection_get_capabilities (impl->session_bus) & G_DBUS_CAPABILITY_FLAGS_UNIX_FD_PASSING)
+       {
+-        g_error ("Error appending to FD list: %s", error->message);
+-        g_clear_error (&error);
++        fd_list = g_unix_fd_list_new ();
++        g_unix_fd_list_append (fd_list, 0, &error);
++        if (error != NULL)
++          {
++            g_error ("Error appending to FD list: %s", error->message);
++            g_clear_error (&error);
++          }
+       }
+ 
+     g_dbus_connection_call_with_unix_fd_list (impl->session_bus, impl->bus_name, impl->object_path,
+@@ -871,7 +878,7 @@ g_application_impl_command_line (GApplicationImpl    *impl,
+                                               g_variant_new ("(o^aay@a{sv})", object_path, arguments, platform_data),
+                                               G_VARIANT_TYPE ("(i)"), 0, G_MAXINT, fd_list, NULL,
+                                               g_application_impl_cmdline_done, &data);
+-    g_object_unref (fd_list);
++    g_clear_object (&fd_list);
+   }
+ #else
+   g_dbus_connection_call (impl->session_bus, impl->bus_name, impl->object_path,
+-- 
+2.53.0
+
