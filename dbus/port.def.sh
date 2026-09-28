@@ -51,11 +51,15 @@
 # Configuration: unix transport only; no systemd, launchd, X11 autolaunch, SELinux/
 # AppArmor/libaudit, epoll/kqueue/inotify (poll() main loop; config reload on SIGHUP),
 # tests or docs; traditional (fork/exec) bus activation stays on (XFCE starts xfconfd
-# that way). Phoenix has no SO_PEERCRED / SCM_CREDS / getpeereid, so
-# dbus-sysdeps-unix.c compiles its "no credentials mechanism" branch (a #warning) and
-# EXTERNAL cannot succeed: files/conf/session-phoenix.conf offers ANONYMOUS. Built
-# against a sysroot whose <sys/socket.h> defines SO_PEERCRED, the Linux path is
-# compiled instead (tested with #ifdef, no probe) and EXTERNAL works unchanged.
+# that way). Peer credentials: dbus-sysdeps-unix.c tests SO_PEERCRED with #ifdef (no
+# probe). Since kernel master f234ed3e, <sys/socket.h> (via <phoenix/posix-socket.h>)
+# defines it and a Linux-layout struct ucred {pid, uid, gid}, so the daemon reads the
+# peer's pid and uid with getsockopt(SOL_SOCKET, SO_PEERCRED) and EXTERNAL works
+# (files/conf/session-phoenix-external.conf). Built against an older sysroot, it
+# compiles the "no credentials mechanism" branch (a #warning) and only ANONYMOUS
+# (files/conf/session-phoenix.conf, lab only) can succeed. Binaries built with
+# SO_PEERCRED still run on an older kernel: getsockopt() fails, and they fall back to
+# that behaviour.
 #
 # Host tools: meson, ninja, pkg-config.
 
@@ -253,8 +257,8 @@ EOF
 		[ "${n}" != 0 ] || bad=1
 	done
 	# The credentials path compiled in: SO_PEERCRED appears as a verbose message only
-	# when the sysroot defines it.
-	echo "dbus: dbus-daemon strings 'SO_PEERCRED' (1 = compiled against a SO_PEERCRED sysroot): $(grep -cF 'SO_PEERCRED' <<<"${strs}" || true)"
+	# when the sysroot defines it (since kernel f234ed3e: 2).
+	echo "dbus: dbus-daemon strings 'SO_PEERCRED' (0 = the sysroot has no SO_PEERCRED): $(grep -cF 'SO_PEERCRED' <<<"${strs}" || true)"
 	[ -f "${out}/destdir/usr/lib/libdbus-1.a" ] || { echo "dbus: libdbus-1.a not installed"; bad=1; }
 	[ "${bad}" = 0 ] || b_die "dbus: verification failed"
 
@@ -276,6 +280,7 @@ EOF
 		install -D -m 755 "${out}/bin/${o}-stripped" "${ST}/bin/${o}"
 	done
 	install -D -m 755 "${PREFIX_PORT}/files/pi/dbus-m7f.sh" "${ST}/bin/dbus-m7f.sh"
+	install -D -m 755 "${PREFIX_PORT}/files/pi/dbus-m7m.sh" "${ST}/bin/dbus-m7m.sh"
 	install -D -m 644 "${PREFIX_PORT}/files/conf/session-phoenix.conf" "${ST}/etc/dbus-1/session-phoenix.conf"
 	install -D -m 644 "${PREFIX_PORT}/files/conf/session-phoenix-external.conf" "${ST}/etc/dbus-1/session-phoenix-external.conf"
 	# activatable services directory (xfconfd's .service file comes with xfce_wayland)
