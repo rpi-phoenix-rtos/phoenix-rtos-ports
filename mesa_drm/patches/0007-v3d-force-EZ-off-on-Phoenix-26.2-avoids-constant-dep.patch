@@ -1,0 +1,42 @@
+From 0e14b77ca8df855011ea0d809e8ff9a8568566b1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Thu, 16 Jul 2026 17:03:14 +0200
+Subject: [PATCH 7/7] =?UTF-8?q?v3d:=20force=20EZ=20off=20on=20Phoenix=2026?=
+ =?UTF-8?q?.2=20=E2=80=94=20avoids=20constant=20depth-drain=20render=20wed?=
+ =?UTF-8?q?ge=20(5fps->38fps)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+(cherry picked from commit 2728620c21664dcab94717a0ea8e6115b6d7e1a2)
+---
+ src/gallium/drivers/v3d/v3dx_draw.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/src/gallium/drivers/v3d/v3dx_draw.c b/src/gallium/drivers/v3d/v3dx_draw.c
+index 14fb2306026..df1b4abd553 100644
+--- a/src/gallium/drivers/v3d/v3dx_draw.c
++++ b/src/gallium/drivers/v3d/v3dx_draw.c
+@@ -917,6 +917,21 @@ v3d_update_primitives_generated_counter(struct v3d_context *v3d,
+ static void
+ v3d_update_job_ez(struct v3d_context *v3d, struct v3d_job *job)
+ {
++        /* Phoenix Pi4 (mesa 26.2): force Early-Z OFF for the whole job. On the 26.2 base
++         * this port's V3D 4.2 render pipeline hits the HW-marginal depth/fragment drain
++         * stall (fdbgs=EZTEST) on EVERY frame with EZ enabled — the winsys reset+drop
++         * mitigation then fires constantly, collapsing GLQuake to ~5 fps (337 render
++         * timeouts). The stall is EZ-triggered: forcing EZ off yields 0 wedges and full
++         * ~38 fps (HW-verified via netboot, 20260716-165718, triple-buffer, frames render
++         * correctly). EZ early-rejects overdraw (a perf lever) but at 1080p GLQuake is not
++         * overdraw-bound, so disabling it costs no measurable fps here while eliminating
++         * the wedge. (On the pre-26.2 base EZ was re-enabled after a winsys L2T-flush fix;
++         * 26.2's codegen re-triggers the stall, so keep EZ off on 26.2. Falls through to
++         * the existing first_ez_state==DISABLED early-return below.) TODO(v3d-26.2-ez):
++         * root-cause why 26.2 makes the EZTEST drain stall constant to safely re-enable EZ. */
++        job->first_ez_state = V3D_EZ_DISABLED;
++        job->ez_state = V3D_EZ_DISABLED;
++
+         /* If first_ez_state is V3D_EZ_DISABLED it means that we have already
+          * determined that we should disable EZ completely for all draw calls
+          * in this job. This will cause us to disable EZ for the entire job in

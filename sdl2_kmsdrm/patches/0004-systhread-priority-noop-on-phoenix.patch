@@ -1,0 +1,27 @@
+Phoenix-RTOS: make SDL_SYS_SetThreadPriority() a no-op.
+
+libphoenix's <pthread.h> declares pthread_getschedparam()/
+pthread_setschedparam() but does not yet implement them, so the stock pthread
+backend link-fails with "undefined reference to pthread_{get,set}schedparam".
+Following the pattern SDL already uses for platforms without POSIX thread
+scheduling (NACL/RISCOS/OS2), make the call a no-op on Phoenix. Thread
+priorities on Phoenix are selected at beginthreadex() time; if per-thread
+reprioritization is later needed, implement the two functions in libphoenix
+and drop this hunk.
+
+--- a/src/thread/pthread/SDL_systhread.c	2025-01-01 16:48:45.000000000 +0100
++++ b/src/thread/pthread/SDL_systhread.c	2026-08-04 22:51:29.490919499 +0200
+@@ -188,8 +188,11 @@
+ 
+ int SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
+ {
+-#if defined(__NACL__) || defined(__RISCOS__) || defined(__OS2__)
+-    /* FIXME: Setting thread priority does not seem to be supported in NACL */
++#if defined(__NACL__) || defined(__RISCOS__) || defined(__OS2__) || defined(__phoenix__)
++    /* FIXME: Setting thread priority does not seem to be supported in NACL.
++     * Phoenix-RTOS: libphoenix declares pthread_{get,set}schedparam() but does
++     * not implement them yet, so treat SetThreadPriority as a no-op for now.
++     * (Phoenix thread priority is chosen at beginthreadex() time.) */
+     return 0;
+ #else
+     struct sched_param sched;

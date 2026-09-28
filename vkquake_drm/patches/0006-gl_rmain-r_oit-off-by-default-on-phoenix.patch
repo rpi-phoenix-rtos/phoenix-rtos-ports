@@ -1,0 +1,31 @@
+vkQuake: default r_oit to 0 on Phoenix (V3D 4.2), the classic sorted-alpha path.
+
+NEW for vkquake-drm (docs/gpu-new-lane/vkquake-perf.md section 3). With r_oit 1 (upstream's
+default) every frame's main render pass is MAIN_RENDER_PASS_OIT: subpass 0 scene colour +
+depth, subpass 1 WBOIT accum (R16G16B16A16_SFLOAT) + reveal (R8), subpass 2 the resolve
+reading both as input attachments. v3dv merges subpasses only when they use the same
+attachments (cmd_buffer_can_merge_subpass), so that pass is three 1080p render jobs, each
+storing what the next reloads, with 2 RTs at 64 bpp (32x32 tiles) in the middle one. The
+old lane's fb0 glue never enabled OIT. r_oit is CVAR_ARCHIVE and `r_oit 1` still selects
+WBOIT (via VID_Restart when set after start-up).
+
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -68,7 +68,17 @@
+ cvar_t r_fullbright = {"r_fullbright", "0", CVAR_NONE};
+ cvar_t r_lightmap = {"r_lightmap", "0", CVAR_NONE};
+ cvar_t r_wateralpha = {"r_wateralpha", "1", CVAR_ARCHIVE_GAME};
++#if defined(__phoenix__)
++/* Phoenix-RTOS: the only Vulkan device is the Raspberry Pi 4's V3D 4.2 (v3dv). WBOIT turns the
++ * main render pass into three v3dv jobs (subpass 1 has different colour attachments and subpass 2
++ * reads accum/reveal as input attachments, so v3dv cannot merge them), each storing and reloading
++ * full-screen attachments; the accum target is RGBA16F, which halves the tile size again. At
++ * 1080p that is most of the frame's GPU time. Default to the classic sorted-alpha path; r_oit 1
++ * still selects OIT. */
++cvar_t r_oit = {"r_oit", "0", CVAR_ARCHIVE};
++#else
+ cvar_t r_oit = {"r_oit", "1", CVAR_ARCHIVE};
++#endif
+ cvar_t r_dynamic = {"r_dynamic", "1", CVAR_ARCHIVE};
+ cvar_t r_novis = {"r_novis", "0", CVAR_ARCHIVE};
+ #if defined(USE_SIMD)

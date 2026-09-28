@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 10:00:00 +0200
+Subject: [PATCH] egl/x11: build without SysV shared memory (HAVE_SYS_SHM_H)
+
+src/x11/x11_display.[ch] already compile x11_xcb_display_supports_xshm()
+only when <sys/shm.h> exists (HAVE_SYS_SHM_H), but platform_x11.c includes
+<sys/ipc.h> unconditionally and calls the probe from the swrast path, so the
+EGL X11 platform does not build on a system without SysV IPC (Phoenix-RTOS).
+Without it the swrast loader simply never offers the MIT-SHM image path. The
+DRI3 path (loader_dri3) does not use SysV shared memory at all.
+---
+ src/egl/drivers/dri2/platform_x11.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/egl/drivers/dri2/platform_x11.c b/src/egl/drivers/dri2/platform_x11.c
+index a31a9d353ab..b0e284e2a2a 100644
+--- a/src/egl/drivers/dri2/platform_x11.c
++++ b/src/egl/drivers/dri2/platform_x11.c
+@@ -51,7 +51,9 @@
+ #include "util/log.h"
+ #include <sys/stat.h>
+ #include <sys/types.h>
++#ifdef HAVE_SYS_SHM_H
+ #include <sys/ipc.h>
++#endif
+ #include "x11_dri3.h"
+ #include "x11_display.h"
+ #include "kopper_interface.h"
+@@ -1178,9 +1180,12 @@ dri2_initialize_x11_swrast(_EGLDisplay *disp)
+ {
+    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+ 
++#ifdef HAVE_SYS_SHM_H
+    if (x11_xcb_display_supports_xshm(dri2_dpy->conn, NULL)) {
+       dri2_dpy->loader_extensions = swrast_loader_shm_extensions;
+-   } else {
++   } else
++#endif
++   {
+       dri2_dpy->loader_extensions = swrast_loader_extensions;
+    }
+ 

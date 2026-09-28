@@ -1,0 +1,26 @@
+Phoenix-RTOS: make SDL's pthread detection (CheckPTHREAD) succeed.
+
+libphoenix integrates pthreads into the libc, so there is no separate
+-lpthread to link, and the aarch64-phoenix gcc rejects the "-pthread" driver
+flag (it is not a recognized option). SDL's default detection tries one of
+those and the link/compile test fails, so HAVE_SDL_THREADS is never set and
+the build stops at "Threads ... may not be disabled". Adding a PHOENIX case
+that uses no extra pthread flags lets the pthread_attr_init() probe pass.
+
+Upstreamable as-is (guarded by the PHOENIX cmake variable this port sets).
+
+--- a/cmake/sdlchecks.cmake	2024-07-29 16:22:29.000000000 +0200
++++ b/cmake/sdlchecks.cmake	2026-08-04 22:44:56.587048110 +0200
+@@ -938,7 +938,11 @@
+ # PTHREAD_LIBS
+ macro(CheckPTHREAD)
+   if(SDL_THREADS AND SDL_PTHREADS)
+-    if(ANDROID)
++    if(PHOENIX)
++      # Phoenix-RTOS: pthreads are integrated into libphoenix (the libc); there
++      # is no separate -lpthread to link and gcc rejects the -pthread driver
++      # flag. No extra compile/link flags are needed.
++    elseif(ANDROID)
+       # the android libc provides built-in support for pthreads, so no
+       # additional linking or compile flags are necessary
+     elseif(LINUX)

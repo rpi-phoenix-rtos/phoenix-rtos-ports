@@ -1,0 +1,46 @@
+From 265041631ebfdf28799320177ecf20c6bd58356f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sat, 22 Aug 2026 22:55:27 +0200
+Subject: [PATCH 5/7] u_vbuf: NULL-check the translate object (fix aarch64/V3D
+ crash on unsupported format)
+
+u_vbuf_translate_buffers() used the translate object from translate_cache_find()
+without checking it. translate_generic_create() can return NULL (e.g. a
+pure-integer input with an illegal int->output combo, or a CALLOC failure).
+Upstream never checks because x86 has translate_sse covering all formats; on
+aarch64 (Phoenix-RTOS RPi4 / V3D) only translate_generic exists, so an
+unsupported combo yields NULL and the subsequent tr->set_buffer()/tr->run()
+dereferenced NULL -> SIGSEGV (owner HW: quake3 crash mid-combat, far=0x3a0,
+u_vbuf_translate_begin). Return PIPE_ERROR instead; the caller already treats a
+translate failure as "skip this draw's translate" (debug_warn_once + goto out),
+so the game continues instead of crashing.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+(cherry picked from commit f342ce502820f346a515b151911740961b2a7241)
+---
+ src/gallium/auxiliary/util/u_vbuf.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/src/gallium/auxiliary/util/u_vbuf.c b/src/gallium/auxiliary/util/u_vbuf.c
+index 882f683e2a3..f6c64334d4c 100644
+--- a/src/gallium/auxiliary/util/u_vbuf.c
++++ b/src/gallium/auxiliary/util/u_vbuf.c
+@@ -468,6 +468,18 @@ u_vbuf_translate_buffers(struct u_vbuf *mgr, struct translate_key *key,
+    /* Get a translate object. */
+    tr = translate_cache_find(mgr->translate_cache, key);
+ 
++   /* translate_cache_find() -> translate_create() -> translate_generic_create()
++    * can return NULL — e.g. for a pure-integer input format with an illegal
++    * int->output combo (is_legal_int_format_combo). Upstream never checks because
++    * on x86 translate_sse covers everything; on aarch64 (Phoenix-RTOS RPi4/V3D)
++    * only translate_generic exists, so an unsupported combo yields NULL and the
++    * unchecked tr->set_buffer()/tr->run() below dereferenced it -> crash (owner HW:
++    * quake3 SIGSEGV mid-combat, u_vbuf_translate_begin, far=0x3a0). Fail the
++    * translate cleanly instead; the caller (u_vbuf_translate_begin) treats a
++    * failure as "skip this draw's translate" rather than crashing. */
++   if (!tr)
++      return PIPE_ERROR;
++
+    /* Map buffers we want to translate. */
+    mask = vb_mask;
+    while (mask) {

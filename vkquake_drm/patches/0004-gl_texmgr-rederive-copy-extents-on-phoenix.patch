@@ -1,0 +1,47 @@
+vkQuake: re-derive each texture-copy region's extent at the point of use (#29, Phoenix only).
+
+Taken unchanged from the vkquake port (its gl_texmgr.c hunk, `#if defined(__phoenix__)`). On the
+old lane the regions' imageExtent reached the driver as 0x1x1; the hunk overwrites every
+region with the size upstream computes (texture size >> mip level, floored at 1; depth 1), so
+when the values are already correct it changes nothing. Kept for the first new-lane cycle so
+a black-texture result cannot be this old defect again; a candidate for removal once
+vkquake-drm has rendered textured frames without it (one A/B cycle).
+
+--- a/Quake/gl_texmgr.c
++++ b/Quake/gl_texmgr.c
+@@ -1315,6 +1315,35 @@ static void TexMgr_LoadImage32 (gltexture_t *glt, unsigned *data)
+ 	image_memory_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+ 	vkCmdPipelineBarrier (command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
+ 
++#if defined(__phoenix__)
++	/* #29 FIX: on the Phoenix/aarch64 build the region imageExtent reaches the driver as 0x1x1
++	 * regardless of texture size (width never lands as built — observed for every texture, 2x2
++	 * and 64x64 alike, so it is not a mipwidth value). Re-derive each region's extent from the
++	 * authoritative glt dimensions at point-of-use, just before the copy: width/height = the
++	 * texture size shifted down by the region's own mip level (floored at 1), depth = 1. This
++	 * overwrites whatever bad value the build left, so conchars/whitetexture/bluenoise upload
++	 * their real pixels instead of a zero-area no-op. (Non-cube path; cube layers all share the
++	 * base mip extent.) */
++	{
++		uint32_t n_regions = (uint32_t)(num_mips * (is_cube ? 6 : 1));
++		for (uint32_t ri = 0; ri < n_regions; ri++) {
++			/* Derive the mip level from the loop index, NOT regions[ri].imageSubresource.mipLevel:
++			 * the build assigns mipLevel = region index sequentially (mipLevel = num_regions in the
++			 * mipmap loop), so lvl == ri is authoritative — and since the premise is that regions[]
++			 * is being corrupted, we must not read any field back from the array we are repairing
++			 * (a clobbered mipLevel would shift width to 1 and keep single-region textures broken). */
++			uint32_t lvl = is_cube ? 0u : ri;
++			uint32_t w = glt->width >> lvl;
++			uint32_t h = glt->height >> lvl;
++			regions[ri].imageExtent.width  = w ? w : 1u;
++			regions[ri].imageExtent.height = h ? h : 1u;
++			regions[ri].imageExtent.depth  = 1u;
++		}
++		if (getenv ("VKQ_TEXDBG"))
++		fprintf (stderr, "vkq-tex-fix: '%s' region0 extent now %dx%dx%d\n", glt->name,
++			regions[0].imageExtent.width, regions[0].imageExtent.height, regions[0].imageExtent.depth);
++	}
++#endif
+ 	vkCmdCopyBufferToImage (command_buffer, staging_buffer, glt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, num_mips * (is_cube ? 6 : 1), regions);
+ 
+ 	image_memory_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;

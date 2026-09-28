@@ -1,0 +1,166 @@
+libdrm-phoenix 0002: xf86drm.c: Phoenix backend hooks; open_memstream fallback
+
+- drmIoctl(): on __phoenix__ every request goes to drm_phoenix_ioctl(), which
+  marshals it to the node's userspace server (rpi4-kms / rpi4-v3d-async).
+- drmWaitVBlank() is the one public entry that calls ioctl() directly instead
+  of drmIoctl(); on __phoenix__ it goes through drmIoctl() like every other.
+- Device identity (no sysfs, no DRM major): drmGetDevices2, drmGetDevice2,
+  drmGetDeviceFromDevId, drmGetNodeTypeFromDevId, drmGetNodeTypeFromFd,
+  drmGetDeviceNameFromFd[2], drmGetMinorNameForFD (-> drmGet{Primary,Render}-
+  DeviceNameFromFd) and drmOpenMinor (-> drmOpen*, drmAvailable) each gain one
+  __phoenix__ branch calling the backend (xf86drm_phoenix.h).
+- meson already computes HAVE_OPEN_MEMSTREAM but nothing checked it: without
+  open_memstream the two format-modifier name printers now fail soft (they
+  return NULL on any open_memstream failure already) instead of not compiling.
+Base: upstream libdrm b97cbde. MIT.
+
+diff --git a/xf86drm.c b/xf86drm.c
+index 07dec49..309fb34 100644
+--- a/xf86drm.c
++++ b/xf86drm.c
+@@ -59,6 +59,22 @@
+ #include "xf86drm.h"
+ #include "libdrm_macros.h"
+ #include "drm_fourcc.h"
++#if defined(__phoenix__)
++#include "xf86drm_phoenix.h"
++#endif
++
++#if !HAVE_OPEN_MEMSTREAM
++/* No POSIX.1-2008 open_memstream (Phoenix-RTOS today): the two format-modifier
++ * name printers that use it fail soft, exactly as on an open_memstream error. */
++static FILE *drm_no_open_memstream(char **bufp, size_t *sizep)
++{
++    (void)bufp;
++    (void)sizep;
++    errno = ENOSYS;
++    return NULL;
++}
++#define open_memstream drm_no_open_memstream
++#endif
+ 
+ #include "util_math.h"
+ 
+@@ -673,6 +689,10 @@ drmIoctl(int fd, unsigned long request, void *arg)
+ {
+     int ret;
+ 
++#if defined(__phoenix__)
++    /* No DRM kernel driver: marshal the request to the node's server. */
++    return drm_phoenix_ioctl(fd, request, arg);
++#endif
+     do {
+         ret = ioctl(fd, request, arg);
+     } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+@@ -945,6 +965,10 @@ static int drmOpenMinor(int minor, int create, int type)
+     char buf[DRM_NODE_NAME_MAX];
+     const char *dev_name = drmGetDeviceName(type);
+ 
++#if defined(__phoenix__)
++    (void)create;
++    return drm_phoenix_open_minor(minor, type);
++#endif
+     if (create)
+         return drmOpenDevice(makedev(DRM_MAJOR, minor), minor, type);
+ 
+@@ -2663,7 +2687,11 @@ drm_public int drmWaitVBlank(int fd, drmVBlankPtr vbl)
+     timeout.tv_sec++;
+ 
+     do {
++#if defined(__phoenix__)
++       ret = drmIoctl(fd, DRM_IOCTL_WAIT_VBLANK, vbl);   /* the one raw ioctl() that must be marshalled */
++#else
+        ret = ioctl(fd, DRM_IOCTL_WAIT_VBLANK, vbl);
++#endif
+        vbl->request.type &= ~DRM_VBLANK_RELATIVE;
+        if (ret && errno == EINTR) {
+            clock_gettime(CLOCK_MONOTONIC, &cur);
+@@ -3264,7 +3292,9 @@ drm_public int drmIsMaster(int fd)
+ 
+ drm_public char *drmGetDeviceNameFromFd(int fd)
+ {
+-#ifdef __FreeBSD__
++#if defined(__phoenix__)
++    return drm_phoenix_device_name_from_fd(fd);
++#elif defined(__FreeBSD__)
+     struct stat sbuf;
+     int maj, min;
+     int nodetype;
+@@ -3331,6 +3361,9 @@ drm_public int drmGetNodeTypeFromFd(int fd)
+     struct stat sbuf;
+     int maj, min, type;
+ 
++#if defined(__phoenix__)
++    return drm_phoenix_node_type_from_fd(fd);
++#endif
+     if (fstat(fd, &sbuf))
+         return -1;
+ 
+@@ -3392,7 +3425,9 @@ drm_public int drmCloseBufferHandle(int fd, uint32_t handle)
+ 
+ static char *drmGetMinorNameForFD(int fd, int type)
+ {
+-#ifdef __linux__
++#if defined(__phoenix__)
++    return drm_phoenix_minor_name_for_fd(fd, type);
++#elif defined(__linux__)
+     DIR *sysdir;
+     struct dirent *ent;
+     struct stat sbuf;
+@@ -4687,6 +4722,12 @@ drm_public int drmGetDeviceFromDevId(dev_t find_rdev, uint32_t flags, drmDeviceP
+     int maj, min;
+     int ret, i, node_count;
+ 
++#if defined(__phoenix__)
++    /* dev_t = the node server's port (stat's st_rdev on Phoenix), no sysfs. */
++    if (drm_device_validate_flags(flags))
++        return -EINVAL;
++    return drm_phoenix_get_device_from_devid(find_rdev, flags, device);
++#endif
+     if (drm_device_validate_flags(flags))
+         return -EINVAL;
+ 
+@@ -4749,6 +4790,9 @@ drm_public int drmGetNodeTypeFromDevId(dev_t devid)
+ {
+     int maj, min, node_type;
+ 
++#if defined(__phoenix__)
++    return drm_phoenix_node_type_from_devid(devid);
++#endif
+     maj = major(devid);
+     min = minor(devid);
+ 
+@@ -4779,6 +4823,9 @@ drm_public int drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
+ {
+     struct stat sbuf;
+ 
++#if defined(__phoenix__)
++    return drm_phoenix_get_device2(fd, flags, device);
++#endif
+     if (fd == -1)
+         return -EINVAL;
+ 
+@@ -4830,6 +4877,12 @@ drm_public int drmGetDevices2(uint32_t flags, drmDevicePtr devices[],
+     struct dirent *dent;
+     int ret, i, node_count, device_count;
+ 
++#if defined(__phoenix__)
++    /* No sysfs: a static list of the two platform devices (vc4 display, v3d render). */
++    if (drm_device_validate_flags(flags))
++        return -EINVAL;
++    return drm_phoenix_get_devices2(flags, devices, max_devices);
++#endif
+     if (drm_device_validate_flags(flags))
+         return -EINVAL;
+ 
+@@ -4896,7 +4949,9 @@ drm_public int drmGetDevices(drmDevicePtr devices[], int max_devices)
+ 
+ drm_public char *drmGetDeviceNameFromFd2(int fd)
+ {
+-#ifdef __linux__
++#if defined(__phoenix__)
++    return drm_phoenix_device_name_from_fd(fd);
++#elif defined(__linux__)
+     struct stat sbuf;
+     char path[PATH_MAX + 1], *value;
+     unsigned int maj, min;

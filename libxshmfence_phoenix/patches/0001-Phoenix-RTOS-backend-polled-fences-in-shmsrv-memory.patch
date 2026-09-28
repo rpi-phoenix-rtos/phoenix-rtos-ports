@@ -1,0 +1,315 @@
+From a4ea17d85fd3090f319f20bc6cb3b5759cab4b85 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 09:24:33 +0200
+Subject: [PATCH] Phoenix-RTOS backend: polled fences in shmsrv memory
+
+Phoenix-RTOS has no futex, and libphoenix's mutexes and condition variables
+are per-process kernel handles (pthread_*attr_setpshared(PROCESS_SHARED)
+fails with EINVAL), so neither existing backend can synchronise the X server
+with a DRI3 client. xshmfence_alloc_shm() even ignores the pthread backend's
+failing init, so the fence silently never works.
+
+With HAVE_PHOENIX_FENCE a fence is one 32-bit word: trigger, reset and query
+are atomic accesses (release/acquire), await polls with a bounded back-off
+(spin, sched_yield, then 50..1000 us sleeps). Only clients await; the X
+server triggers, resets and queries.
+
+The word must be in memory both processes see coherently. The backing object
+comes from shmsrv (/shm, the new GPU lane's memfd_create stand-in: pages
+exported with memExport are the same physical pages in every process). A
+SHMDIR file stays the fallback, with a warning: the Phoenix kernel keys a
+file's pages by the file id, which the RAM file system reuses, so an
+unlinked fence file can alias a later one.
+
+The build compiles xshmfence_alloc.c and xshmfence_phoenix.c directly with
+-DHAVE_PHOENIX_FENCE=1 (no configure change); shm_proto.h comes from the
+shmsrv source directory.
+---
+ src/xshmfence_alloc.c   |   4 +
+ src/xshmfence_phoenix.c | 166 ++++++++++++++++++++++++++++++++++++++++
+ src/xshmfence_phoenix.h |  71 +++++++++++++++++
+ src/xshmfenceint.h      |   4 +
+ 4 files changed, 245 insertions(+)
+ create mode 100644 src/xshmfence_phoenix.c
+ create mode 100644 src/xshmfence_phoenix.h
+
+diff --git a/src/xshmfence_alloc.c b/src/xshmfence_alloc.c
+index 932adb9..3688df0 100644
+--- a/src/xshmfence_alloc.c
++++ b/src/xshmfence_alloc.c
+@@ -74,6 +74,10 @@ xshmfence_alloc_shm(void)
+ 	int	flags;
+ #endif
+ 
++#if HAVE_PHOENIX_FENCE
++	fd = xshmfence_phoenix_alloc_shm();
++	if (fd < 0)
++#endif
+ #if HAVE_MEMFD_CREATE
+ 	fd = memfd_create("xshmfence", MFD_CLOEXEC|MFD_ALLOW_SEALING);
+ 	if (fd < 0)
+diff --git a/src/xshmfence_phoenix.c b/src/xshmfence_phoenix.c
+new file mode 100644
+index 0000000..dec0c71
+--- /dev/null
++++ b/src/xshmfence_phoenix.c
+@@ -0,0 +1,166 @@
++/*
++ * Copyright © 2026 Phoenix Systems
++ *
++ * Permission to use, copy, modify, distribute, and sell this software and its
++ * documentation for any purpose is hereby granted without fee, provided that
++ * the above copyright notice appear in all copies and that both that copyright
++ * notice and this permission notice appear in supporting documentation, and
++ * that the name of the copyright holders not be used in advertising or
++ * publicity pertaining to distribution of the software without specific,
++ * written prior permission.  The copyright holders make no representations
++ * about the suitability of this software for any purpose.  It is provided "as
++ * is" without express or implied warranty.
++ *
++ * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
++ * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
++ * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
++ * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
++ * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
++ * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
++ * OF THIS SOFTWARE.
++ */
++
++#if HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include <sched.h>
++#include <unistd.h>
++
++#include "xshmfenceint.h"
++
++/* See xshmfence_phoenix.h for the design. */
++
++static inline void
++cpu_relax(void)
++{
++#if defined(__aarch64__) || defined(__arm__)
++	__asm__ __volatile__("yield" ::: "memory");
++#elif defined(__x86_64__) || defined(__i386__)
++	__asm__ __volatile__("pause" ::: "memory");
++#else
++	__asm__ __volatile__("" ::: "memory");
++#endif
++}
++
++/**
++ * xshmfence_trigger:
++ * @f: An X fence
++ *
++ * Set @f to triggered. Waiters poll, so there is nobody to wake.
++ *
++ * Return value: 0.
++ **/
++int
++xshmfence_trigger(struct xshmfence *f)
++{
++	__atomic_store_n(&f->v, 1, __ATOMIC_RELEASE);
++	return 0;
++}
++
++/**
++ * xshmfence_await:
++ * @f: An X fence
++ *
++ * Wait for @f to be triggered. If @f is already triggered, this
++ * function returns immediately.
++ *
++ * Return value: 0.
++ **/
++int
++xshmfence_await(struct xshmfence *f)
++{
++	unsigned int n = 0;
++	useconds_t us = XSHMFENCE_POLL_MIN_US;
++
++	while (__atomic_load_n(&f->v, __ATOMIC_ACQUIRE) != 1) {
++		if (n < XSHMFENCE_POLL_SPIN) {
++			cpu_relax();
++		}
++		else if (n < XSHMFENCE_POLL_SPIN + XSHMFENCE_POLL_YIELD) {
++			sched_yield();
++		}
++		else {
++			usleep(us);
++			if (us < XSHMFENCE_POLL_MAX_US) {
++				us *= 2;
++				if (us > XSHMFENCE_POLL_MAX_US)
++					us = XSHMFENCE_POLL_MAX_US;
++			}
++		}
++		if (n < XSHMFENCE_POLL_SPIN + XSHMFENCE_POLL_YIELD)
++			n++;
++	}
++	return 0;
++}
++
++/**
++ * xshmfence_query:
++ * @f: An X fence
++ *
++ * Return value: 1 if @f is triggered, else returns 0.
++ **/
++int
++xshmfence_query(struct xshmfence *f)
++{
++	return __atomic_load_n(&f->v, __ATOMIC_ACQUIRE) == 1;
++}
++
++/**
++ * xshmfence_reset:
++ * @f: An X fence
++ *
++ * Reset @f to untriggered. If @f is already untriggered,
++ * this function has no effect.
++ **/
++void
++xshmfence_reset(struct xshmfence *f)
++{
++	__atomic_store_n(&f->v, 0, __ATOMIC_RELEASE);
++}
++
++#ifdef __phoenix__
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/msg.h>
++
++#include "shm_proto.h"   /* the shmsrv wire protocol (new GPU lane) */
++
++int
++xshmfence_phoenix_alloc_shm(void)
++{
++	static int warned;
++	oid_t oid;
++	msg_t msg;
++	shmsrv_create_req_t req = { .op = SHMSRV_OP_CREATE, .proto = SHMSRV_PROTO };
++	shmsrv_create_rsp_t rsp;
++	char path[32];
++
++	if (lookup(SHMSRV_NS, NULL, &oid) < 0) {
++		if (!warned) {
++			warned = 1;
++			fprintf(stderr, "xshmfence: no shmsrv (" SHMSRV_NS "): falling back to a " SHMDIR
++				" file, which is NOT coherent across processes on Phoenix-RTOS once its id is reused\n");
++		}
++		return -1;
++	}
++	memset(&msg, 0, sizeof(msg));
++	msg.type = mtDevCtl;
++	msg.oid.port = oid.port;
++	msg.oid.id = 0;
++	memcpy(msg.i.raw, &req, sizeof(req));
++	if (msgSend(oid.port, &msg) < 0)
++		return -1;
++	memcpy(&rsp, msg.o.raw, sizeof(rsp));
++	if (rsp.err < 0) {
++		errno = -rsp.err;
++		return -1;
++	}
++	(void)snprintf(path, sizeof(path), SHMSRV_NS "/%u", (unsigned)rsp.id);
++	return open(path, O_RDWR | O_CLOEXEC);
++}
++
++#endif /* __phoenix__ */
+diff --git a/src/xshmfence_phoenix.h b/src/xshmfence_phoenix.h
+new file mode 100644
+index 0000000..4d603bf
+--- /dev/null
++++ b/src/xshmfence_phoenix.h
+@@ -0,0 +1,71 @@
++/*
++ * Copyright © 2026 Phoenix Systems
++ *
++ * Permission to use, copy, modify, distribute, and sell this software and its
++ * documentation for any purpose is hereby granted without fee, provided that
++ * the above copyright notice appear in all copies and that both that copyright
++ * notice and this permission notice appear in supporting documentation, and
++ * that the name of the copyright holders not be used in advertising or
++ * publicity pertaining to distribution of the software without specific,
++ * written prior permission.  The copyright holders make no representations
++ * about the suitability of this software for any purpose.  It is provided "as
++ * is" without express or implied warranty.
++ *
++ * THE COPYRIGHT HOLDERS DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE,
++ * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS, IN NO
++ * EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY SPECIAL, INDIRECT OR
++ * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE,
++ * DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
++ * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE
++ * OF THIS SOFTWARE.
++ */
++
++#ifndef _XSHMFENCE_PHOENIX_H_
++#define _XSHMFENCE_PHOENIX_H_
++
++#include <stdint.h>
++
++/*
++ * Phoenix-RTOS backend. The kernel has no futex and libphoenix's mutexes and
++ * condition variables are per-process kernel handles, so neither the futex nor
++ * the pthread backend can synchronise two processes. A fence is one 32-bit
++ * word in memory both processes map (0 = untriggered, 1 = triggered); trigger,
++ * reset and query are single atomic accesses, await polls with a bounded
++ * back-off (spin, yield, then sleeps of XSHMFENCE_POLL_MIN_US doubling up to
++ * XSHMFENCE_POLL_MAX_US). Only clients await (the X server triggers, resets and
++ * queries), and a client normally awaits a fence the server has already
++ * triggered, so the back-off is rarely entered.
++ *
++ * The word must live in memory that every mapping sees coherently: the backing
++ * object comes from the shmsrv server (/shm, the memfd_create() stand-in of the
++ * new GPU lane), whose pages are the same physical, cached pages in every
++ * process. A /tmp file is not safe on Phoenix-RTOS (the kernel keys a file's
++ * pages by the file id, which the RAM file system reuses), so it is only a
++ * fallback with a warning.
++ */
++
++#ifndef XSHMFENCE_POLL_SPIN
++#define XSHMFENCE_POLL_SPIN   64      /* busy iterations before the first yield */
++#endif
++#ifndef XSHMFENCE_POLL_YIELD
++#define XSHMFENCE_POLL_YIELD  16      /* sched_yield() calls before the first sleep */
++#endif
++#ifndef XSHMFENCE_POLL_MIN_US
++#define XSHMFENCE_POLL_MIN_US 50
++#endif
++#ifndef XSHMFENCE_POLL_MAX_US
++#define XSHMFENCE_POLL_MAX_US 1000
++#endif
++
++struct xshmfence {
++    int32_t     v;
++};
++
++/* ftruncate() zero-fills: a fresh fence is untriggered, nothing to write. */
++#define xshmfence_init(fd)
++
++/* A descriptor of a fresh shmsrv object (size 0), or -1 when no shmsrv runs. */
++int
++xshmfence_phoenix_alloc_shm(void);
++
++#endif /* _XSHMFENCE_PHOENIX_H_ */
+diff --git a/src/xshmfenceint.h b/src/xshmfenceint.h
+index 178cbdd..3bb9b62 100644
+--- a/src/xshmfenceint.h
++++ b/src/xshmfenceint.h
+@@ -36,4 +36,8 @@
+ #include "xshmfence_pthread.h"
+ #endif
+ 
++#if HAVE_PHOENIX_FENCE
++#include "xshmfence_phoenix.h"
++#endif
++
+ #endif /* _XSHMFENCEINT_H_ */
+-- 
+2.53.0
+

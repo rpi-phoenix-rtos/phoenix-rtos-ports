@@ -1,0 +1,53 @@
+From a7ef69783974a3ce69ea7809b3dee700557405d1 Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 04:40:36 +0200
+Subject: [PATCH 4/8] os: enlarge accepted clients' receive buffer on
+ Phoenix-RTOS
+
+Phoenix-RTOS AF_UNIX sockets default to a one-page receive ring, so large
+requests (PutImage, big RENDER traps/glyph uploads) cross in thousands of
+blocking 4 KiB round trips; measured with the Phoenix kdrive server: 512
+server reads per 640x480 frame, 402 ms.  Set SO_RCVBUF right after accept(),
+before any client byte arrives, stepping down from 256 KiB to 64 KiB.
+
+Same change as the Phoenix kdrive server carries
+(xorg-server-21.1.24-os-client-rcvbuf.patch), limited to __phoenix__.
+---
+ os/connection.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/os/connection.c b/os/connection.c
+index 35e2a4d..b0a748a 100644
+--- a/os/connection.c
++++ b/os/connection.c
+@@ -687,6 +687,27 @@ EstablishNewConnections(int curconn, int ready, void *data)
+ 
+     _XSERVTransSetOption(new_trans_conn, TRANS_NONBLOCKING, 1);
+ 
++#ifdef __phoenix__
++    /*
++     * Phoenix-RTOS AF_UNIX sockets start with a one-page (4 KiB) receive ring
++     * and a stream write copies only what fits, so a 1.2 MB PutImage crosses in
++     * ~300 blocking fill/drain round trips.  SO_RCVBUF sizes this socket's own
++     * ring (the one the client writes into); it must be set before any byte
++     * arrives because the resize reinitialises the ring.  The kernel clamps
++     * and rounds; a failed large reallocation leaves the one-page default, so
++     * step down.  Best effort: without it the server is slower, not broken.
++     */
++    {
++        static const int rcvbufs[] = { 262144, 65536 };
++        unsigned int n;
++
++        for (n = 0; n < sizeof(rcvbufs) / sizeof(rcvbufs[0]); n++)
++            if (setsockopt(newconn, SOL_SOCKET, SO_RCVBUF,
++                           &rcvbufs[n], sizeof(rcvbufs[n])) == 0)
++                break;
++    }
++#endif
++
+     if (trans_conn->flags & TRANS_NOXAUTH)
+         new_trans_conn->flags = new_trans_conn->flags | TRANS_NOXAUTH;
+ 
+-- 
+2.53.0
+

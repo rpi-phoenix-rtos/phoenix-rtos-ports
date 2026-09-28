@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 10:10:00 +0200
+Subject: [PATCH] gbm/dri: add the xcb include paths when the X11 platform is
+ built
+
+gbm_dri.c includes loader_dri_helper.h, and loader_dri_helper_screen.h
+includes <xcb/xcb.h>, <xcb/dri3.h> and <xcb/present.h> under
+HAVE_X11_PLATFORM, but the dri_gbm target has no xcb dependency: the build
+works only where the xcb headers sit in the compiler's default include path
+(/usr/include). A cross build with xcb in its own prefix fails. Add the three
+dependencies' compile arguments (headers only, nothing is linked).
+---
+ src/gbm/backends/dri/meson.build | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/gbm/backends/dri/meson.build b/src/gbm/backends/dri/meson.build
+--- a/src/gbm/backends/dri/meson.build
++++ b/src/gbm/backends/dri/meson.build
+@@ -12,6 +12,15 @@
+   endif
+ endif
+ 
++# gbm_dri.c includes loader_dri_helper.h, which pulls in <xcb/xcb.h>,
++# <xcb/dri3.h> and <xcb/present.h> when the X11 platform is built: add their
++# include paths (headers only), or the build finds them only in /usr/include.
++if with_platform_x11
++  deps_gbm_dri += [dep_xcb.partial_dependency(compile_args : true),
++                   dep_xcb_dri3.partial_dependency(compile_args : true),
++                   dep_xcb_present.partial_dependency(compile_args : true)]
++endif
++
+ library(
+   'dri_gbm',
+   files('gbm_dri.c', 'gbm_driint.h'),
