@@ -500,8 +500,12 @@ typedef struct {
  *   outgoing framebuffer only once it has completed at a vblank).
  *   ns = KMS_IMPORT_NS_KMSBUF: one of this server's own /kmsbuf exports. The
  *   importer's OWN export returns the original handle (DRM; libdrm-phoenix
- *   short-circuits it locally). Another client's export: -EINVAL (not needed by any
- *   current path; a follow-up would alias the BO).
+ *   short-circuits it locally). Another client's PRIME-exported pool BO becomes an
+ *   alias: a new handle of the importer on the same pages, holding one reference on
+ *   the exporter's BO (which keeps its pages and its /kmsbuf name until the alias
+ *   handle is closed and no framebuffer of it is left), memref = the exporter's
+ *   name; again on the same client: the same handle. A BO that was never
+ *   PRIME-exported: -EACCES.
  * Refused at import: -ENOENT (the name is not, or no longer, exported), -EINVAL
  * (wrong port, bad size, pages not physically contiguous: the firmware plane
  * fetches one linear range), -ENOSPC (no BO slot).

@@ -1,0 +1,43 @@
+vkQuake: default vid_vsync to 2 on Phoenix (V3D 4.2), a three-image FIFO swapchain.
+
+NEW for vkquake-drm (docs/gpu-new-lane/vkquake-perf.md, "Why f2 reads exactly 30.00 fps" and
+"Result -- mig-vkq-g, mig-vkq-g-water, pace-vkq-g"). Mesa's display WSI offers FIFO only
+(wsi_display_surface_get_present_modes), so upstream's default vid_vsync 0, which asks for
+IMMEDIATE or MAILBOX, finds neither and presents FIFO anyway; on this stack vid_vsync only
+chooses the image count (minImageCount 3 for vid_vsync >= 2, else 2) and whether present-wait2
+caps the queue at vid_maxframelatency (vid_vsync > 0). With two images an image goes back to
+the application only when the other image's flip completes, so vkAcquireNextImageKHR returns
+at the vblank that shows the previous frame, the frame's single vkQueueSubmit starts there,
+and a GPU frame of ~20 ms (perf-vkq-f2: 19.9 ms) flips on every second vblank: exactly
+30.00 fps, acquire waiting 10.8 ms per frame.
+
+Measured on the same spawn view, same binary (patches 0001-0009), only `+vid_vsync 2` added:
+mig-vkq-g 29.71 fps (median, n=111), kmsbuf id=1,2, acquire ~10.8 ms, pwait 0 calls ->
+pace-vkq-g 44.21 fps (median, n=113, max 44.48), kmsbuf id=1,2,3, acquire ~32 us, pwait
+~1 call/frame at ~90 us (the latency cap is not the limiter), 0 compute jobs, same picture,
+no tearing. vid_vsync 2 is chosen rather than raising minImageCount for vid_vsync 0 because
+it is the configuration that was measured, it keeps upstream's meaning (the menu's "triple
+buffer") and the runtime switch: vid_vsync is CVAR_ARCHIVE as upstream and its callback
+(VID_VsyncChanged_f) recreates the swapchain, so `vid_vsync 0` or `1` still selects two
+images at run time.
+
+--- a/Quake/gl_vidsdl.c
++++ b/Quake/gl_vidsdl.c
+@@ -109,7 +109,17 @@
+ static cvar_t vid_width = {"vid_width", "1280", CVAR_ARCHIVE};		  // QuakeSpasm, was 640
+ static cvar_t vid_height = {"vid_height", "720", CVAR_ARCHIVE};		  // QuakeSpasm, was 480
+ static cvar_t vid_refreshrate = {"vid_refreshrate", "60", CVAR_ARCHIVE};
++#if defined(__phoenix__)
++/* Phoenix-RTOS: the Raspberry Pi 4's display WSI offers FIFO only, so every vid_vsync value
++ * presents under vsync and the value only picks the image count. With two images an acquire
++ * returns at the vblank that shows the previous frame and the GPU can start only then, so a
++ * ~20 ms GPU frame flips on every second vblank (30 fps). Default to 2 (the menu's "triple
++ * buffer"): three FIFO images, and present-wait2 caps the queue at vid_maxframelatency.
++ * vid_vsync 0 or 1 still selects two images (VID_VsyncChanged_f recreates the swapchain). */
++static cvar_t vid_vsync = {"vid_vsync", "2", CVAR_ARCHIVE};
++#else
+ static cvar_t vid_vsync = {"vid_vsync", "0", CVAR_ARCHIVE};
++#endif
+ static cvar_t vid_maxframelatency = {"vid_maxframelatency", "2", CVAR_ARCHIVE};		// max frames queued for display under vsync, 0 = uncapped
+ static cvar_t vid_desktopfullscreen = {"vid_desktopfullscreen", "0", CVAR_ARCHIVE}; // QuakeSpasm
+ static cvar_t vid_borderless = {"vid_borderless", "0", CVAR_ARCHIVE};				// QuakeSpasm

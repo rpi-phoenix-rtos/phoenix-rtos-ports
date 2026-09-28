@@ -1,0 +1,30 @@
+vkQuake: default r_waterwarpcompute to 0 on Phoenix (V3D 4.2), the raster warp path.
+
+NEW for vkquake-drm (docs/gpu-new-lane/vkquake-perf.md, "Result -- perf-vkq-e"). With
+r_waterwarpcompute 1 (upstream's default) every visible warp texture (water, slime, lava,
+teleporter) is redrawn each frame by cs_tex_warp: 64x64 workgroups of 8x8 = one texture
+sample and one imageStore per texel of a 512x512 image. On V3D 4.2 that dispatch measured
+4.77 ms (render server CSD profile, 11 509 dispatches, all in the 4-8 ms bucket), about 3
+per frame at the start map: 14.6 ms of GPU per frame, 75 % of all compute. The raster path
+(R_RasterWarpTexture) draws the same image through the tile buffer; perf-vkq-d measured it
+at +3 render jobs and +1.9 ms of render per frame for the same textures. r_waterwarpcompute
+is CVAR_ARCHIVE and `r_waterwarpcompute 1` still selects the compute path at run time.
+
+--- a/Quake/gl_warp.c
++++ b/Quake/gl_warp.c
+@@ -27,7 +27,15 @@
+ 
+ cvar_t r_waterquality = {"r_waterquality", "8", CVAR_NONE};
+ cvar_t r_waterwarp = {"r_waterwarp", "1", CVAR_ARCHIVE};
++#if defined(__phoenix__)
++/* Phoenix-RTOS: the only Vulkan device is the Raspberry Pi 4's V3D 4.2 (v3dv). The compute warp
++ * writes each 512x512 warp image texel by texel through TMU image stores, ~4.8 ms per texture per
++ * frame on V3D; the raster warp draws the same image through the tile buffer for ~0.6 ms. Default
++ * to the raster path; r_waterwarpcompute 1 still selects compute. */
++cvar_t r_waterwarpcompute = {"r_waterwarpcompute", "0", CVAR_ARCHIVE};
++#else
+ cvar_t r_waterwarpcompute = {"r_waterwarpcompute", "1", CVAR_ARCHIVE};
++#endif
+ 
+ float turbsin[] = {
+ #include "gl_warp_sin.h"

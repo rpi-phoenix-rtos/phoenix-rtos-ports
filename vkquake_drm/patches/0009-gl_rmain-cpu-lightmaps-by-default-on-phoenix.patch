@@ -1,0 +1,42 @@
+vkQuake: default r_gpulightmapupdate to 0 on Phoenix (V3D 4.2), the CPU lightmap path.
+
+NEW for vkquake-drm (docs/gpu-new-lane/vkquake-perf.md, "Result -- perf-vkq-f / perf-vkq-f2").
+With r_gpulightmapupdate 1 (upstream's default) every dirty lightmap region is relit by one
+update_lightmap compute dispatch. On V3D 4.2 Mesa's v3d compiler builds that shader for 2 QPU
+threads, not 4 (CSD CFG5 THREADING clear, "thr4=0" in the render server's CSD profile; the
+V3D_DEBUG=shaderdb lines of perf-vkq-f list every loop-bearing compute variant at 2 threads,
+0 spills), and one dispatch measured 10.7 ms of GPU time (perf-vkq-e: 10.67 ms, max 21.5;
+perf-vkq-f: 5127 dispatches, 10.62 ms). The dispatch count follows lightstyle changes and the
+frame rate, so the cost grows as the rest of the frame gets cheaper: after patch 0008 removed
+the warp compute, the lightmap shader ran 2.8x as often. The CPU path measured +11.6 fps on
+the same spawn view (perf-vkq-f 18.07 -> perf-vkq-f2 29.70, the only change
+`+r_gpulightmapupdate 0`, 0 compute jobs left, same picture); f2 sits at the 2-image FIFO
+swapchain's every-second-vblank rate, so +11.6 is a lower bound.
+
+What the CPU path changes besides where lightmaps are built (all upstream behaviour for
+r_gpulightmapupdate 0): R_BuildLightMap + R_UploadLightmaps each frame, R_PushDlights on the
+CPU, no indirect-draw culling compute (gl_rmain.c R_RenderView `indirect`), no frame tasks
+(gl_screen.c SCR_UpdateScreen `use_tasks`), and lightstyles step at 10 Hz instead of being
+interpolated (gl_rlight.c R_AnimateLight ignores r_lerplightstyles), as in classic Quake.
+r_gpulightmapupdate is CVAR_NONE (never archived) and read every frame, so
+`r_gpulightmapupdate 1` still selects the GPU path at run time.
+
+--- a/Quake/gl_rmain.c
++++ b/Quake/gl_rmain.c
+@@ -133,7 +133,16 @@
+
+ cvar_t r_scale = {"r_scale", "1", CVAR_ARCHIVE};
+
++#if defined(__phoenix__)
++/* Phoenix-RTOS: the only Vulkan device is the Raspberry Pi 4's V3D 4.2 (v3dv). Mesa's v3d
++ * compiler builds the update_lightmap compute shader for 2 QPU threads, not 4, and one dispatch
++ * per dirty lightmap region costs ~10.7 ms of GPU time. Default to the CPU path (R_BuildLightMap
++ * + upload), which also turns off the indirect-draw culling compute; r_gpulightmapupdate 1
++ * still selects the GPU path. */
++cvar_t r_gpulightmapupdate = {"r_gpulightmapupdate", "0", CVAR_NONE};
++#else
+ cvar_t r_gpulightmapupdate = {"r_gpulightmapupdate", "1", CVAR_NONE};
++#endif
+ cvar_t r_rtshadows = {"r_rtshadows", "2", CVAR_ARCHIVE};
+
+ cvar_t r_tasks = {"r_tasks", "1", CVAR_NONE};
