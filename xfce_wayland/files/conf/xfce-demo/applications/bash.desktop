@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Bash
+Comment=A shell in a terminal
+Exec=/bin/foot-2 -e /bin/bash
+Icon=utilities-terminal
+Terminal=false
+Categories=System;

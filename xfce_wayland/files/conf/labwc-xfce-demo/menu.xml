@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  labwc root menu of the XFCE demo session (M7 m7i-xfce-demo): stage as
+  /etc/xdg/labwc-xfce-demo/menu.xml. Opens on a right click on the desktop background
+  when xfdesktop does not claim the click. Log Out ends the session in order (as the
+  panel's button); Exit stops labwc at once.
+-->
+<openbox_menu>
+
+<menu id="client-menu">
+  <item label="Minimize"><action name="Iconify" /></item>
+  <item label="Maximize"><action name="ToggleMaximize" /></item>
+  <item label="Fullscreen"><action name="ToggleFullscreen" /></item>
+  <item label="Decorations"><action name="ToggleDecorations" /></item>
+  <item label="Always on Top"><action name="ToggleAlwaysOnTop" /></item>
+  <item label="Close"><action name="Close" /></item>
+</menu>
+
+<menu id="root-menu">
+  <item label="Run…"><action name="Execute" command="/usr/lib/xfce-demo/bin/xfce4-appfinder" /></item>
+  <item label="Terminal"><action name="Execute" command="/bin/foot-2" /></item>
+  <item label="Files"><action name="Execute" command="/usr/lib/xfce-demo/bin/thunar" /></item>
+  <item label="Settings"><action name="Execute" command="/usr/lib/xfce-demo/bin/xfce4-settings-manager" /></item>
+  <separator />
+  <item label="Midnight Commander"><action name="Execute" command="/bin/foot-2 -e /bin/mc" /></item>
+  <separator />
+  <item label="Reconfigure"><action name="Reconfigure" /></item>
+  <item label="Log Out"><action name="Execute" command="/usr/lib/xfce-demo/bin/loginctl terminate-session" /></item>
+  <item label="Exit"><action name="Exit" /></item>
+</menu>
+
+</openbox_menu>
