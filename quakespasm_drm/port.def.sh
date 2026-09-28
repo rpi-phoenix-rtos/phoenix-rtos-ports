@@ -25,7 +25,7 @@
 	conflicts="quakespasm_drm!=${version}"
 	depends="sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/quakespasm-drm into the image
+	# rootfs: install /usr/bin/quakespasm-drm into the image, also as /usr/bin/quakespasm
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -156,5 +156,8 @@ p_build() {
 	install -m 644 "${QS}.map" "${p}/share/quakespasm-drm/"
 	if b_use rootfs; then
 		b_install "${p}/bin/${qs_name}" /usr/bin
+		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
+		# image). P4 gives the programs the plain names themselves.
+		install -m 755 "${p}/bin/${qs_name}" "${PREFIX_FS}/root/usr/bin/quakespasm"
 	fi
 }

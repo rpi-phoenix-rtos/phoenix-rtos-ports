@@ -27,7 +27,8 @@
 	conflicts="vkquake_drm!=${version}"
 	depends="sdl2_kmsdrm[vulkan] mesa_drm[vulkan] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/vkquake-drm and its launcher /bin/vkq-drm into the image
+	# rootfs: install /usr/bin/vkquake-drm and its launcher /bin/vkq-drm into the image,
+	# the launcher also as /usr/bin/vkquake
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -244,5 +245,8 @@ EOF
 	if b_use rootfs; then
 		b_install "${pp}/bin/vkquake-drm" /usr/bin
 		b_install "${pp}/bin/vkq-drm" /bin
+		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
+		# image). P4 gives the programs the plain names themselves.
+		install -m 755 "${pp}/bin/vkq-drm" "${PREFIX_FS}/root/usr/bin/vkquake"
 	fi
 }

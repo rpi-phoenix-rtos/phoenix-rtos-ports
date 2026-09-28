@@ -26,7 +26,8 @@
 	conflicts="supertuxkart_drm!=${version}"
 	depends="supertuxkart sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib libogg libvorbis mbedtls"
 
-	# rootfs: install /usr/bin/supertuxkart-drm and its launcher /bin/stk-drm into the image
+	# rootfs: install /usr/bin/supertuxkart-drm and its launcher /bin/stk-drm into the image,
+	# the launcher also as /bin/stk
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -319,5 +320,8 @@ p_build() {
 	if b_use rootfs; then
 		b_install "${p}/bin/supertuxkart-$name" /usr/bin
 		b_install "${p}/bin/stk-$name" /bin
+		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
+		# image). P4 gives the programs the plain names themselves.
+		install -m 755 "${p}/bin/stk-$name" "${PREFIX_FS}/root/bin/stk"
 	fi
 }
