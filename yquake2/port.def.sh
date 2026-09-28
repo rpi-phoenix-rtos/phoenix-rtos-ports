@@ -29,6 +29,11 @@
 
 	conflicts=""
 	depends="sdl2"
+	# rootfs: install /usr/bin/yquake2 into the image (the RPI4B_GPU_LEGACY=1 image). Without
+	# it the port only builds: the default image pulls it as a build dependency (yquake2_drm
+	# relinks this port's objects) and ships the *_drm program instead. TODO(TD-24): goes with
+	# the old GPU stack (P3).
+	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
@@ -267,5 +272,7 @@ p_build() {
 		-o "${PREFIX_PROG}/yquake2"
 
 	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/yquake2" "${PREFIX_PROG}/yquake2"
-	b_install "${PREFIX_PROG_TO_INSTALL}/yquake2" /usr/bin
+	if b_use rootfs; then
+		b_install "${PREFIX_PROG_TO_INSTALL}/yquake2" /usr/bin
+	fi
 }

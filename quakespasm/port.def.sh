@@ -28,6 +28,10 @@
 
 	conflicts=""
 	depends="sdl2"
+	# rootfs: install /usr/bin/quakespasm into the image (the RPI4B_GPU_LEGACY=1 image; the
+	# default image ships the *_drm program instead). TODO(TD-24): goes with the old GPU stack
+	# (P3).
+	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
@@ -194,5 +198,7 @@ p_build() {
 		-o "${PREFIX_PROG}/quakespasm"
 
 	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/quakespasm" "${PREFIX_PROG}/quakespasm"
-	b_install "${PREFIX_PROG_TO_INSTALL}/quakespasm" /usr/bin
+	if b_use rootfs; then
+		b_install "${PREFIX_PROG_TO_INSTALL}/quakespasm" /usr/bin
+	fi
 }

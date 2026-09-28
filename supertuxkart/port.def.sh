@@ -34,6 +34,11 @@
 	# listed: STK uses its bundled enet whenever USE_IPV6 is ON (the default), so
 	# the ported enet is not consumed by this configuration.
 	depends="sdl2 libjpeg libpng zlib xorg_fonts curl mbedtls sqlite3 libogg libvorbis libsamplerate harfbuzz"
+	# rootfs: install /usr/bin/supertuxkart into the image (the RPI4B_GPU_LEGACY=1 image).
+	# Without it the port only builds: the default image pulls it as a build dependency
+	# (supertuxkart_drm relinks this port's objects) and ships the *_drm program instead.
+	# TODO(TD-24): goes with the old GPU stack (P3).
+	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
@@ -289,6 +294,8 @@ p_build() {
 	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
 	cp "${elf}" "${PREFIX_PROG}/supertuxkart"
 	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/supertuxkart" "${elf}"
-	b_install "${PREFIX_PROG_TO_INSTALL}/supertuxkart" /usr/bin
+	if b_use rootfs; then
+		b_install "${PREFIX_PROG_TO_INSTALL}/supertuxkart" /usr/bin
+	fi
 	echo ">> [supertuxkart] M3 complete: /usr/bin/supertuxkart linked + installed."
 }
