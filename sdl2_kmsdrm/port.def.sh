@@ -44,6 +44,8 @@
 #   patches/0008        KMSDRM: XRGB8888 scan-out
 #   patches/0009        KMSDRM: submit the frame before waiting for the previous flip
 #                       (frame pacing: quake2-drm 30.00 -> 60.00 fps)
+#   patches/0010        KMSDRM: release the locked GBM buffers before destroying the EGL surface
+#                       (upstream 9cc2f248f5; exit use-after-free in Mesa's release_buffer)
 #   patches/vulkan/0001 (USE vulkan) PHOENIX in SDL_VULKAN's condition + SDL_VIDEO_VULKAN
 #
 # Installs: include/SDL2, lib/libSDL2.a (+ libSDL2main.a), vulkan/{include,lib} (USE vulkan),

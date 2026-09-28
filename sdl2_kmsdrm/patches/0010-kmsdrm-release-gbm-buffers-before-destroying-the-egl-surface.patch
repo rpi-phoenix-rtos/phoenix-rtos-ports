@@ -1,0 +1,63 @@
+KMSDRM: release the locked GBM buffers before destroying the EGL surface.
+
+Backport of upstream SDL commit 9cc2f248f5437daaf090e3ef6afb4f6dc88068ac
+("kmsdrm: Fix order of GBM and EGL teardown", Cameron Gutman, SDL2 branch,
+2026-04-11), unchanged.
+
+KMSDRM_DestroySurfaces() destroyed the EGL surface and only then returned the
+two locked front buffers with gbm_surface_release_buffer(). In Mesa's GBM
+platform the buffer bookkeeping lives in the EGL surface:
+dri2_drm_destroy_surface() frees the dri2_egl_surface and leaves the GBM
+surface's dri_private pointing at it, and release_buffer() reads
+dri_private->color_buffers[] (and clears a `locked` flag in it on a match).
+So every teardown with buffers locked -- any exit or VT switch after two swaps
+-- read and possibly wrote freed memory. With glibc the freed block is
+usually still mapped and the access goes unnoticed; libphoenix's allocator
+unmaps a heap as soon as its last block is freed, and SuperTuxKart's exit
+took a translation fault in release_buffer
+(docs/misc/2026-09-28-stk-scaled-exit-fault.md). Upstream hit the same
+use-after-free in libnvidia-egl-gbm.so.
+
+Release the buffers first, then destroy the EGL surface, then the GBM
+surface. The mid-run recreation through KMSDRM_CreateSurfaces() is not
+affected: it runs before the first swap, with no buffer locked. Not
+Phoenix-specific.
+
+--- a/src/video/kmsdrm/SDL_kmsdrmvideo.c
++++ b/src/video/kmsdrm/SDL_kmsdrmvideo.c
+@@ -1115,17 +1115,6 @@
+     }
+ 
+     /***************************/
+-    /* Destroy the EGL surface */
+-    /***************************/
+-
+-    SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+-
+-    if (windata->egl_surface != EGL_NO_SURFACE) {
+-        SDL_EGL_DestroySurface(_this, windata->egl_surface);
+-        windata->egl_surface = EGL_NO_SURFACE;
+-    }
+-
+-    /***************************/
+     /* Destroy the GBM buffers */
+     /***************************/
+ 
+@@ -1140,6 +1129,17 @@
+     }
+ 
+     /***************************/
++    /* Destroy the EGL surface */
++    /***************************/
++
++    SDL_EGL_MakeCurrent(_this, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++
++    if (windata->egl_surface != EGL_NO_SURFACE) {
++        SDL_EGL_DestroySurface(_this, windata->egl_surface);
++        windata->egl_surface = EGL_NO_SURFACE;
++    }
++
++    /***************************/
+     /* Destroy the GBM surface */
+     /***************************/
+ 
