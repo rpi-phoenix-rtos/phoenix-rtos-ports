@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  xfce4-panel layout on Phoenix-RTOS (M7 m7h-xfce): stage as
+  /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml.
+  configver = the panel's XFCE4_PANEL_CONFIG_VERSION (2), so the panel does not spawn its
+  migrate helper on the first start (another 17 MB GTK program; it would copy
+  /etc/xdg/xfce4/panel/default.xml). One panel at the top edge (layer-shell): the
+  applications menu, launchers for foot and Thunar, the window buttons
+  (libxfce4windowing: wlr-foreign-toplevel), a spacer, the clock. Plugins that need
+  X11 or an XFCE session manager are left out (systray = StatusNotifier only here,
+  pager needs workspaces, actions calls xfce4-session-logout).
+-->
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="dark-mode" type="bool" value="false"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="icon-size" type="uint" value="16"/>
+      <property name="size" type="uint" value="30"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+        <value type="int" value="5"/>
+        <value type="int" value="6"/>
+        <value type="int" value="7"/>
+        <value type="int" value="8"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu"/>
+    <property name="plugin-2" type="string" value="separator">
+      <property name="style" type="uint" value="1"/>
+    </property>
+    <property name="plugin-3" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="/usr/share/applications/foot.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-4" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="/usr/share/applications/thunar.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-5" type="string" value="separator">
+      <property name="style" type="uint" value="1"/>
+    </property>
+    <property name="plugin-6" type="string" value="tasklist">
+      <property name="grouping" type="uint" value="1"/>
+    </property>
+    <property name="plugin-7" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-8" type="string" value="clock">
+      <property name="digital-layout" type="uint" value="3"/>
+      <property name="digital-time-format" type="string" value="%a %d %b  %H:%M"/>
+    </property>
+  </property>
+</channel>

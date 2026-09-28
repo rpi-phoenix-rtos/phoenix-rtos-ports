@@ -1,0 +1,34 @@
+From 3f0f6ad803eadc3d2ab6f3374a3ffc23ac7370c3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 17:53:20 +0200
+Subject: [PATCH] configure: X11 is optional (Wayland-only builds)
+
+Thunar's configure requires libX11 (XDT_CHECK_LIBX11_REQUIRE), but only
+the wallpaper plugin links it and libSM session management is already
+optional (HAVE_LIBSM). A GTK 3 built with only the Wayland GDK backend has
+no X11 at all.
+
+Only the generated configure is changed (the configure.ac equivalent is
+XDT_CHECK_LIBX11 instead of XDT_CHECK_LIBX11_REQUIRE): touching
+configure.ac would make make's rebuild rules re-run autoconf.
+---
+ configure | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index 479ada0..c4ee3d6 100755
+--- a/configure
++++ b/configure
+@@ -19410,7 +19410,8 @@ fi
+ 
+ 
+   if test x"$no_x" = x"yes"; then
+-    as_fn_error $? "X Window system libraries and header files are required" "$LINENO" 5
++    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: no X11: building without session management and the wallpaper plugin" >&5
++printf "%s\n" "$as_me: no X11: building without session management and the wallpaper plugin" >&6;}
+   fi
+ 
+ 
+-- 
+2.53.0
+

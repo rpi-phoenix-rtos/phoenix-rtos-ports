@@ -1,0 +1,28 @@
+From e7113c4589f73a9cec59195d8910397e8b0c0ec4 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:48:50 +0200
+Subject: [PATCH] meson: no -ansi on Phoenix-RTOS
+
+-ansi (C89) makes 'inline' an ordinary identifier, and the Phoenix-RTOS libc
+headers define static inline functions (<stdio.h> setlinebuf): every file fails
+to compile. The flag only enforces the dialect of fribidi's own sources.
+---
+ meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index 8457582..c469968 100644
+--- a/meson.build
++++ b/meson.build
+@@ -21,7 +21,7 @@ libversion = '@0@.@1@.0'.format(soversion, interface_version, interface_age)
+ # C compiler. This is the cross compiler if we're cross-compiling
+ cc = meson.get_compiler('c')
+ 
+-if cc.get_id() == 'gcc' and cc.has_argument('-ansi')
++if cc.get_id() == 'gcc' and cc.has_argument('-ansi') and host_machine.system() != 'phoenix'
+   add_project_arguments('-ansi', language: 'c')
+ endif
+ 
+-- 
+2.53.0
+

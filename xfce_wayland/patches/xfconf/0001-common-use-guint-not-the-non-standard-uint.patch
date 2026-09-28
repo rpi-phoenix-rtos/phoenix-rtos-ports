@@ -1,0 +1,36 @@
+From d1a0002076c06f0b75648fe0dae8e19aae13ae32 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 17:49:26 +0200
+Subject: [PATCH] common: use guint, not the non-standard uint
+
+uint is a glibc/BSD <sys/types.h> extension; libphoenix does not define
+it. The surrounding code already uses the GLib type names.
+---
+ common/xfconf-gvaluefuncs.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/common/xfconf-gvaluefuncs.c b/common/xfconf-gvaluefuncs.c
+index 53e4939..bca788e 100644
+--- a/common/xfconf-gvaluefuncs.c
++++ b/common/xfconf-gvaluefuncs.c
+@@ -537,7 +537,7 @@ xfconf_hash_to_gvariant(GHashTable *hash)
+         if (G_VALUE_TYPE(value) == G_TYPE_PTR_ARRAY) {
+             GPtrArray *arr;
+             GVariantBuilder arr_builder;
+-            uint i;
++            guint i;
+ 
+             arr = g_value_get_boxed(value);
+ 
+@@ -591,7 +591,7 @@ xfconf_dup_value_array(GPtrArray *arr)
+ {
+ 
+     GPtrArray *retArr;
+-    uint i;
++    guint i;
+ 
+     retArr = g_ptr_array_new_full(arr->len, xfonf_free_array_elem_val);
+ 
+-- 
+2.53.0
+

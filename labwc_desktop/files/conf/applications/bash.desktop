@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Bash
+GenericName=Shell
+Comment=A login shell in a terminal
+Exec=/bin/bash
+Terminal=true
+Categories=System;

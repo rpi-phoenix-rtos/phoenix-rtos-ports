@@ -1,0 +1,32 @@
+From 9dcbb2adbf7f3a281df5f255537910401124299e Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 17:02:49 +0200
+Subject: [PATCH 1/2] glib-unix: g_unix_fd_query_path() reports NOSYS on
+ Phoenix-RTOS
+
+Phoenix-RTOS has neither /proc/self/fd nor an fcntl that returns the path of
+a descriptor, so the function fails with G_FILE_ERROR_NOSYS, as on the Hurd,
+instead of breaking the build with #error.
+---
+ glib/glib-unix.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/glib/glib-unix.c b/glib/glib-unix.c
+index 24a20df..b48e1dd 100644
+--- a/glib/glib-unix.c
++++ b/glib/glib-unix.c
+@@ -996,6 +996,11 @@ g_unix_fd_query_path (int      fd,
+     }
+ 
+   return g_strdup (file_path);
++#elif defined (__phoenix__)
++  /* Phoenix-RTOS has no /proc/self/fd and no F_GETPATH-style fcntl. */
++  g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_NOSYS,
++               "g_unix_fd_query_path() not supported on Phoenix-RTOS");
++  return NULL;
+ #elif defined (__GNU__)
+   /*
+    * Hurd allows to open("/dev/fd/%u") to open the very same fd, but it's not
+-- 
+2.53.0
+

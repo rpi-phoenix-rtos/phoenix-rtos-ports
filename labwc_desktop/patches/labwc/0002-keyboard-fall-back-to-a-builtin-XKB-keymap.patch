@@ -1,0 +1,54 @@
+From 78f70a91eb3fcafcc514d591d80f59fc7a3e9741 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:55:40 +0200
+Subject: [PATCH] keyboard: fall back to a builtin XKB keymap
+
+labwc compiles its keymap from XKB rule names, which needs the
+xkeyboard-config data files. Where they do not exist (Phoenix-RTOS) both the
+configured layout and the 'us' fallback fail, and the keyboard group is left
+without a keymap. A program can now link a keymap compiled at build time
+(weak symbol labwc_builtin_xkb_keymap, XKB text format); it is used only when
+the rule names fail. Without the symbol nothing changes.
+---
+ src/input/keyboard.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/input/keyboard.c b/src/input/keyboard.c
+index 3688414..50b2d30 100644
+--- a/src/input/keyboard.c
++++ b/src/input/keyboard.c
+@@ -757,6 +757,9 @@ reset_window_keyboard_layout_groups(void)
+ 	keyboard_update_layout(&server.seat, active_view->keyboard_layout);
+ }
+ 
++/* A keymap in XKB text format linked into the program, or NULL */
++extern const char labwc_builtin_xkb_keymap[] __attribute__((weak));
++
+ /*
+  * Set layout based on environment variables XKB_DEFAULT_LAYOUT,
+  * XKB_DEFAULT_OPTIONS, and friends.
+@@ -782,6 +785,21 @@ set_layout(struct wlr_keyboard *kb)
+ 	struct xkb_keymap *keymap = xkb_map_new_from_names(context, &rules,
+ 		XKB_KEYMAP_COMPILE_NO_FLAGS);
+ 
++	/*
++	 * Without XKB data files (a system with no xkeyboard-config) rule names
++	 * cannot be compiled; a program may then link a keymap compiled at build
++	 * time.
++	 */
++	if (!keymap && labwc_builtin_xkb_keymap) {
++		keymap = xkb_keymap_new_from_string(context,
++			labwc_builtin_xkb_keymap, XKB_KEYMAP_FORMAT_TEXT_V1,
++			XKB_KEYMAP_COMPILE_NO_FLAGS);
++		if (keymap) {
++			wlr_log(WLR_INFO, "using the builtin XKB keymap "
++				"(rule names not compiled)");
++		}
++	}
++
+ 	/*
+ 	 * With XKB_DEFAULT_LAYOUT set to empty odd things happen with
+ 	 * xkb_map_new_from_names() resulting in the keyboard not working, so
+-- 
+2.53.0
+

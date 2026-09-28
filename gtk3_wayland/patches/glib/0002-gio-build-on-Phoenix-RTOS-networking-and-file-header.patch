@@ -1,0 +1,87 @@
+From df2ff14d8eec7e1860b337bba759b4f842c5ef6f Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 17:02:49 +0200
+Subject: [PATCH 2/2] gio: build on Phoenix-RTOS networking and file headers
+
+<netinet/in.h> on Phoenix-RTOS has lwIP's IP_* option numbers but no IPv4
+multicast membership/loopback options, struct ip_mreq, IN_MULTICAST(),
+SOMAXCONN or IPV6_TCLASS: define them in gnetworking.h (lwIP's values;
+IPV6_TCLASS is Linux's, which lwIP rejects). xdgmimecache.c takes
+ntohl()/ntohs() from <arpa/inet.h>, and the trash portal opens without
+O_NOFOLLOW where the platform has none.
+---
+ gio/gnetworking.h.in       | 28 ++++++++++++++++++++++++++++
+ gio/gtrashportal.c         |  5 +++++
+ gio/xdgmime/xdgmimecache.c |  1 +
+ 3 files changed, 34 insertions(+)
+
+diff --git a/gio/gnetworking.h.in b/gio/gnetworking.h.in
+index 3dddd90..54a107b 100644
+--- a/gio/gnetworking.h.in
++++ b/gio/gnetworking.h.in
+@@ -55,6 +55,34 @@
+ #define T_SRV 33
+ #endif
+ 
++#ifdef __phoenix__
++/* Phoenix-RTOS <netinet/in.h> declares IP_TOS..IP_MULTICAST_IF (an enum, lwIP's
++ * numbers) but not the IPv4 multicast membership and loopback options, struct
++ * ip_mreq, IN_MULTICAST(), SOMAXCONN or IPV6_TCLASS. The values are lwIP's (its
++ * socket layer implements the IPv4 ones); IPV6_TCLASS is Linux's number, which
++ * lwIP rejects (ENOPROTOOPT), so traffic-class control messages never arrive. */
++#ifndef IP_MULTICAST_LOOP
++#define IP_MULTICAST_LOOP 7
++#endif
++#ifndef IP_ADD_MEMBERSHIP
++#define IP_ADD_MEMBERSHIP 3
++#define IP_DROP_MEMBERSHIP 4
++struct ip_mreq {
++  struct in_addr imr_multiaddr;
++  struct in_addr imr_interface;
++};
++#endif
++#ifndef IN_MULTICAST
++#define IN_MULTICAST(a) ((((guint32) (a)) & 0xf0000000U) == 0xe0000000U)
++#endif
++#ifndef SOMAXCONN
++#define SOMAXCONN 128
++#endif
++#ifndef IPV6_TCLASS
++#define IPV6_TCLASS 67
++#endif
++#endif /* __phoenix__ */
++
+ #ifndef _PATH_RESCONF
+ #define _PATH_RESCONF "/etc/resolv.conf"
+ #endif
+diff --git a/gio/gtrashportal.c b/gio/gtrashportal.c
+index 82c1356..4497df1 100644
+--- a/gio/gtrashportal.c
++++ b/gio/gtrashportal.c
+@@ -31,6 +31,11 @@
+ 
+ #ifdef G_OS_UNIX
+ #include "gunixfdlist.h"
++
++#ifndef O_NOFOLLOW
++/* Phoenix-RTOS: no O_NOFOLLOW (the file is the one the caller named) */
++#define O_NOFOLLOW 0
++#endif
+ #endif
+ 
+ #ifndef O_CLOEXEC
+diff --git a/gio/xdgmime/xdgmimecache.c b/gio/xdgmime/xdgmimecache.c
+index 7e9b29f..7d434df 100644
+--- a/gio/xdgmime/xdgmimecache.c
++++ b/gio/xdgmime/xdgmimecache.c
+@@ -23,6 +23,7 @@
+ #include <assert.h>
+ 
+ #include <netinet/in.h> /* for ntohl/ntohs */
++#include <arpa/inet.h> /* ntohl/ntohs where <netinet/in.h> does not declare them */
+ 
+ #ifdef HAVE_MMAP
+ #include <sys/mman.h>
+-- 
+2.53.0
+

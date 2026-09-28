@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=File Manager
+GenericName=Thunar
+Comment=Browse the file system with Thunar
+Exec=/bin/thunar-wl %F
+Icon=org.xfce.thunar
+Terminal=false
+StartupNotify=false
+Categories=System;Utility;Core;GTK;FileTools;FileManager;
+MimeType=inode/directory;

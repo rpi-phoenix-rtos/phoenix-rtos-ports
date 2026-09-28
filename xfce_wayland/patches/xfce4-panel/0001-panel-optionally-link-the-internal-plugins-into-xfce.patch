@@ -1,0 +1,663 @@
+From 824084fd0d0a3a6a2333134504f597709900eb8b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 19:06:04 +0200
+Subject: [PATCH] panel: optionally link the internal plugins into xfce4-panel
+
+-Dbuiltin-plugins=true builds every plugin as a static library, compiled
+with its xfce_panel_module_init() renamed to xfce_panel_builtin_<module>_init(),
+and links them into the panel. A generated table (panel-builtin-plugins.c)
+maps each X-XFCE-Module name to its init function; panel_module_new_from_desktop_file()
+consults it before looking for a module file, and such plugins always run
+internally (no wrapper). The .desktop descriptors are installed as before:
+they are still how the panel finds its plugins.
+
+For systems without dynamic loading (a fully static Phoenix-RTOS build).
+Built-in plugins skip their own copy of the panel resources (the panel has
+them), and the plugins' subdirectories are processed before panel/.
+The default (false) builds exactly what it did.
+---
+ meson.build                          |  5 +++-
+ meson_options.txt                    |  7 +++++
+ panel/meson.build                    | 23 +++++++++++++--
+ panel/panel-builtin-plugins.c.in     | 25 ++++++++++++++++
+ panel/panel-module.c                 | 44 ++++++++++++++++++++++++++++
+ panel/panel-module.h                 | 12 ++++++++
+ plugins/actions/meson.build          | 14 ++++++---
+ plugins/applicationsmenu/meson.build | 14 ++++++---
+ plugins/clock/meson.build            | 14 ++++++---
+ plugins/directorymenu/meson.build    | 14 ++++++---
+ plugins/launcher/meson.build         | 14 ++++++---
+ plugins/pager/meson.build            | 14 ++++++---
+ plugins/separator/meson.build        | 14 ++++++---
+ plugins/showdesktop/meson.build      | 14 ++++++---
+ plugins/systray/meson.build          | 14 ++++++---
+ plugins/tasklist/meson.build         | 14 ++++++---
+ plugins/windowmenu/meson.build       | 14 ++++++---
+ 17 files changed, 223 insertions(+), 47 deletions(-)
+ create mode 100644 panel/panel-builtin-plugins.c.in
+
+diff --git a/meson.build b/meson.build
+index 3ed746a..9838792 100644
+--- a/meson.build
++++ b/meson.build
+@@ -264,7 +264,9 @@ subdir('libxfce4panel')
+ subdir('common')
+ subdir('docs' / 'reference')
+ subdir('migrate')
+-subdir('panel')
++builtin_plugins = get_option('builtin-plugins')
++builtin_plugin_libs = []
++builtin_plugin_names = []
+ subdir('plugins' / 'actions')
+ subdir('plugins' / 'applicationsmenu')
+ subdir('plugins' / 'clock')
+@@ -276,5 +278,6 @@ subdir('plugins' / 'showdesktop')
+ subdir('plugins' / 'systray')
+ subdir('plugins' / 'tasklist')
+ subdir('plugins' / 'windowmenu')
++subdir('panel')
+ subdir('po')
+ subdir('wrapper')
+diff --git a/meson_options.txt b/meson_options.txt
+index f44d83a..c55465c 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -60,3 +60,10 @@ option(
+   value: '',
+   description: 'Path prefix under which helper executables will be installed (default: $libdir)',
+ )
++
++option(
++  'builtin-plugins',
++  type: 'boolean',
++  value: false,
++  description: 'Link the internal plugins into xfce4-panel instead of building loadable modules (static systems)',
++)
+diff --git a/panel/meson.build b/panel/meson.build
+index 78e2d8d..758531f 100644
+--- a/panel/meson.build
++++ b/panel/meson.build
+@@ -67,6 +67,25 @@ panel_sources += gnome.gdbus_codegen(
+   install_header: false,
+ )
+ 
++panel_builtin_c_args = []
++if builtin_plugins
++  builtin_decls = ''
++  builtin_entries = ''
++  foreach name : builtin_plugin_names
++    builtin_decls += 'GType xfce_panel_builtin_@0@_init (GTypeModule *type_module, gboolean *make_resident);\n'.format(name)
++    builtin_entries += '  { "@0@", xfce_panel_builtin_@0@_init },\n'.format(name)
++  endforeach
++  panel_sources += configure_file(
++    input: 'panel-builtin-plugins.c.in',
++    output: 'panel-builtin-plugins.c',
++    configuration: {
++      'DECLS': builtin_decls,
++      'ENTRIES': builtin_entries,
++    },
++  )
++  panel_builtin_c_args += '-DHAVE_BUILTIN_PLUGINS=1'
++endif
++
+ executable(
+   'xfce4-panel',
+   panel_sources,
+@@ -77,7 +96,7 @@ executable(
+   c_args: [
+     '-DG_LOG_DOMAIN="@0@"'.format('xfce4-panel'),
+     '-DHELPERDIR="@0@"'.format(helper_path_prefix / 'xfce4' / 'panel'),
+-  ],
++  ] + panel_builtin_c_args,
+   include_directories: [
+     include_directories('..'),
+   ],
+@@ -96,7 +115,7 @@ executable(
+   link_with: [
+     libpanel_common,
+     libxfce4panel,
+-  ],
++  ] + builtin_plugin_libs,
+   install: true,
+   install_dir: get_option('prefix') / get_option('bindir'),
+ )
+diff --git a/panel/panel-builtin-plugins.c.in b/panel/panel-builtin-plugins.c.in
+new file mode 100644
+index 0000000..7f6ff7c
+--- /dev/null
++++ b/panel/panel-builtin-plugins.c.in
+@@ -0,0 +1,25 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * This library is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ */
++
++/* Generated by meson (-Dbuiltin-plugins=true): the internal plugins linked into
++ * xfce4-panel. Each plugin's xfce_panel_module_init() is compiled under the name
++ * xfce_panel_builtin_<module>_init(); the module name is the X-XFCE-Module key
++ * of the plugin's .desktop file. */
++
++#include "panel/panel-module.h"
++
++@DECLS@
++const PanelBuiltinPlugin panel_builtin_plugins[] = {
++@ENTRIES@  { NULL, NULL },
++};
+diff --git a/panel/panel-module.c b/panel/panel-module.c
+index d9b5e5f..7474b49 100644
+--- a/panel/panel-module.c
++++ b/panel/panel-module.c
+@@ -84,6 +84,11 @@ struct _PanelModule
+   /* module location */
+   GModule *library;
+ 
++#ifdef HAVE_BUILTIN_PLUGINS
++  /* plugin linked into the panel (-Dbuiltin-plugins=true): no library */
++  const PanelBuiltinPlugin *builtin;
++#endif
++
+   /* for non-gobject plugin */
+   PluginConstructFunc construct_func;
+ 
+@@ -181,6 +186,16 @@ panel_module_load (GTypeModule *type_module)
+   panel_return_val_if_fail (module->plugin_type == G_TYPE_NONE, FALSE);
+   panel_return_val_if_fail (module->construct_func == NULL, FALSE);
+ 
++#ifdef HAVE_BUILTIN_PLUGINS
++  if (module->builtin != NULL)
++    {
++      /* the plugin's types are registered with this type module; its code
++       * never goes away, so there is nothing to make resident */
++      module->plugin_type = module->builtin->init_func (type_module, &make_resident);
++      return module->plugin_type != G_TYPE_NONE;
++    }
++#endif
++
+   /* open the module */
+   module->library = g_module_open (module->filename, G_MODULE_BIND_LOCAL);
+   if (G_UNLIKELY (module->library == NULL))
+@@ -254,6 +269,15 @@ panel_module_unload (GTypeModule *type_module)
+   panel_return_if_fail (PANEL_IS_MODULE (module));
+   panel_return_if_fail (G_IS_TYPE_MODULE (module));
+   panel_return_if_fail (module->mode == PANEL_MODULE_RUN_MODE_INTERNAL);
++
++#ifdef HAVE_BUILTIN_PLUGINS
++  if (module->builtin != NULL)
++    {
++      module->plugin_type = G_TYPE_NONE;
++      return;
++    }
++#endif
++
+   panel_return_if_fail (module->library != NULL);
+   panel_return_if_fail (module->plugin_type != G_TYPE_NONE
+                         || module->construct_func != NULL);
+@@ -337,6 +361,26 @@ panel_module_new_from_desktop_file (const gchar *filename,
+ 
+   /* read module location from the desktop file */
+   module_name = xfce_rc_read_entry_untranslated (rc, "X-XFCE-Module", NULL);
++#ifdef HAVE_BUILTIN_PLUGINS
++  if (G_LIKELY (module_name != NULL))
++    {
++      const PanelBuiltinPlugin *builtin;
++
++      for (builtin = panel_builtin_plugins; builtin->module != NULL; builtin++)
++        if (g_strcmp0 (builtin->module, module_name) == 0)
++          break;
++
++      if (builtin->module != NULL)
++        {
++          /* linked into the panel: always internal, there is no wrapper binary */
++          module = g_object_new (PANEL_TYPE_MODULE, NULL);
++          module->filename = g_strdup_printf ("builtin:%s", module_name);
++          module->builtin = builtin;
++          module->mode = PANEL_MODULE_RUN_MODE_INTERNAL;
++          module_name = NULL;
++        }
++    }
++#endif
+   if (G_LIKELY (module_name != NULL))
+     {
+       path = g_module_build_path (libdir, module_name);
+diff --git a/panel/panel-module.h b/panel/panel-module.h
+index 387b645..d7fb81f 100644
+--- a/panel/panel-module.h
++++ b/panel/panel-module.h
+@@ -82,6 +82,18 @@ gboolean
+ panel_module_is_usable (PanelModule *module,
+                         GdkScreen *screen);
+ 
++#ifdef HAVE_BUILTIN_PLUGINS
++typedef struct
++{
++  const gchar *module;
++  GType (*init_func) (GTypeModule *type_module,
++                      gboolean *make_resident);
++} PanelBuiltinPlugin;
++
++/* NULL-terminated; panel-builtin-plugins.c (generated) */
++extern const PanelBuiltinPlugin panel_builtin_plugins[];
++#endif
++
+ G_END_DECLS
+ 
+ #endif /* !__PANEL_MODULE_H__ */
+diff --git a/plugins/actions/meson.build b/plugins/actions/meson.build
+index 55dcd2e..3306ffb 100644
+--- a/plugins/actions/meson.build
++++ b/plugins/actions/meson.build
+@@ -5,12 +5,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'actions',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_actions_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libactions'),
+   ],
+   include_directories: [
+@@ -27,9 +29,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'actions'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/applicationsmenu/meson.build b/plugins/applicationsmenu/meson.build
+index c52c1be..96f6774 100644
+--- a/plugins/applicationsmenu/meson.build
++++ b/plugins/applicationsmenu/meson.build
+@@ -5,12 +5,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'applicationsmenu',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_applicationsmenu_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libapplicationsmenu'),
+   ],
+   include_directories: [
+@@ -30,9 +32,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'applicationsmenu'
++endif
+ 
+ configure_file(
+   input: 'xfce4-popup-applicationsmenu.sh',
+diff --git a/plugins/clock/meson.build b/plugins/clock/meson.build
+index b08f3c3..d6ab4a7 100644
+--- a/plugins/clock/meson.build
++++ b/plugins/clock/meson.build
+@@ -19,12 +19,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'clock',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_clock_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libclock'),
+   ],
+   include_directories: [
+@@ -43,9 +45,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'clock'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/directorymenu/meson.build b/plugins/directorymenu/meson.build
+index d504bcc..4a90dbe 100644
+--- a/plugins/directorymenu/meson.build
++++ b/plugins/directorymenu/meson.build
+@@ -5,12 +5,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'directorymenu',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_directorymenu_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libdirectorymenu'),
+   ],
+   include_directories: [
+@@ -29,9 +31,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'directorymenu'
++endif
+ 
+ configure_file(
+   input: 'xfce4-popup-directorymenu.sh',
+diff --git a/plugins/launcher/meson.build b/plugins/launcher/meson.build
+index d228eca..5af1516 100644
+--- a/plugins/launcher/meson.build
++++ b/plugins/launcher/meson.build
+@@ -7,12 +7,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'launcher',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_launcher_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('liblauncher'),
+   ],
+   include_directories: [
+@@ -31,9 +33,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'launcher'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/pager/meson.build b/plugins/pager/meson.build
+index 30fcbde..77e08cb 100644
+--- a/plugins/pager/meson.build
++++ b/plugins/pager/meson.build
+@@ -7,12 +7,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'pager',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_pager_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libpager'),
+     '-DWNCK_I_KNOW_THIS_IS_UNSTABLE=1',
+   ],
+@@ -32,9 +34,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'pager'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/separator/meson.build b/plugins/separator/meson.build
+index 9de0289..2eb570d 100644
+--- a/plugins/separator/meson.build
++++ b/plugins/separator/meson.build
+@@ -5,12 +5,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'separator',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_separator_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libseparator'),
+   ],
+   include_directories: [
+@@ -28,9 +30,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'separator'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/showdesktop/meson.build b/plugins/showdesktop/meson.build
+index 2e4812d..ef45e7e 100644
+--- a/plugins/showdesktop/meson.build
++++ b/plugins/showdesktop/meson.build
+@@ -5,12 +5,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'showdesktop',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_showdesktop_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libshowdesktop'),
+   ],
+   include_directories: [
+@@ -27,9 +29,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'showdesktop'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/systray/meson.build b/plugins/systray/meson.build
+index 2efa088..a6677e9 100644
+--- a/plugins/systray/meson.build
++++ b/plugins/systray/meson.build
+@@ -49,12 +49,14 @@ plugin_sources += gnome.gdbus_codegen(
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'systray',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_systray_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libsystray'),
+   ],
+   include_directories: [
+@@ -74,9 +76,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'systray'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/tasklist/meson.build b/plugins/tasklist/meson.build
+index d99d1f9..e2e427c 100644
+--- a/plugins/tasklist/meson.build
++++ b/plugins/tasklist/meson.build
+@@ -7,12 +7,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'tasklist',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_tasklist_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libtasklist'),
+   ],
+   include_directories: [
+@@ -33,9 +35,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'tasklist'
++endif
+ 
+ i18n.merge_file(
+   input: configure_file(
+diff --git a/plugins/windowmenu/meson.build b/plugins/windowmenu/meson.build
+index 471018c..b6b363f 100644
+--- a/plugins/windowmenu/meson.build
++++ b/plugins/windowmenu/meson.build
+@@ -5,12 +5,14 @@ plugin_sources = [
+ 
+ plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
+ 
+-shared_module(
++plugin_lib = build_target(
+   'windowmenu',
+   plugin_sources,
+-  sources: xfce4_panel_resources_c,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
+   gnu_symbol_visibility: 'hidden',
+-  c_args: [
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_windowmenu_init'] : []) + [
+     '-DG_LOG_DOMAIN="@0@"'.format('libwindowmenu'),
+   ],
+   include_directories: [
+@@ -29,9 +31,13 @@ shared_module(
+     libpanel_common,
+     libxfce4panel,
+   ],
+-  install: true,
++  install: not builtin_plugins,
+   install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
+ )
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'windowmenu'
++endif
+ 
+ configure_file(
+   input: 'xfce4-popup-windowmenu.sh',
+-- 
+2.53.0
+

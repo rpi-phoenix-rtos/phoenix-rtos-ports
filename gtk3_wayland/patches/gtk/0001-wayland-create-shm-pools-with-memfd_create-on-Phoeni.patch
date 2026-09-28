@@ -1,0 +1,60 @@
+From 051009d00358f2ede837a38a684a046765d0bcad Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 17:12:28 +0200
+Subject: [PATCH 1/2] wayland: create shm pools with memfd_create() on
+ Phoenix-RTOS
+
+Phoenix-RTOS has no shm_open() and no memfd_create system call; memfd_create()
+is a library function there (an anonymous object served by the /shm server,
+which the compositor maps through the descriptor sent with wl_shm.create_pool).
+Call it directly; skip <sys/syscall.h> and the shm_open() fallback.
+---
+ gdk/wayland/gdkdisplay-wayland.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/gdk/wayland/gdkdisplay-wayland.c b/gdk/wayland/gdkdisplay-wayland.c
+index 094f3d8..c52744a 100644
+--- a/gdk/wayland/gdkdisplay-wayland.c
++++ b/gdk/wayland/gdkdisplay-wayland.c
+@@ -28,7 +28,9 @@
+ #endif
+ 
+ #include <sys/mman.h>
++#ifndef __phoenix__
+ #include <sys/syscall.h>
++#endif
+ 
+ #include <glib.h>
+ #include "gdkwayland.h"
+@@ -1307,6 +1309,20 @@ open_shared_memory (void)
+   force_shm_open = TRUE;
+ #endif
+ 
++#if defined (__phoenix__)
++  /* Phoenix-RTOS: no shm_open(); memfd_create() is a library function (the
++   * Wayland compat layer: an anonymous object of the /shm server, mappable by the
++   * compositor through the descriptor passed over the socket). */
++  do
++    ret = memfd_create ("gdk-wayland", MFD_CLOEXEC);
++  while (ret < 0 && errno == EINTR);
++
++  if (ret < 0)
++    g_critical (G_STRLOC ": creating shared memory file (using memfd_create) failed: %m");
++
++  (void) force_shm_open;
++  return ret;
++#else
+   do
+     {
+ #if defined (__NR_memfd_create)
+@@ -1347,6 +1363,7 @@ open_shared_memory (void)
+                 force_shm_open? "shm_open" : "memfd_create");
+ 
+   return ret;
++#endif
+ }
+ 
+ static struct wl_shm_pool *
+-- 
+2.53.0
+

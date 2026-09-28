@@ -1,0 +1,28 @@
+From 6e6ce0c5c6692e9e39e59a270090e80074b3ec48 Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 17:05:52 +0200
+Subject: [PATCH] meson: do not force -ansi on Phoenix-RTOS
+
+The Phoenix-RTOS libc headers use C99 'static inline' functions, which do not
+parse in C89 mode.
+---
+ meson.build | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index 8457582..5d5d83d 100644
+--- a/meson.build
++++ b/meson.build
+@@ -21,7 +21,8 @@ libversion = '@0@.@1@.0'.format(soversion, interface_version, interface_age)
+ # C compiler. This is the cross compiler if we're cross-compiling
+ cc = meson.get_compiler('c')
+ 
+-if cc.get_id() == 'gcc' and cc.has_argument('-ansi')
++# -ansi (C89) is left out on Phoenix-RTOS: its libc headers use C99 inline
++if cc.get_id() == 'gcc' and cc.has_argument('-ansi') and host_machine.system() != 'phoenix'
+   add_project_arguments('-ansi', language: 'c')
+ endif
+ 
+-- 
+2.53.0
+

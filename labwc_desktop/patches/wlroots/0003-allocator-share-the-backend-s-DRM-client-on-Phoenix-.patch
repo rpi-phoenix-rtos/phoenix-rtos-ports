@@ -1,0 +1,43 @@
+From fda73d02f652af5d2148b987b020ae3dfeaecf1f Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 17:15:09 +0200
+Subject: [PATCH] allocator: share the backend's DRM client on Phoenix-RTOS
+
+The allocator gets its own DRM descriptor: an empty lease of the backend's
+device, or a plain second open(). On Phoenix-RTOS DRM is served by user-space
+servers where each open() is a separate client, and the display server
+(rpi4-kms) cannot import one client's dumb buffers into another ("foreign
+kmsbuf"), so every buffer allocated on a second open() fails ADDFB2 in the DRM
+backend. A duplicate of the backend's descriptor shares its client, like the
+lease does on Linux: use F_DUPFD_CLOEXEC there.
+---
+ render/allocator/allocator.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/render/allocator/allocator.c b/render/allocator/allocator.c
+index b7dbf3d..f3743b9 100644
+--- a/render/allocator/allocator.c
++++ b/render/allocator/allocator.c
+@@ -36,6 +36,19 @@ void wlr_allocator_init(struct wlr_allocator *alloc,
+  * https://gitlab.freedesktop.org/mesa/drm/-/merge_requests/110
+  */
+ static int reopen_drm_node(int drm_fd, bool allow_render_node) {
++#if defined(__phoenix__)
++	// Phoenix-RTOS: every open() of a DRM node is a separate client of its
++	// user-space server, and the display server (rpi4-kms) does not import
++	// the dumb buffers of one client into another. A duplicate of the
++	// backend's descriptor shares its client, so the buffers allocated here
++	// can be scanned out -- what the empty lease below achieves on Linux.
++	(void)allow_render_node;
++	int dup_fd = fcntl(drm_fd, F_DUPFD_CLOEXEC, 0);
++	if (dup_fd < 0) {
++		wlr_log_errno(WLR_ERROR, "Failed to duplicate the DRM descriptor");
++	}
++	return dup_fd;
++#endif
+ 	if (drmIsMaster(drm_fd)) {
+ 		// Only recent kernels support empty leases
+ 		uint32_t lessee_id;
+-- 
+2.53.0
+

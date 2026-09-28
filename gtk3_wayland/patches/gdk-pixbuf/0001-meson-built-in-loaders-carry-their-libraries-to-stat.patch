@@ -1,0 +1,31 @@
+From 60eacc6ff81b040246c42e2b9cdf04313ed3bc8e Mon Sep 17 00:00:00 2001
+From: Phoenix gpu-lane <noreply@anthropic.com>
+Date: Sun, 27 Sep 2026 17:06:25 +0200
+Subject: [PATCH] meson: built-in loaders carry their libraries to static links
+
+With builtin_loaders and default_library=static, libgdk_pixbuf-2.0.a contains
+the PNG/JPEG loaders, but neither the programs built here nor the generated
+gdk-pixbuf-2.0.pc linked libpng/libjpeg. Attach loaders_deps to each built-in
+loader's dependency object so they follow it.
+---
+ gdk-pixbuf/meson.build | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/gdk-pixbuf/meson.build b/gdk-pixbuf/meson.build
+index 570625b..6260340 100644
+--- a/gdk-pixbuf/meson.build
++++ b/gdk-pixbuf/meson.build
+@@ -164,7 +164,9 @@ foreach name, loader: loaders
+                          include_directories: [ root_inc, gdk_pixbuf_inc ],
+                          c_args: common_cflags + gdk_pixbuf_cflags + cflags + cflag_for_included_loader)
+ 
+-    included_loaders_deps += declare_dependency(link_with: mod)
++    # the loader's own libraries (libpng, libjpeg) travel with it: a static libgdk_pixbuf
++    # needs them at every link, and in its .pc
++    included_loaders_deps += declare_dependency(link_with: mod, dependencies: loaders_deps)
+   endif
+ endforeach
+ 
+-- 
+2.53.0
+

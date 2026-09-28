@@ -1,0 +1,40 @@
+From 4392318d605427fd30425e79900219a0f8026f75 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 20:11:22 +0200
+Subject: [PATCH] session: open devices whose fstat() fails on Phoenix-RTOS
+
+wlr_session_open_file() fstat()s every device it opens for its device number,
+and gives up on failure. Phoenix-RTOS input drivers do not implement the
+attribute requests behind fstat() (ENOSYS), so the keyboard never opened:
+libinput-phoenix retried once a second and wlroots logged "Stat failed:
+Function not implemented" each time (m7b-foot, 2026-09-27). The number is only
+compared with udev events of DRM devices; continue without it on Phoenix-RTOS.
+---
+ backend/session/session.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/backend/session/session.c b/backend/session/session.c
+index 8687743..3d71bc0 100644
+--- a/backend/session/session.c
++++ b/backend/session/session.c
+@@ -349,8 +349,17 @@ struct wlr_device *wlr_session_open_file(struct wlr_session *session,
+ 
+ 	struct stat st;
+ 	if (fstat(fd, &st) < 0) {
++#if defined(__phoenix__)
++		// Phoenix-RTOS input drivers (usbkbd, usbmouse) do not answer the
++		// attribute requests fstat() needs. The device number only matches
++		// udev events of DRM devices, which answer it (and a fixed
++		// WLR_DRM_DEVICES list has none), so an input device can do without.
++		wlr_log_errno(WLR_DEBUG, "fstat of '%s' failed, no device number", path);
++		st.st_rdev = 0;
++#else
+ 		wlr_log_errno(WLR_ERROR, "Stat failed");
+ 		goto error;
++#endif
+ 	}
+ 
+ 	dev->fd = fd;
+-- 
+2.53.0
+

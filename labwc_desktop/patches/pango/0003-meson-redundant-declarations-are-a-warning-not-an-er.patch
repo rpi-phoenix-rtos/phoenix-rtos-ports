@@ -1,0 +1,28 @@
+From 8a69bd428ef7c567e6e60acda17b65f0d40dfb41 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Sun, 27 Sep 2026 16:49:43 +0200
+Subject: [PATCH] meson: redundant declarations are a warning, not an error
+
+A prototype repeated by a platform's compatibility headers (Phoenix-RTOS: the
+libc gap shims of the static Wayland builds) is harmless, but -Werror turns
+it into a build failure. Keep the warning, drop the error.
+---
+ meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/meson.build b/meson.build
+index 8244a76..359f220 100644
+--- a/meson.build
++++ b/meson.build
+@@ -109,7 +109,7 @@ elif cc.get_id() == 'gcc' or cc.get_id() == 'clang'
+   if host_system == 'windows'
+     test_cflags += [ '-mms-bitfields' ]
+   else
+-    test_cflags += [ '-Werror=redundant-decls' ]
++    test_cflags += [ '-Wredundant-decls' ]
+   endif
+ else
+   test_cflags = []
+-- 
+2.53.0
+

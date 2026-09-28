@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Midnight Commander
+GenericName=File Manager
+Comment=Browse files in a terminal
+Exec=/bin/mc
+Terminal=true
+Categories=System;FileManager;

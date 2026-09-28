@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<!--
+  labwc on Phoenix-RTOS (new GPU lane, M7): stage as /etc/xdg/labwc/rc.xml.
+  labwc's built-in theme (no theme directory on the export), DejaVu Sans through
+  fontconfig, server-side decorations, the Openbox-style default key and mouse
+  bindings plus a terminal on Super+Return.
+-->
+<labwc_config>
+
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+  </core>
+
+  <theme>
+    <cornerRadius>6</cornerRadius>
+    <font place="ActiveWindow" name="DejaVu Sans" size="11" weight="bold" />
+    <font place="InactiveWindow" name="DejaVu Sans" size="11" />
+    <font place="MenuItem" name="DejaVu Sans" size="11" />
+    <font place="OnScreenDisplay" name="DejaVu Sans" size="11" />
+  </theme>
+
+  <keyboard>
+    <default />
+    <keybind key="W-Return">
+      <action name="Execute" command="/bin/foot" />
+    </keybind>
+    <keybind key="W-e">
+      <action name="Execute" command="/bin/foot -e /bin/mc" />
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <default />
+  </mouse>
+
+</labwc_config>
