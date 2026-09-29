@@ -20,7 +20,8 @@
 	license="MIT"
 	license_file="docs/license.rst"
 
-	# Private install prefix (see libdrm_phoenix).
+	# NEW GPU LANE: private install prefix (see libdrm_phoenix); the old lane's Mesa fork
+	# (external/mesa + tools/.gpu-libs) is a different thing and stays untouched.
 	conflicts="mesa_drm!=${version}"
 
 	# USE flags select EXTRA builds of the same patched source, each in its own meson build

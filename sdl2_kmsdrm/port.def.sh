@@ -8,6 +8,7 @@
 	version="2.30.12"
 	desc="SDL 2.30.12 with its stock KMSDRM video driver on Mesa GBM/EGL (new GPU lane) + Phoenix HID input and audio"
 
+	# the same release tarball as the sdl2 port (the old lane's /dev/fb0 SDL)
 	source="https://github.com/libsdl-org/SDL/releases/download/release-${version}"
 	archive_filename="SDL2-${version}.tar.gz"
 	src_path="SDL2-${version}/"
@@ -18,8 +19,8 @@
 	license="Zlib"
 	license_file="LICENSE.txt"
 
-	# Private install prefix (see libdrm_phoenix): the shared prefix may still hold the headers
-	# and libSDL2.a of the deleted sdl2 port (the /dev/fb0 SDL) from an earlier build.
+	# NEW GPU LANE: private install prefix -- the sdl2 port's libSDL2.a/headers in the shared
+	# prefix are the old lane's and stay exactly as they are.
 	conflicts="sdl2_kmsdrm!=${version}"
 	# SDL is configured against the desktop-GL Mesa build (SDL_OPENGL + SDL_OPENGLES).
 	depends="libdrm_phoenix mesa_drm[opengl] zlib"
@@ -36,7 +37,7 @@
 # build; its step 4, quakespasm-drm, is the quakespasm_drm port) and build-vkquake-drm.sh
 # step 1 (the Vulkan variant). Same patches, overlay, cmake options and flags.
 #
-#   patches/0001-0004   Phoenix cmake branch, dynapi off, thread priorities (from the first SDL port)
+#   patches/0001-0004   = ports/sdl2 0001-0004 (Phoenix cmake branch, dynapi off, thread prio)
 #   patches/0005        cmake: the Phoenix audio driver (overlay/src/audio/phoenix)
 #   patches/0006        KMSDRM: bind GBM + EGL statically (no dlopen)
 #   patches/0007        KMSDRM: Phoenix HID input (overlay/src/core/phoenix: /dev/kbd0, /dev/mouse0)
@@ -48,9 +49,9 @@
 #   patches/vulkan/0001 (USE vulkan) PHOENIX in SDL_VULKAN's condition + SDL_VIDEO_VULKAN
 #
 # Installs: include/SDL2, lib/libSDL2.a (+ libSDL2main.a), vulkan/{include,lib} (USE vulkan),
-# and share/gamedrm/ -- the SDL GL games' shared hooks, link body and checks (gamedrm_hooks.c,
-# relink-sdl-gl-game.subr, check-swap-order.sh): installed here so that a change to them
-# rebuilds the games (they depend on this port).
+# and share/gamedrm/ -- the game clones' shared hooks and checks (gamedrm_hooks.c,
+# check-swap-order.sh, relink-sdl-gl-game.subr): installed here so that a change to them
+# rebuilds the clones (they depend on this port).
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
