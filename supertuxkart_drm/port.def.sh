@@ -29,6 +29,8 @@
 
 	# rootfs: install /usr/bin/supertuxkart-drm and its launcher /bin/stk-drm into the image,
 	# the launcher also as /bin/stk
+	# (the XFCE menu entry "SuperTuxKart" = /bin/game-window.sh stk: the same program in a
+	# window of the desktop)
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -38,9 +40,10 @@
 #   1. compile glue/stkdrm_hooks.c (banner, SDL VIDEO/INPUT DEBUG logging, and the
 #      `stk-drm flipstat` frame counter behind -Wl,--wrap=SDL_GL_SwapWindow);
 #   2. run CMake's link line (link.txt) from the supertuxkart port's build tree (configured
-#      against sdl2_kmsdrm's libSDL2.a) with the Mesa link shape (libgallium whole-archive + one group of
-#      EGL/GBM/dri_gbm/GLESv2/glapi/v3d/broadcom/winsys/util + libdrm.a + the compat shim)
-#      with -static -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow;
+#      against sdl2_kmsdrm's libSDL2.a) with sdl2_kmsdrm's link-inputs.txt group, GLES half
+#      (libgallium whole-archive + one group of EGL/GBM/dri_gbm/GLESv2/glapi/v3d/broadcom/winsys/
+#      util + the Wayland client libraries + libdrm.a + the compat shim + zlib) and its flags
+#      (--wrap=mmap/ioctl/close/write) + -static -Wl,--wrap=SDL_GL_SwapWindow;
 #   3. the `stk-drm` launcher: the shipped one (glue/stk-launcher.c, a copy of the coordination
 #      repo's tools/supertuxkart-port/stk-launcher.c) with only its exec path and two message
 #      prefixes rewritten -- the same default args and seeded config.xml.
@@ -52,6 +55,11 @@
 # __wrap_SDL_GL_SwapWindow -> SDL_GL_SwapWindow; only the wrappers call ioctl/mmap; submit-first
 # swap order; GPU-stack strings present, the first stack's absent; no
 # global symbol defined both by STK's inputs and by the new stack; guarded inputs unchanged.
+# ONE binary (= the tools' build-stk-wl.sh link): sdl2_kmsdrm's libSDL2.a has the KMSDRM AND
+# the Wayland video drivers and its link-inputs.txt the matching group (the GLES half: Mesa's
+# GL build, EGL on GBM and on Wayland, + the Wayland client stack), so supertuxkart-drm runs
+# full screen on KMS from psh and in a window of the desktop (/bin/game-window.sh:
+# SDL_VIDEODRIVER=wayland --windowed --screensize=WxH, which the launcher forwards).
 
 p_prepare() {
 	:
@@ -69,10 +77,7 @@ p_build() {
 	local linktxt="${stkbuild}/CMakeFiles/supertuxkart.dir/link.txt"
 	local launcher_src="${PREFIX_PORT}/glue/stk-launcher.c" hooks_src="${PREFIX_PORT}/glue/stkdrm_hooks.c"
 	local SP="${PORT_DEP_sdl2_kmsdrm}" GD="${PORT_DEP_sdl2_kmsdrm}/share/gamedrm"
-	local SDL_A="${SP}/lib/libSDL2.a"
-	local M="${PORT_DEP_mesa_drm}/gl"
-	local MB="${M}/mesa-build"
-	local COMPAT_A="${PORT_DEP_mesa_drm}/compat/libmesadrm-compat.a"
+	local LI="${PORT_DEP_sdl2_kmsdrm}/link-inputs.txt"
 	local LDA="${PORT_DEP_libdrm_phoenix}/lib/libdrm.a"
 	local zl="${PORT_DEP_zlib}/lib" og="${PORT_DEP_libogg}/lib" vb="${PORT_DEP_libvorbis}/lib" mt="${PORT_DEP_mbedtls}/lib"
 	local name="drm"
@@ -85,37 +90,39 @@ p_build() {
 
 	# --- preconditions (fail loud; never fall back) -------------------------------------------
 	local TFLAGS=("${NL_TFLAGS[@]}")
-	local A=(src/egl/libEGL.a src/gbm/libgbm.a src/gbm/backends/dri/dri_gbm.a src/mesa/glapi/es2api/libGLESv2.a
-		src/mesa/glapi/shared-glapi/libglapi.a src/gallium/drivers/v3d/libv3d.a
-		src/gallium/drivers/v3d/libv3d-v42.a src/gallium/drivers/v3d/libv3d-v71.a
-		src/broadcom/libbroadcom-v42.a src/broadcom/libbroadcom-v71.a src/broadcom/qpu/libbroadcom_qpu.a
-		src/broadcom/libv3d_neon.a src/broadcom/perfcntrs/libv3d-perfcntrs-v42.a
-		src/broadcom/perfcntrs/libv3d-perfcntrs-v71.a src/gallium/winsys/kmsro/drm/libkmsrowinsys.a
-		src/gallium/winsys/v3d/drm/libv3dwinsys.a src/gallium/winsys/vc4/drm/libvc4winsys.a
-		src/gallium/winsys/sw/kms-dri/libswkmsdri.a src/gallium/winsys/sw/dri/libswdri.a
-		src/util/libmesa_util.a src/util/libmesa_util_simd.a src/util/blake3/libblake3.a
-		src/c11/impl/libmesa_util_c11.a)
+	# the link group: sdl2_kmsdrm's link-inputs.txt, GLES half (STK is -DUSE_GLES2=ON: libGLESv2)
+	[ -f "${LI}" ] || die "missing ${LI}"
+	local kind item GALLIUM_A="" SDL_A="" MESA=() TAILL=() WRAPS=()
+	while read -r kind item; do
+		case "${kind}" in
+			gallium) GALLIUM_A="${item}" ;;
+			sdl) SDL_A="${item}" ;;
+			mesa-es) MESA+=("${item}") ;;
+			mesa-gl) ;;
+			tail) TAILL+=("${item}") ;;
+			flag) WRAPS+=("${item}") ;;
+			*) die "unknown line in ${LI}: ${kind}" ;;
+		esac
+	done < "${LI}"
+	[ -n "${GALLIUM_A}" ] && [ -n "${SDL_A}" ] && [ "${#MESA[@]}" -gt 10 ] && [ "${#TAILL[@]}" -gt 5 ] || die "${LI} is incomplete"
 	local f a
-	for f in "$linktxt" "$sysroot/lib/libphoenix.a" "$launcher_src" "$hooks_src" "$SDL_A" \
-			"$SP/include/SDL2/SDL_config.h" "$COMPAT_A" "$LDA" "${zl}/libz.a" "${mt}/libmbedtls.a"; do
+	for f in "$linktxt" "$sysroot/lib/libphoenix.a" "$launcher_src" "$hooks_src" "$SDL_A" "$GALLIUM_A" \
+			"$SP/include/SDL2/SDL_config.h" "$LDA" "${MESA[@]}" "${TAILL[@]}" "${zl}/libz.a" "${mt}/libmbedtls.a"; do
 		[ -e "$f" ] || die "missing: $f"
 	done
-	for a in "${A[@]}"; do
-		[ -f "${MB}/${a}" ] || die "missing Mesa archive ${MB}/${a} (mesa_drm built without USE opengl?)"
-	done
-	local GALLIUM_A
-	GALLIUM_A="$(ls "${MB}"/src/gallium/targets/dri/libgallium-*.a)"
-	[ -f "${GALLIUM_A}" ] || die "no libgallium-*.a in ${MB}"
+	case " ${MESA[*]} " in *libGLESv2.a*) ;; *) die "the GLES link group has no libGLESv2.a" ;; esac
+	case " ${MESA[*]} " in *libglapi_bridge.a*) die "the GLES link group holds libglapi_bridge.a" ;; esac
 	local cfg="${SP}/include/SDL2/SDL_config.h" d
-	for d in SDL_VIDEO_DRIVER_KMSDRM SDL_VIDEO_OPENGL_EGL SDL_VIDEO_OPENGL_ES2 SDL_INPUT_PHOENIX SDL_AUDIO_DRIVER_PHOENIX; do
+	for d in SDL_VIDEO_DRIVER_KMSDRM SDL_VIDEO_DRIVER_WAYLAND SDL_VIDEO_OPENGL_EGL SDL_VIDEO_OPENGL_ES2 SDL_INPUT_PHOENIX \
+			SDL_AUDIO_DRIVER_PHOENIX; do
 		grep -qE "^#define ${d} +1" "${cfg}" || die "sdl2_kmsdrm's SDL_config.h lacks ${d} 1"
 	done
-	for d in SDL_VIDEO_DRIVER_KMSDRM_DYNAMIC SDL_VIDEO_DRIVER_PHOENIX SDL_LOADSO_DLOPEN; do
+	for d in SDL_VIDEO_DRIVER_KMSDRM_DYNAMIC SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC SDL_VIDEO_DRIVER_PHOENIX SDL_LOADSO_DLOPEN; do
 		if grep -qE "^#define ${d}( |$)" "${cfg}"; then die "sdl2_kmsdrm's SDL_config.h defines ${d}"; fi
 	done
 	nl_has_sym "${LDA}" __wrap_ioctl || die "${LDA} has no __wrap_ioctl"
 
-	local guarded=("$linktxt" "$SDL_A" "$GALLIUM_A" "$LDA")
+	local guarded=("$linktxt" "$SDL_A" "$GALLIUM_A" "${MESA[@]}" "${TAILL[@]}")
 	declare -A before
 	for f in "${guarded[@]}"; do before["$f"]="$(sha "$f")"; done
 
@@ -135,18 +142,19 @@ p_build() {
 	[ "$(grep -oF " ${SDL_A} " "$linktxt" | wc -l)" = 1 ] \
 		|| die "link.txt must name ${SDL_A} exactly once -- the supertuxkart port's configure changed; update this recipe"
 
-	local AA="" cmd bad
-	for a in "${A[@]}"; do AA="${AA} '${MB}/${a}'"; done
+	local AA="" WW="" w cmd bad
+	for a in "${MESA[@]}" "${TAILL[@]}"; do AA="${AA} '${a}'"; done
+	for w in "${WRAPS[@]}"; do WW="${WW} ${w}"; done
 	cmd="${linkcmd/ -o bin\/supertuxkart / -o '${elf}' }"
-	cmd="${cmd} '${hooks_o}' -static -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow -Wl,-Map,'${elf}.map' \
+	cmd="${cmd} '${hooks_o}' -static${WW} -Wl,--wrap=SDL_GL_SwapWindow -Wl,-Map,'${elf}.map' \
 		-Wl,--whole-archive '${GALLIUM_A}' -Wl,--no-whole-archive \
-		-Wl,--start-group '${SDL_A}'${AA} '${LDA}' '${COMPAT_A}' \
+		-Wl,--start-group '${SDL_A}'${AA} \
 		'${zl}/libz.a' '${og}/libogg.a' '${vb}/libvorbis.a' \
 		'${vb}/libvorbisfile.a' '${vb}/libvorbisenc.a' \
 		'${mt}/libmbedtls.a' '${mt}/libmbedx509.a' '${mt}/libmbedcrypto.a' \
 		-Wl,--end-group -lm -Wl,-z,stack-size=8388608"
 	printf '%s\n' "$cmd" > "$out/link-cmd.txt"
-	log "stk-drm link (KMSDRM SDL + Mesa GBM/EGL/GLES + libdrm-phoenix)"
+	log "stk-drm link (SDL KMSDRM + Wayland, Mesa GBM/EGL (drm + wayland)/GLES, Wayland client stack, libdrm-phoenix)"
 	rm -f "$elf"
 	( cd "$stkbuild" && export PATH="${tcbin}:${PATH}" && eval "$cmd" ) > "$out/link.log" 2>&1 \
 		|| { head -60 "$out/link.log" >&2; die "stk-drm link failed"; }
@@ -164,7 +172,9 @@ p_build() {
 	for s in KMSDRM_CreateDevice KMSDRM_GLES_SwapWindow KMSDRM_GetWindowWMInfo SDL_EGL_LoadLibrary SDL_PHOENIX_HID_Poll \
 			SDL_GL_SwapWindow __wrap_SDL_GL_SwapWindow __wrap_mmap __wrap_ioctl drmPhoenixMmap drm_phoenix_ioctl \
 			gbmint_get_backend kmsro_drm_screen_create v3d_drm_screen_create_renderonly eglGetPlatformDisplayEXT \
-			eglGetProcAddress _mesa_glapi_get_proc_address; do
+			eglGetProcAddress _mesa_glapi_get_proc_address Wayland_CreateDevice Wayland_GLES_SwapWindow Wayland_PumpEvents \
+			__wrap_close __wrap_write wl_display_connect wl_egl_window_create wl_cursor_theme_load xkb_keymap_new_from_string \
+			dri2_initialize_wayland dri2_initialize_drm memfd_create os_create_anonymous_file wlcursor_os_create_anonymous_file; do
 		if grep -qE " [TtWw] ${s}\$" <<< "${syms}"; then log "  symbol ${s}: yes"; else log "  symbol ${s}: NO"; bad=1; fi
 	done
 	forbidden="$(grep -E ' [TtWwDdBbRr] (PHOENIX_bootstrap|PHOENIX_PumpEvents|PHOENIX_GL_[A-Za-z_]*|phxgl_[A-Za-z_]*|phoenix_v3d_ioctl|winsys_init|boPool_take|mboxProp|v3da_connect|v3d_phoenix_flip)$' <<< "${syms}" || true)"
@@ -191,7 +201,8 @@ p_build() {
 	else log "  ${order} -- the linked libSDL2.a lacks patches/0009"; bad=1; fi
 
 	for s in 'KMS/DRM Video Driver' '/dev/dri/' 'libdrm-phoenix:' 'DRMPHX_TRACE' 'DRMPHX sync' '/dev/kbd0' '/dev/audio0' \
-			'EGL_KHR_platform_gbm' 'kmsro' 'stk-drm: new GPU lane' 'stk-drm flipstat' 'stk-drm swapstat'; do
+			'EGL_KHR_platform_gbm' 'EGL_KHR_platform_wayland' 'SDL Wayland video driver' 'xdg_wm_base' \
+			'zxdg_decoration_manager_v1' 'zwp_linux_dmabuf_v1' 'kmsro' 'stk-drm: new GPU lane' 'stk-drm flipstat' 'stk-drm swapstat'; do
 		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
 		log "  string '$s': $n"
 		[ "$n" != 0 ] || bad=1
@@ -206,8 +217,9 @@ p_build() {
 	stk_in="$( cd "$stkbuild" && tr ' ' '\n' < "$linktxt" | grep -E '\.(obj|a)$' | grep -vxF "${SDL_A}" )"
 	dups="$( { ( cd "$stkbuild" && while IFS= read -r f; do "$nm" -g --defined-only "$f" 2>/dev/null; done <<< "$stk_in" ) \
 			| awk 'NF >= 3 && $2 ~ /[TDBRVW]/ { print $3 }' | LC_ALL=C sort -u > "$out/obj/stk-defs.txt"; \
-		for f in "$GALLIUM_A" "${MB}/${A[0]}" "${MB}/${A[1]}" "${MB}/${A[2]}" "${MB}/${A[4]}" "${MB}/src/util/libmesa_util.a" \
-				"$LDA" "$SDL_A" "$COMPAT_A" "$hooks_o"; do "$nm" -g --defined-only "$f" 2>/dev/null; done \
+		for f in "$GALLIUM_A" "${MESA[@]}" "${TAILL[@]}" "$SDL_A" "$hooks_o"; do
+				# (the ports libz.a is one of STK's own inputs too: the same archive, not a duplicate)
+				[ "$f" -ef "${zl}/libz.a" ] || "$nm" -g --defined-only "$f" 2>/dev/null; done \
 			| awk 'NF >= 3 && $2 ~ /[TDBRVW]/ { print $3 }' | LC_ALL=C sort -u > "$out/obj/drm-defs.txt"; \
 		LC_ALL=C comm -12 "$out/obj/stk-defs.txt" "$out/obj/drm-defs.txt" | grep -vxF 'DW.ref.__gxx_personality_v0' || true; } )"
 	if [ -n "$dups" ]; then
@@ -240,8 +252,8 @@ p_build() {
 	{
 		echo "built:               $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		echo "stkdrm_hooks.c:      $(sha "$hooks_src")"
-		echo "libSDL2.a (KMSDRM):  $(sha "$SDL_A")"
-		echo "Mesa (mesa_drm gl):  $(cat "${M}/opengl.txt"); libgallium $(sha "$GALLIUM_A" | cut -c1-16)"
+		echo "libSDL2.a:           $(sha "$SDL_A") (KMSDRM + Wayland)"
+		echo "link inputs:         $(sha "$LI"); libgallium $(sha "$GALLIUM_A" | cut -c1-16)"
 		echo "libdrm-phoenix:      $(sha "$LDA")"
 		echo "link.txt:            $(sha "$linktxt")"
 		echo "drm unstripped:      $(sha "$elf") ($(stat -c%s "$elf") B)"
@@ -270,4 +282,8 @@ p_build() {
 		# image). P4 gives the programs the plain names themselves.
 		install -m 755 "${p}/bin/stk-$name" "${PREFIX_FS}/root/bin/stk"
 	fi
+
+	# shellcheck disable=SC1091
+	. "${GD}/relink-sdl-gl-game.subr"
+	game_desktop_entry stk "SuperTuxKart" "SuperTuxKart kart racing in a window on the desktop"
 }

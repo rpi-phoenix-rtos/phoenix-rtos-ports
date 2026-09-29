@@ -1,0 +1,135 @@
+#!/bin/bash
+#
+# video-play -- play a video file with ffplay. Run from psh, a terminal of the desktop or a
+# menu entry:
+#
+#     /bin/video-play <file> [ffplay options...]
+#
+# /usr/bin/ffplay is ONE program with SDL's Wayland AND KMSDRM video drivers; this launcher
+# picks the mode by where it runs (VIDEO_MODE=auto, the default):
+#   wl   a Wayland desktop is up (a wayland-N socket in $XDG_RUNTIME_DIR, default /tmp/xdg:
+#        /bin/xfce-session or labwc): ffplay in a window, SDL_VIDEODRIVER=wayland, the
+#        session's environment.
+#   drm  no desktop (the psh prompt): ffplay full screen, SDL_VIDEODRIVER=KMSDRM. The render
+#        server and rpi4-kms (started at boot) are started first when they are not running;
+#        they stay up afterwards.
+#
+# Keys (ffplay's own): space/p pause, left/right seek -/+10 s, down/up -/+60 s, f fullscreen
+# toggle, s step one frame, 9/0 volume, m mute, q/Esc quit; a window resize scales the video
+# (aspect kept). The mouse: right click seeks to that fraction of the file, a double click
+# toggles fullscreen.
+#
+# Environment knobs (psh `export NAME=value` before the command):
+#   VIDEO_MODE   auto (default) | wl | drm
+#   FFPLAY       the player (default /usr/bin/ffplay)
+#   FS           1 = start full screen (default 1 in drm mode, 0 in wl mode)
+#   THREADS      ffplay -threads (decoder threads; default: ffmpeg's auto = 4 on the Pi 4)
+#   LOOP         ffplay -loop N (0 = forever; default 1)
+#   AUTOEXIT     1 (default) = ffplay -autoexit: return to the prompt at the end of the file
+#                (0 = stay on the last frame until q, for interactive use)
+#   STATLINE_MS  the "ffplay-stat" line period (default 2000; 0 = ffplay's own \r status line)
+#   FFPLAY_AUTOKEYS  scripted key presses "<s>:<key>,..." (keys: pause fs left right up down
+#                step quit), for unattended control tests
+#   V3DA_CMD KMS_CMD   drm mode's server commands (the boot servers' options, without -C)
+#
+# Every line of ours starts with "VIDEO-PLAY " (grading); ffplay's with "ffplay-stat",
+# "ffplay-auto" or its own log text.
+#
+# Copyright 2026 Phoenix Systems
+#
+# This file is part of Phoenix-RTOS.
+#
+# %LICENSE%
+
+# psh wires a program's stdout to the console but not always its stderr (as xfce-session)
+exec 2>&1
+
+FILE="$1"
+if [ -z "${FILE}" ]; then
+	echo "VIDEO-PLAY usage: video-play <file> [ffplay options...]"
+	exit 2
+fi
+shift
+if [ ! -f "${FILE}" ]; then
+	echo "VIDEO-PLAY FAIL no such file: ${FILE}"
+	exit 2
+fi
+
+MODE=${VIDEO_MODE:-auto}
+FFPLAY=${FFPLAY:-/usr/bin/ffplay}
+V3DA_CMD=${V3DA_CMD:-/sbin/rpi4-v3d-async -r 1 -m serial -i}
+KMS_CMD=${KMS_CMD:-/sbin/rpi4-kms -G -p 96}
+LOOP=${LOOP:-1}
+AUTOEXIT=${AUTOEXIT:-1}
+export FFPLAY_STATLINE_MS=${STATLINE_MS:-2000}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg}
+export HOME=${HOME:-/root}
+
+# the compositor's socket: $WAYLAND_DISPLAY if it exists, else the first wayland-N
+sock=""
+if [ -n "${WAYLAND_DISPLAY}" ] && [ -e "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
+	sock="${WAYLAND_DISPLAY}"
+else
+	for s in "${XDG_RUNTIME_DIR}"/wayland-[0-9]; do
+		[ -e "${s}" ] && { sock="${s##*/}"; break; }
+	done
+fi
+if [ "${MODE}" = auto ]; then
+	if [ -n "${sock}" ]; then MODE=wl; else MODE=drm; fi
+fi
+
+case "${MODE}" in
+	wl)
+		player="${FFPLAY}"
+		if [ -z "${sock}" ]; then
+			echo "VIDEO-PLAY FAIL mode=wl: no Wayland socket in ${XDG_RUNTIME_DIR} (start /bin/xfce-session first)"
+			exit 3
+		fi
+		export WAYLAND_DISPLAY="${sock}"
+		export SDL_VIDEODRIVER=wayland
+		# the xdg-toplevel app_id (labwc window rules), as /bin/game-window.sh does
+		export SDL_VIDEO_WAYLAND_WMCLASS=${SDL_VIDEO_WAYLAND_WMCLASS:-ffplay}
+		# the session's settings (xfce-desktop.sh / labwc-xfce-demo/environment)
+		export XDG_SESSION_TYPE=wayland
+		export XKB_DEFAULT_LAYOUT=${XKB_DEFAULT_LAYOUT:-us}
+		FS=${FS:-0}
+		;;
+	drm)
+		player="${FFPLAY}"
+		# order matters: rpi4-kms -G connects to the render server at start-up. Each server
+		# daemonizes and refuses a second instance by itself.
+		if [ ! -e /dev/v3d-async ]; then echo "VIDEO-PLAY server start: ${V3DA_CMD}"; ${V3DA_CMD}; fi
+		if [ ! -e /dev/kms ]; then echo "VIDEO-PLAY server start: ${KMS_CMD}"; ${KMS_CMD}; fi
+		if [ ! -e /dev/v3d-async ] || [ ! -e /dev/kms ]; then
+			echo "VIDEO-PLAY FAIL mode=drm: a server is missing (v3d-async=$([ -e /dev/v3d-async ] && echo up || echo missing)" \
+				"kms=$([ -e /dev/kms ] && echo up || echo missing))"
+			exit 1
+		fi
+		export SDL_VIDEODRIVER=KMSDRM
+		FS=${FS:-1}
+		;;
+	*)
+		echo "VIDEO-PLAY FAIL unknown VIDEO_MODE ${MODE} (auto | wl | drm)"
+		exit 2
+		;;
+esac
+if [ ! -x "${player}" ]; then
+	echo "VIDEO-PLAY FAIL ${player} is not installed"
+	exit 3
+fi
+export SDL_AUDIODRIVER=${SDL_AUDIODRIVER:-phoenix}
+
+args=(-hide_banner -loglevel "${LOGLEVEL:-info}" -loop "${LOOP}")
+[ "${FS}" = 1 ] && args+=(-fs)
+[ "${AUTOEXIT}" = 1 ] && args+=(-autoexit)
+[ -n "${THREADS}" ] && args+=(-threads "${THREADS}")
+[ "${FFPLAY_STATLINE_MS}" = 0 ] && args+=(-stats)
+
+echo "VIDEO-PLAY start mode=${MODE} player=${player} file=${FILE} bytes=$(wc -c < "${FILE}") sock=${sock:-none}" \
+	"video=${SDL_VIDEODRIVER} audio=${SDL_AUDIODRIVER} fs=${FS} threads=${THREADS:-auto} loop=${LOOP}" \
+	"statline_ms=${FFPLAY_STATLINE_MS} autokeys=${FFPLAY_AUTOKEYS:-none} launcher=video-play t=${SECONDS}"
+echo "VIDEO-PLAY args ${args[*]} $* ${FILE}"
+"${player}" "${args[@]}" "$@" "${FILE}"
+rc=$?
+echo "VIDEO-PLAY done rc=${rc} t=${SECONDS}"
+exit "${rc}"

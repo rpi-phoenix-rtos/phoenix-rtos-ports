@@ -29,6 +29,8 @@
 
 	# rootfs: install /usr/bin/yquake2-drm and its launcher /usr/bin/quake2-drm into the image,
 	# the launcher also as /usr/bin/quake2
+	# (the XFCE menu entry "Quake II" = /bin/game-window.sh quake2: the same program in a
+	# window of the desktop)
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -43,6 +45,10 @@
 # (glue/quake2-launcher.c, a copy of the coordination repo's tools/yquake2-port/quake2-launcher.c)
 # with only its exec target rewritten (/usr/bin/yquake2 -> /usr/bin/yquake2-drm): the same
 # ram-stage-play of /usr/share/quake2 to /tmp/quake2 and the same video/demo arguments.
+# ONE binary: sdl2_kmsdrm's libSDL2.a has the KMSDRM AND the Wayland video drivers, Mesa's GL
+# build EGL on GBM and on Wayland, so the program runs full screen on KMS from psh and in a
+# window of the desktop (/bin/game-window.sh: SDL_VIDEODRIVER=wayland + the windowed
+# arguments, which the launcher forwards).
 
 p_prepare() {
 	:
@@ -70,4 +76,6 @@ p_build() {
 	if b_use rootfs; then
 		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake2-drm" "${PREFIX_FS}/root/usr/bin/quake2"
 	fi
+
+	game_desktop_entry quake2 "Quake II" "yQuake2 in a window on the desktop"
 }

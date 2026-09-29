@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Atril Document Viewer
+GenericName=Document Viewer
+Comment=View PDF documents
+Exec=/bin/atril-wl %U
+TryExec=/bin/atril-wl
+Icon=/usr/share/atril/icons/hicolor/48x48/apps/atril.png
+Terminal=false
+StartupNotify=false
+Categories=GTK;Office;Viewer;
+Keywords=document;viewer;pdf;
+MimeType=application/pdf;application/x-bzpdf;application/x-gzpdf;application/x-xzpdf;application/x-ext-pdf;
