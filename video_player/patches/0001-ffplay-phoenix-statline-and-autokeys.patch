@@ -1,0 +1,153 @@
+ffplay: Phoenix-RTOS M10 measurement knobs (opt-in, environment)
+
+FFPLAY_STATLINE_MS=<ms> prints a newline-terminated "ffplay-stat" line every <ms> with a
+count of the frames shown (ffplay's own \r status line has no fps and cannot be split in a
+serial console log); FFPLAY_AUTOKEYS="<s>:<key>,..." pushes key presses (pause fs left right
+up down step quit) through ffplay's normal event loop at fixed wall-clock times, so an
+unattended Pi cycle exercises the same controls a keyboard does. Both are off unless set.
+
+LGPL-2.1-or-later, as fftools/ffplay.c.
+
+--- a/fftools/ffplay.c
++++ b/fftools/ffplay.c
+@@ -255,6 +255,7 @@
+     struct SwrContext *swr_ctx;
+     int frame_drops_early;
+     int frame_drops_late;
++    int64_t frames_shown;
+ 
+     enum ShowMode {
+         SHOW_MODE_NONE = -1, SHOW_MODE_VIDEO = 0, SHOW_MODE_WAVES, SHOW_MODE_RDFT, SHOW_MODE_NB
+@@ -355,6 +356,11 @@
+ static int is_full_screen;
+ static int64_t audio_callback_time;
+ 
++/* Phoenix-RTOS (M10): the FFPLAY_STATLINE_MS and FFPLAY_AUTOKEYS knobs (phx_init) */
++static int64_t phx_stat_us = -1;
++static int64_t phx_t0;
++static char *phx_keys;
++
+ #define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
+ 
+ static SDL_Window *window;
+@@ -1663,6 +1669,7 @@
+             }
+ 
+             frame_queue_next(&is->pictq);
++            is->frames_shown++;
+             is->force_refresh = 1;
+ 
+             if (is->step && !is->paused)
+@@ -1674,7 +1681,7 @@
+             video_display(is);
+     }
+     is->force_refresh = 0;
+-    if (show_status) {
++    if (show_status && phx_stat_us <= 0) {
+         AVBPrint buf;
+         static int64_t last_time;
+         int64_t cur_time;
+@@ -3221,10 +3228,103 @@
+     }
+ }
+ 
++/*
++ * Phoenix-RTOS (M10), two opt-in knobs read from the environment:
++ *   FFPLAY_STATLINE_MS=<ms>  every <ms>, one newline-terminated "ffplay-stat" line (instead of
++ *                            the \r status line, which a serial console log cannot split) with
++ *                            the count of frames shown and the fps since the previous line
++ *   FFPLAY_AUTOKEYS=<s>:<key>[,<s>:<key>...]  at <s> seconds of wall time after the first
++ *                            refresh, push that key press through the normal event loop
++ *                            (keys: pause fs left right up down step quit), so an unattended
++ *                            run exercises the same controls as a keyboard
++ */
++static void phx_init(void)
++{
++    const char *e;
++
++    if (phx_stat_us >= 0)
++        return;
++    e = getenv("FFPLAY_STATLINE_MS");
++    phx_stat_us = e ? FFMAX(atoi(e), 0) * 1000LL : 0;
++    e = getenv("FFPLAY_AUTOKEYS");
++    phx_keys = e ? av_strdup(e) : NULL;
++    phx_t0 = av_gettime_relative();
++}
++
++static void phx_statline(VideoState *is)
++{
++    static int64_t last_us, last_shown;
++    int64_t now = av_gettime_relative();
++    double av_diff = 0;
++    int w = 0, h = 0;
++
++    if (phx_stat_us <= 0 || (last_us && now - last_us < phx_stat_us))
++        return;
++    if (is->audio_st && is->video_st)
++        av_diff = get_clock(&is->audclk) - get_clock(&is->vidclk);
++    if (window)
++        SDL_GetWindowSize(window, &w, &h);
++    av_log(NULL, AV_LOG_INFO, "ffplay-stat t=%.2f clock=%.2f av=%.3f shown=%"PRId64" fps=%.1f "
++           "drop_early=%d drop_late=%d aq=%dKB vq=%dKB paused=%d fs=%d win=%dx%d\n",
++           (now - phx_t0) / 1000000.0, get_master_clock(is), av_diff, is->frames_shown,
++           last_us ? (is->frames_shown - last_shown) * 1000000.0 / (now - last_us) : 0.0,
++           is->frame_drops_early, is->frame_drops_late, is->audioq.size / 1024, is->videoq.size / 1024,
++           is->paused, is_full_screen, w, h);
++    last_us = now;
++    last_shown = is->frames_shown;
++}
++
++static void phx_autokeys(VideoState *is)
++{
++    static const struct { const char *name; SDL_Keycode sym; } keys[] = {
++        { "pause", SDLK_SPACE }, { "fs", SDLK_f }, { "left", SDLK_LEFT }, { "right", SDLK_RIGHT },
++        { "up", SDLK_UP }, { "down", SDLK_DOWN }, { "step", SDLK_s }, { "quit", SDLK_q },
++    };
++    char *p = phx_keys, *colon, *end;
++    double at;
++    SDL_Event ev;
++    int i;
++
++    /* key events are ignored until the window exists (event_loop) */
++    if (!p || !*p || !is->width)
++        return;
++    at = strtod(p, &colon);
++    if (colon == p || *colon != ':') {
++        av_log(NULL, AV_LOG_ERROR, "ffplay-auto bad schedule at '%s'\n", p);
++        *p = '\0';
++        return;
++    }
++    if ((av_gettime_relative() - phx_t0) / 1000000.0 < at)
++        return;
++    end = strchr(colon + 1, ',');
++    if (end)
++        *end = '\0';
++    for (i = 0; i < FF_ARRAY_ELEMS(keys); i++)
++        if (!strcmp(colon + 1, keys[i].name))
++            break;
++    if (i == FF_ARRAY_ELEMS(keys)) {
++        av_log(NULL, AV_LOG_ERROR, "ffplay-auto unknown key '%s'\n", colon + 1);
++    } else {
++        memset(&ev, 0, sizeof(ev));
++        ev.type = SDL_KEYDOWN;
++        ev.key.keysym.sym = keys[i].sym;
++        SDL_PushEvent(&ev);
++        av_log(NULL, AV_LOG_INFO, "ffplay-auto t=%.2f key=%s clock=%.2f\n",
++               (av_gettime_relative() - phx_t0) / 1000000.0, keys[i].name, get_master_clock(is));
++    }
++    if (end)
++        memmove(p, end + 1, strlen(end + 1) + 1);
++    else
++        *p = '\0';
++}
++
+ static void refresh_loop_wait_event(VideoState *is, SDL_Event *event) {
+     double remaining_time = 0.0;
+     SDL_PumpEvents();
+     while (!SDL_PeepEvents(event, 1, SDL_GETEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) {
++        phx_init();
++        phx_autokeys(is);
++        phx_statline(is);
+         if (!cursor_hidden && av_gettime_relative() - cursor_last_shown > CURSOR_HIDE_DELAY) {
+             SDL_ShowCursor(0);
+             cursor_hidden = 1;

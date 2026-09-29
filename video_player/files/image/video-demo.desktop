@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Video Demo
+GenericName=Video Player
+Comment=Play the 720p H.264 demo clip with ffplay in a window (Phoenix-RTOS M10)
+Exec=/bin/bash /bin/video-play /usr/share/m10/m10-h264-720p30-aac.mp4
+Icon=video-x-generic
+Terminal=false
+Categories=AudioVideo;Video;Player;
