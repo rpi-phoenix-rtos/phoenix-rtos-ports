@@ -6,7 +6,7 @@
 
 	name="supertuxkart_drm"
 	version="1.4"
-	desc="supertuxkart-drm + stk-drm launcher: the supertuxkart port's build relinked on the new GPU lane (SDL KMSDRM + Mesa GBM/EGL/GLES)"
+	desc="supertuxkart-drm + stk-drm launcher: the supertuxkart port's build linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL/GLES)"
 
 	# The supertuxkart port's archive. This clone RELINKS the supertuxkart port's CMake build
 	# (it compiles nothing of the game); the archive is extracted only because every framework
@@ -21,10 +21,11 @@
 	license="GPL-3.0-or-later"
 	license_file="COPYING"
 
-	# NEW GPU LANE: private prefix. `supertuxkart` is a dependency so that its CMake build tree
-	# (objects + link.txt) exists first; the audio/TLS archives are its link group's.
+	# Private prefix. `supertuxkart` (compiles the game against sdl2_kmsdrm, links and installs
+	# nothing) is a dependency so that its CMake build tree (objects + link.txt) exists first;
+	# the audio/TLS archives are its link group's.
 	conflicts="supertuxkart_drm!=${version}"
-	depends="supertuxkart sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib libogg libvorbis mbedtls"
+	depends="supertuxkart sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib libogg libvorbis mbedtls"
 
 	# rootfs: install /usr/bin/supertuxkart-drm and its launcher /bin/stk-drm into the image,
 	# the launcher also as /bin/stk
@@ -36,10 +37,8 @@
 # Ported from the coordination repo's tools/gpu-lane/sdl2-drm/build-stk-drm.sh:
 #   1. compile glue/stkdrm_hooks.c (banner, SDL VIDEO/INPUT DEBUG logging, and the
 #      `stk-drm flipstat` frame counter behind -Wl,--wrap=SDL_GL_SwapWindow);
-#   2. re-run the supertuxkart port's stage-4 link (CMake's link.txt) from the port's build
-#      tree, with the ports-prefix libSDL2.a (old /dev/fb0 video driver) replaced by the KMSDRM
-#      libSDL2.a, the old GL-context glue objects and libGL-phoenix.a / libv3d-phoenix.a NOT
-#      linked, and instead the Mesa link shape (libgallium whole-archive + one group of
+#   2. run CMake's link line (link.txt) from the supertuxkart port's build tree (configured
+#      against sdl2_kmsdrm's libSDL2.a) with the Mesa link shape (libgallium whole-archive + one group of
 #      EGL/GBM/dri_gbm/GLESv2/glapi/v3d/broadcom/winsys/util + libdrm.a + the compat shim)
 #      with -static -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow;
 #   3. the `stk-drm` launcher: the shipped one (glue/stk-launcher.c, a copy of the coordination
@@ -48,11 +47,10 @@
 # STK is a GLES program (-DUSE_GLES2=ON; Irrlicht asks SDL for an ES 3.0 context and loads
 # every gl* through glad + SDL_GL_GetProcAddress = eglGetProcAddress). The Mesa build is the
 # desktop-GL one because libSDL2.a was configured against it (it has GLES2 on too).
-# PROOFS (b_die): control relink (the port's own recipe with the old-lane inputs) reproduces
-# the port's prog/supertuxkart byte for byte (warning only if the tree moved on); nm -u empty;
+# PROOFS (b_die): nm -u empty;
 # no PT_INTERP; new-stack symbols present, old-lane ones absent; COGLES2Driver ->
 # __wrap_SDL_GL_SwapWindow -> SDL_GL_SwapWindow; only the wrappers call ioctl/mmap; submit-first
-# swap order; new-lane strings present, old-lane absent (the port's binary the reverse); no
+# swap order; GPU-stack strings present, the first stack's absent; no
 # global symbol defined both by STK's inputs and by the new stack; guarded inputs unchanged.
 
 p_prepare() {
@@ -69,15 +67,6 @@ p_build() {
 	local cc="${NL_CC}" nm="${NL_NM}" strip="${NL_STRIP}" readelf="${NL_READELF}" objdump="${NL_OBJDUMP}" size="${NL_SIZE}"
 	local stkbuild="${pfx}/port-sources/supertuxkart-1.4/stk-code-1.4/build"
 	local linktxt="${stkbuild}/CMakeFiles/supertuxkart.dir/link.txt"
-	local gluedir="${stkbuild}/_phoenix_glue"
-	local old_sdl="${PORT_DEP_sdl2}/lib/libSDL2.a"
-	# the old GL stack exactly as the supertuxkart port linked it (its <repo>/tools/.gpu-libs
-	# anchor), taken from that port's traced build log; control relink only
-	local stklog="${pfx}/port-sources/supertuxkart-1.4/build.log" old_gl old_v3d
-	old_gl="$(grep -o "/[^ '=]*/libGL-phoenix\.a" "${stklog}" 2>/dev/null | sort -u | head -1 || true)"
-	old_v3d="$(grep -o "/[^ '=]*/libv3d-phoenix\.a" "${stklog}" 2>/dev/null | sort -u | head -1 || true)"
-	: "${old_gl:=/nonexistent/libGL-phoenix.a}" "${old_v3d:=/nonexistent/libv3d-phoenix.a}"
-	local shipped_prog="${PREFIX_PROG%/}/supertuxkart"
 	local launcher_src="${PREFIX_PORT}/glue/stk-launcher.c" hooks_src="${PREFIX_PORT}/glue/stkdrm_hooks.c"
 	local SP="${PORT_DEP_sdl2_kmsdrm}" GD="${PORT_DEP_sdl2_kmsdrm}/share/gamedrm"
 	local SDL_A="${SP}/lib/libSDL2.a"
@@ -91,7 +80,6 @@ p_build() {
 	local elf="${out}/supertuxkart-${name}"
 
 	log()  { printf '[stk-drm] %s\n' "$*"; }
-	warn() { printf '[stk-drm] WARNING: %s\n' "$*" >&2; }
 	die()  { b_die "[stk-drm] $*"; }
 	sha()  { if [ -e "$1" ]; then sha256sum "$1" | cut -d' ' -f1; else echo "absent"; fi; }
 
@@ -108,7 +96,7 @@ p_build() {
 		src/util/libmesa_util.a src/util/libmesa_util_simd.a src/util/blake3/libblake3.a
 		src/c11/impl/libmesa_util_c11.a)
 	local f a
-	for f in "$linktxt" "$old_sdl" "$shipped_prog" "$sysroot/lib/libphoenix.a" "$launcher_src" "$hooks_src" "$SDL_A" \
+	for f in "$linktxt" "$sysroot/lib/libphoenix.a" "$launcher_src" "$hooks_src" "$SDL_A" \
 			"$SP/include/SDL2/SDL_config.h" "$COMPAT_A" "$LDA" "${zl}/libz.a" "${mt}/libmbedtls.a"; do
 		[ -e "$f" ] || die "missing: $f"
 	done
@@ -127,60 +115,29 @@ p_build() {
 	done
 	nl_has_sym "${LDA}" __wrap_ioctl || die "${LDA} has no __wrap_ioctl"
 
-	local guarded=("$old_sdl" "$old_gl" "$old_v3d" "$shipped_prog" "$linktxt"
-		"$gluedir/sdl_phoenix_glctx.o" "$gluedir/sdl_phoenix_glstubs.o" "$SDL_A" "$GALLIUM_A" "$LDA")
+	local guarded=("$linktxt" "$SDL_A" "$GALLIUM_A" "$LDA")
 	declare -A before
 	for f in "${guarded[@]}"; do before["$f"]="$(sha "$f")"; done
 
 	rm -rf "$out"
 	mkdir -p "$out/src" "$out/obj"
 
-	# --- 1. the clone's hooks object -----------------------------------------------------------
+	# --- 1. the hooks object -----------------------------------------------------------
 	local hooks_o="$out/obj/stkdrm_hooks.o"
 	"$cc" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${TFLAGS[@]}" -I"${SP}/include" -c "$hooks_src" -o "$hooks_o" \
 		|| die "stkdrm_hooks.c compile failed"
 
-	# --- 2. the stage-4 link --------------------------------------------------------------------
+	# --- 2. the link --------------------------------------------------------------------
 	local linkcmd
 	linkcmd="$(cat "$linktxt")"
 	[ "$(grep -o ' -o bin/supertuxkart ' "$linktxt" | wc -l)" = 1 ] \
 		|| die "link.txt must name ' -o bin/supertuxkart ' exactly once -- the port recipe changed; update this recipe"
-	[ "$(grep -oF " ${old_sdl} " "$linktxt" | wc -l)" = 1 ] \
-		|| die "link.txt must name ${old_sdl} exactly once -- the port recipe changed; update this recipe"
-
-	relink_control() {   # the supertuxkart port's stage-4 relink, verbatim: its own inputs, $1 = output ELF
-		local rep=" -o '$1' "
-		local cmd="${linkcmd/ -o bin\/supertuxkart /$rep}"
-		rm -f "$1"
-		( cd "$stkbuild" && export PATH="${tcbin}:${PATH}" && eval "$cmd '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
-			-Wl,--start-group '${old_sdl}' '${old_gl}' '${old_v3d}' \
-			'${zl}/libz.a' '${og}/libogg.a' '${vb}/libvorbis.a' \
-			'${vb}/libvorbisfile.a' '${vb}/libvorbisenc.a' \
-			'${mt}/libmbedtls.a' '${mt}/libmbedx509.a' '${mt}/libmbedcrypto.a' \
-			-Wl,--end-group -Wl,-z,stack-size=8388608" ) || die "control link failed"
-	}
-
-	local control_note="not run (old-lane inputs absent)"
-	if [ -e "$old_gl" ] && [ -e "$old_v3d" ] && [ -e "$gluedir/sdl_phoenix_glctx.o" ] && [ -e "$gluedir/sdl_phoenix_glstubs.o" ]; then
-		log "control relink with the supertuxkart port's inputs (proves the recipe reproduces its binary)"
-		relink_control "$out/supertuxkart-control"
-		if cmp -s "$out/supertuxkart-control" "$shipped_prog"; then
-			control_note="byte-identical to prog/supertuxkart"
-			log "  PROOF: control relink == prog/supertuxkart (byte-identical)"
-		else
-			control_note="DIFFERS from prog/supertuxkart"
-			warn "control relink differs from prog/supertuxkart: the port tree or an input archive"
-			warn "  changed since the port's build, so the clone's engine objects may not be the port's."
-		fi
-		rm -f "$out/supertuxkart-control"
-	else
-		warn "control relink skipped: ${old_gl} / the glue objects are not there"
-	fi
+	[ "$(grep -oF " ${SDL_A} " "$linktxt" | wc -l)" = 1 ] \
+		|| die "link.txt must name ${SDL_A} exactly once -- the supertuxkart port's configure changed; update this recipe"
 
 	local AA="" cmd bad
 	for a in "${A[@]}"; do AA="${AA} '${MB}/${a}'"; done
 	cmd="${linkcmd/ -o bin\/supertuxkart / -o '${elf}' }"
-	cmd="${cmd/ ${old_sdl} / '${SDL_A}' }"
 	cmd="${cmd} '${hooks_o}' -static -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow -Wl,-Map,'${elf}.map' \
 		-Wl,--whole-archive '${GALLIUM_A}' -Wl,--no-whole-archive \
 		-Wl,--start-group '${SDL_A}'${AA} '${LDA}' '${COMPAT_A}' \
@@ -188,11 +145,8 @@ p_build() {
 		'${vb}/libvorbisfile.a' '${vb}/libvorbisenc.a' \
 		'${mt}/libmbedtls.a' '${mt}/libmbedx509.a' '${mt}/libmbedcrypto.a' \
 		-Wl,--end-group -lm -Wl,-z,stack-size=8388608"
-	for bad in "${old_sdl}" libGL-phoenix libv3d-phoenix sdl_phoenix_glctx sdl_phoenix_glstubs " -o bin/supertuxkart "; do
-		case "$cmd" in *"$bad"*) die "the stk-drm link command still names '$bad'" ;; esac
-	done
 	printf '%s\n' "$cmd" > "$out/link-cmd.txt"
-	log "stk-drm relink (KMSDRM SDL + Mesa GBM/EGL/GLES + libdrm-phoenix)"
+	log "stk-drm link (KMSDRM SDL + Mesa GBM/EGL/GLES + libdrm-phoenix)"
 	rm -f "$elf"
 	( cd "$stkbuild" && export PATH="${tcbin}:${PATH}" && eval "$cmd" ) > "$out/link.log" 2>&1 \
 		|| { head -60 "$out/link.log" >&2; die "stk-drm link failed"; }
@@ -214,8 +168,8 @@ p_build() {
 		if grep -qE " [TtWw] ${s}\$" <<< "${syms}"; then log "  symbol ${s}: yes"; else log "  symbol ${s}: NO"; bad=1; fi
 	done
 	forbidden="$(grep -E ' [TtWwDdBbRr] (PHOENIX_bootstrap|PHOENIX_PumpEvents|PHOENIX_GL_[A-Za-z_]*|phxgl_[A-Za-z_]*|phoenix_v3d_ioctl|winsys_init|boPool_take|mboxProp|v3da_connect|v3d_phoenix_flip)$' <<< "${syms}" || true)"
-	if [ -n "${forbidden}" ]; then log "  forbidden (old-lane) symbols PRESENT:"; sed 's/^/[stk-drm]     /' <<< "${forbidden}"; bad=1
-	else log "  old-lane symbols (SDL phoenix video, phxgl/PHOENIX_GL glue, in-process + v3da winsys): none"; fi
+	if [ -n "${forbidden}" ]; then log "  forbidden (first-stack) symbols PRESENT:"; sed 's/^/[stk-drm]     /' <<< "${forbidden}"; bad=1
+	else log "  first-stack symbols (SDL phoenix video, phxgl/PHOENIX_GL glue, in-process winsys): none"; fi
 
 	calls="$("$objdump" -d --no-show-raw-insn "$elf" | awk '
 		/^[0-9a-f]+ <.*>:$/ { fn = $2; gsub(/[<>:]/, "", fn); next }
@@ -245,17 +199,11 @@ p_build() {
 	for s in 'v3d-winsys:' 'v3da-winsys:' 'phxgl' 'PHOENIX: GL_CreateContext' '/dev/fb0' 'RPI4FB_GETMODE' 'phoenix_v3d_ioctl' \
 			'peek_next_scanout' 'v3d-srv' 'v3d-pool:'; do
 		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
-		log "  old-lane string '$s': $n"
+		log "  first-stack string '$s': $n"
 		[ "$n" = 0 ] || bad=1
 	done
-	# inverse control: the supertuxkart port's own binary is the old lane
-	for s in 'stk-drm: new GPU lane' 'KMS/DRM Video Driver' 'libdrm-phoenix:'; do
-		if grep -aqF -- "$s" "$shipped_prog"; then log "  the port's supertuxkart carries '$s'"; bad=1; fi
-	done
-	grep -aqF 'v3d-winsys: RT scanout' "$shipped_prog" || { log "  prog/supertuxkart lacks 'v3d-winsys: RT scanout' -- the negative check proves nothing"; bad=1; }
-
 	# silent duplicates: global symbols defined by STK's own link inputs AND the new stack
-	stk_in="$( cd "$stkbuild" && tr ' ' '\n' < "$linktxt" | grep -E '\.(obj|a)$' | grep -vxF "${old_sdl}" )"
+	stk_in="$( cd "$stkbuild" && tr ' ' '\n' < "$linktxt" | grep -E '\.(obj|a)$' | grep -vxF "${SDL_A}" )"
 	dups="$( { ( cd "$stkbuild" && while IFS= read -r f; do "$nm" -g --defined-only "$f" 2>/dev/null; done <<< "$stk_in" ) \
 			| awk 'NF >= 3 && $2 ~ /[TDBRVW]/ { print $3 }' | LC_ALL=C sort -u > "$out/obj/stk-defs.txt"; \
 		for f in "$GALLIUM_A" "${MB}/${A[0]}" "${MB}/${A[1]}" "${MB}/${A[2]}" "${MB}/${A[4]}" "${MB}/src/util/libmesa_util.a" \
@@ -277,7 +225,7 @@ p_build() {
 	    "$launcher_src" > "$lsrc"
 	[ "$(grep -c "\"/usr/bin/supertuxkart-$name\"" "$lsrc")" = 1 ] || die "launcher exec path rewrite did not match exactly once"
 	[ "$(grep -c "\"stk-$name: DATADIR=" "$lsrc")" = 1 ] || die "launcher banner rewrite did not match exactly once"
-	[ "$(grep -c '/usr/bin/supertuxkart"' "$lsrc")" = 0 ] || die "launcher still names the shipped engine"
+	[ "$(grep -c '/usr/bin/supertuxkart"' "$lsrc")" = 0 ] || die "launcher still names /usr/bin/supertuxkart"
 	grep -qF 'scale_rtts_factor=\"0.75\"' "$lsrc" || die "launcher lost the seeded scale_rtts_factor=0.75"
 	diff_lines="$(diff "$launcher_src" "$lsrc" | grep -c '^>' || true)"
 	[ "$diff_lines" = 3 ] || die "launcher differs from stk-launcher.c in $diff_lines lines (expected exactly 3)"
@@ -296,8 +244,6 @@ p_build() {
 		echo "Mesa (mesa_drm gl):  $(cat "${M}/opengl.txt"); libgallium $(sha "$GALLIUM_A" | cut -c1-16)"
 		echo "libdrm-phoenix:      $(sha "$LDA")"
 		echo "link.txt:            $(sha "$linktxt")"
-		echo "control relink:      $control_note"
-		echo "port prog:           $(sha "$shipped_prog") ($(stat -c%s "$shipped_prog") B)"
 		echo "drm unstripped:      $(sha "$elf") ($(stat -c%s "$elf") B)"
 		echo "drm stripped:        $(sha "$elf.stripped") ($(stat -c%s "$elf.stripped") B)"
 		echo "stk-$name:             $(sha "$out/stk-$name") ($(stat -c%s "$out/stk-$name") B)"

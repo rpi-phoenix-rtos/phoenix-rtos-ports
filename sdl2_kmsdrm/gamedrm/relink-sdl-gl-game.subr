@@ -1,50 +1,47 @@
 # shellcheck shell=bash
 #
-# Shared p_build body of the yquake2_drm and quake3_drm ports (sourced from
-# ${PORT_DEP_sdl2_kmsdrm}/share/gamedrm/): relink an SDL2 GL game port's own objects on the
-# FULL standard DRM stack -- SDL 2.30.12 KMSDRM (sdl2_kmsdrm), Mesa 26.2 GBM + EGL + GLES/GL
-# (mesa_drm, its opengl build: libSDL2.a was configured against it) and libdrm-phoenix.
+# Shared link-and-verify body of the yquake2_drm and quake3_drm ports (sourced from
+# ${PORT_DEP_sdl2_kmsdrm}/share/gamedrm/): link an SDL2 GL game's engine objects (compiled by
+# its engine port, a `depends` of the caller) on the GPU stack -- SDL 2.30.12 KMSDRM
+# (sdl2_kmsdrm), Mesa 26.2 GBM + EGL + GLES/GL (mesa_drm, its opengl build: libSDL2.a was
+# configured against it) and libdrm-phoenix -- then build the game's launcher.
 #
 # The ports framework version of the coordination repo's
-# tools/gpu-lane/sdl2-drm/gamedrm/relink-sdl-gl-game.sh: the same substitution and the same
-# proofs; only the inputs come from the ports' install prefixes (PORT_DEP_*) and the outputs
-# go to this port's prefix. The game port itself (a `depends` of the clone) is built first by
-# port_manager, so its build tree and build.log are in place.
+# tools/gpu-lane/sdl2-drm/gamedrm/relink-sdl-gl-game.sh. Until GPU migration P3 the engine ports
+# linked a program of their own on the first GPU stack and this body took that link line from
+# their build.log (with a byte-identical control relink); now they only compile, and publish
+# their link inputs in port-sources/<G_PORTDIR>/engine-link.sh.
 #
 # The caller sets:
-#   G_APP            clone name, e.g. quake2-drm (tag of every log line, banner, flipstat)
-#   G_ENGINE         the port's engine binary name (prog/<G_ENGINE>, /usr/bin/<G_ENGINE>)
-#   G_PORTDIR        port-sources/<dir> of the game port's build tree (<name>-<version>)
+#   G_APP            program name, e.g. quake2-drm (tag of every log line, banner, flipstat)
+#   G_ENGINE         the engine's name; the program is <G_ENGINE>-drm (/usr/bin/<G_ENGINE>-drm)
+#   G_PORTDIR        port-sources/<dir> of the engine port (<name>-<version>); its engine-link.sh
+#                    gives ENGINE_OBJS (link order), ENGINE_LINK_FLAGS (the engine port's
+#                    ${CFLAGS} ${LDFLAGS}) and ENGINE_LINK_TAIL (-lstdc++ -lm, the stack size)
 #   G_GL             gles (libGLESv2 + shared glapi, the stk-drm shape) or
 #                    gl (libglapi_bridge's desktop gl* entry points, the quakespasm-drm shape)
 #   G_API_TEXT       banner text for the API ("GLES" / "desktop GL")
-#   G_LAUNCHER_SRC   the shipped launcher's source (vendored in the clone port's glue/)
-#   G_LAUNCHER       the shipped launcher's name (/usr/bin/<G_LAUNCHER>)
-#   G_ENGINE_SYMS    engine symbols that must be present in the clone (sanity)
-#   G_DO_CONTROL     1 = run the control relink
+#   G_LAUNCHER_SRC   the launcher's source (the calling port's glue/); it execs /usr/bin/<G_ENGINE>,
+#                    rewritten here to /usr/bin/<G_ENGINE>-drm
+#   G_LAUNCHER       the launcher's base name; installed as /usr/bin/<G_LAUNCHER>-drm
+#   G_ENGINE_SYMS    engine symbols that must be present in the program (sanity)
 #
 # HOW:
 #   1. compile gamedrm_hooks.c (banner, SDL VIDEO/INPUT DEBUG logging, the `<app> flipstat`
 #      frame counter behind -Wl,--wrap=SDL_GL_SwapWindow);
-#   2. take the game port's own final link from its build log (the framework runs p_build
-#      under `set -x`, so build.log holds the exact command) and
-#        (control) re-run it verbatim with only -o redirected; it must reproduce the port's
-#                  prog/<engine> byte for byte (warning only, if the port tree moved on);
-#        (clone)   drop the old SDL-GL glue objects (sdl_phoenix_glctx.o, sdl_phoenix_glstubs.o)
-#                  and replace the old group (ports libSDL2.a = the /dev/fb0 video driver,
-#                  libGL-phoenix.a, libv3d-phoenix.a) by the new stack: libgallium whole-archive
-#                  + one group of the KMSDRM libSDL2.a, the Mesa EGL/GBM/dri_gbm/<GLES|bridge>/
-#                  glapi/v3d/broadcom/winsys/util archives, libdrm.a, the compat shim and zlib;
-#                  plus -static -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow.
-#                  Everything else -- the engine objects, their order, the port's flags, its
-#                  -lstdc++ -lm and main-thread stack size -- stays exactly as the port built it;
-#   3. the launcher: the shipped one with only its exec target rewritten.
+#   2. link: <gcc> ENGINE_LINK_FLAGS ENGINE_OBJS hooks.o, libgallium whole-archive + one group
+#      of the KMSDRM libSDL2.a, the Mesa EGL/GBM/dri_gbm/<GLES|bridge>/glapi/v3d/broadcom/winsys/util
+#      archives, libdrm.a, the compat shim and zlib, ENGINE_LINK_TAIL, -static -Wl,--wrap=mmap
+#      -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow. The command is installed as
+#      share/<G_APP>/link-cmd.txt (the object paths in it are the engine port's build tree);
+#   3. the launcher: G_LAUNCHER_SRC with only its exec target rewritten.
 #
-# PROOFS (b_die on failure): nm -u empty, no PT_INTERP, new-stack symbols/strings present,
-# old-lane ones absent (and the port's own binary the reverse), only __wrap_ioctl /
-# __wrap_mmap call the real ones, the swap wrap sits in the engine's path, the KMSDRM swap
-# is submit-first (sdl2_kmsdrm patch 0009), no global symbol defined by both the engine's
-# objects and the new stack, guarded inputs unchanged.
+# PROOFS (b_die on failure): nm -u empty, no PT_INTERP, GPU-stack symbols/strings present,
+# the first stack's (SDL /dev/fb0 video driver, in-process winsys) absent -- a stale libSDL2.a
+# or header in the shared prefix is how they could come back --, only __wrap_ioctl /
+# __wrap_mmap call the real ones, the swap wrap sits in the engine's path, the KMSDRM swap is
+# submit-first (sdl2_kmsdrm patch 0009), no global symbol defined by both the engine's objects
+# and the stack, guarded inputs unchanged.
 #
 # Copyright 2026 Phoenix Systems
 # SPDX-License-Identifier: BSD-3-Clause
@@ -54,12 +51,7 @@ g_main() {
 	tcbin="$(dirname "${NL_CC}")"
 	local cc="${NL_CC}" nm="${NL_NM}" strip="${NL_STRIP}" readelf="${NL_READELF}" objdump="${NL_OBJDUMP}" size="${NL_SIZE}"
 
-	local out="${PREFIX_PORT_BUILD}/relink"
-	local buildlog="${pfx}/port-sources/${G_PORTDIR}/build.log"
-	local port_prog="${PREFIX_PROG%/}"
-	local old_sdl="${PORT_DEP_sdl2:?}/lib/libSDL2.a"
-	local shipped_prog="${port_prog}/${G_ENGINE}"
-	local shipped_bin="${PREFIX_FS%/}/root/usr/bin/${G_ENGINE}"
+	local out="${PREFIX_PORT_BUILD}/link"
 	local gd="${PORT_DEP_sdl2_kmsdrm:?}/share/gamedrm"
 	local hooks_src="${gd}/gamedrm_hooks.c"
 	local SP="${PORT_DEP_sdl2_kmsdrm}"
@@ -75,7 +67,6 @@ g_main() {
 	local launcher_drm="${G_LAUNCHER}-drm"
 
 	log()  { printf '[%s] %s\n' "${G_APP}" "$*"; }
-	warn() { printf '[%s] WARNING: %s\n' "${G_APP}" "$*" >&2; }
 	die()  { b_die "[${G_APP}] $*"; }
 	sha()  { if [ -e "$1" ]; then sha256sum "$1" | cut -d' ' -f1; else echo "absent"; fi; }
 
@@ -97,7 +88,7 @@ g_main() {
 		src/util/libmesa_util.a src/util/libmesa_util_simd.a src/util/blake3/libblake3.a
 		src/c11/impl/libmesa_util_c11.a)
 	local f a
-	for f in "$cc" "$nm" "$strip" "$readelf" "$objdump" "$size" "$buildlog" "$old_sdl" "$shipped_prog" \
+	for f in "$cc" "$nm" "$strip" "$readelf" "$objdump" "$size" \
 			"$sysroot/lib/libphoenix.a" "$G_LAUNCHER_SRC" "$hooks_src" "$SDL_A" \
 			"$SP/include/SDL2/SDL_config.h" "$COMPAT_A" "$LDA" "$ZA"; do
 		[ -e "$f" ] || die "missing: $f"
@@ -122,41 +113,18 @@ g_main() {
 	done
 	nl_has_sym "${LDA}" __wrap_ioctl || die "${LDA} has no __wrap_ioctl"
 
-	# --- the port's final link, from its build log ---------------------------------------
-	local linkline
-	linkline="$(grep -E -- "^\+ aarch64-phoenix-gcc .* -o ${port_prog}//?${G_ENGINE}\$" "$buildlog" || true)"
-	[ "$(grep -c . <<< "$linkline")" = 1 ] \
-		|| die "${buildlog} must hold exactly one '+ aarch64-phoenix-gcc ... -o ${port_prog}/${G_ENGINE}' line -- the port recipe changed; update this script"
-	linkline="${linkline#+ }"
-	local objs=() ctl_args=() tok
-	# The command has no quoting: every token is a flag or an absolute path (checked).
-	read -r -a ctl_args <<< "$linkline"
-	for tok in "${ctl_args[@]}"; do
-		case "$tok" in *\'*|*\"*|*\\*) die "unexpected quoting in the port link line: $tok" ;; esac
-	done
-	# The old lane's GL archives are named by the game port through its own anchor
-	# (<repo>/tools/.gpu-libs); take their paths from the link line itself.
-	local old_gl="" old_v3d="" glue_ctx="" glue_stubs="" n_sdl=0 n_gl=0 n_v3d=0 n_out=0 prev=""
-	for tok in "${ctl_args[@]}"; do
-		case "$tok" in
-			*/sdl_phoenix_glctx.o) glue_ctx="$tok" ;;
-			*/sdl_phoenix_glstubs.o) glue_stubs="$tok" ;;
-			*.o) objs+=("$tok") ;;
-			"$old_sdl") n_sdl=$((n_sdl + 1)) ;;
-			*/libGL-phoenix.a) old_gl="$tok"; n_gl=$((n_gl + 1)) ;;
-			*/libv3d-phoenix.a) old_v3d="$tok"; n_v3d=$((n_v3d + 1)) ;;
-		esac
-		[ "$prev" = "-o" ] && n_out=$((n_out + 1))
-		prev="$tok"
-	done
-	[ -n "$glue_ctx" ] && [ -n "$glue_stubs" ] || die "the port link names no sdl_phoenix_glctx.o/glstubs.o -- recipe changed"
-	[ "$n_sdl" = 1 ] && [ "$n_gl" = 1 ] && [ "$n_v3d" = 1 ] && [ "$n_out" = 1 ] \
-		|| die "the port link must name the ports libSDL2.a, libGL-phoenix.a, libv3d-phoenix.a and -o exactly once each (got ${n_sdl}/${n_gl}/${n_v3d}/${n_out})"
-	for f in "${objs[@]}" "$glue_ctx" "$glue_stubs"; do [ -f "$f" ] || die "missing port object $f"; done
-	log "port link: ${#objs[@]} engine objects + 2 old SDL-GL glue objects (${buildlog})"
+	# --- the engine port's link inputs --------------------------------------------------
+	local manifest="${pfx}/port-sources/${G_PORTDIR:?}/engine-link.sh"
+	[ -f "${manifest}" ] || die "missing ${manifest} (the engine port's p_build writes it)"
+	local ENGINE_NAME="" ENGINE_OBJS=() ENGINE_LINK_FLAGS=() ENGINE_LINK_TAIL=()
+	# shellcheck disable=SC1090
+	. "${manifest}"
+	[ "${ENGINE_NAME}" = "${G_ENGINE}" ] || die "${manifest} is ${ENGINE_NAME:-unnamed}'s, not ${G_ENGINE}'s"
+	[ "${#ENGINE_OBJS[@]}" -gt 0 ] || die "${manifest}: ENGINE_OBJS is empty"
+	for f in "${ENGINE_OBJS[@]}"; do [ -f "$f" ] || die "missing engine object $f"; done
+	log "link: ${#ENGINE_OBJS[@]} engine objects (${manifest})"
 
-	local guarded=("$old_sdl" "$old_gl" "$old_v3d" "$shipped_prog" "$shipped_bin" "$buildlog"
-		"$glue_ctx" "$glue_stubs" "$SDL_A" "$GALLIUM_A" "$LDA")
+	local guarded=("$SDL_A" "$GALLIUM_A" "$LDA" "$manifest")
 	[ "${G_GL}" = gl ] && guarded+=("$GL_BRIDGE")
 	declare -A before
 	for f in "${guarded[@]}"; do before["$f"]="$(sha "$f")"; done
@@ -181,63 +149,16 @@ g_main() {
 		-DGAMEDRM_NAME="\"${G_APP}\"" -DGAMEDRM_API="\"${G_API_TEXT}\"" -c "$hooks_src" -o "$hooks_o" \
 		|| die "gamedrm_hooks.c compile failed"
 
-	# --- 2a. control relink ------------------------------------------------------------------
-	local control_note="not run (G_DO_CONTROL=0)"
-	if [ "${G_DO_CONTROL}" = 1 ]; then
-		local cargs=() i=0
-		for tok in "${ctl_args[@]}"; do
-			if [ "$i" -gt 0 ] && [ "${ctl_args[$((i - 1))]}" = "-o" ]; then cargs+=("$out/${G_ENGINE}-control")
-			else cargs+=("$tok"); fi
-			i=$((i + 1))
-		done
-		log "control relink with the game port's inputs (proves the recipe reproduces its binary)"
-		rm -f "$out/${G_ENGINE}-control"
-		( export PATH="${tcbin}:${PATH}" && "${cargs[@]}" ) > "$out/control-link.log" 2>&1 \
-			|| { head -40 "$out/control-link.log" >&2; die "control link failed"; }
-		if cmp -s "$out/${G_ENGINE}-control" "$shipped_prog"; then
-			control_note="byte-identical to prog/${G_ENGINE}"
-			log "  PROOF: control relink == prog/${G_ENGINE} (byte-identical)"
-		else
-			control_note="DIFFERS from prog/${G_ENGINE}"
-			warn "control relink differs from prog/${G_ENGINE}: the port tree, libphoenix or an input"
-			warn "  archive changed since the port's build, so the clone's engine objects may not be the port's."
-		fi
-		rm -f "$out/${G_ENGINE}-control"
-	fi
-
-	# --- 2b. the clone link --------------------------------------------------------------------
-	local dargs=() skip=0 i=0 ingroup=0
+	# --- 2. the link -----------------------------------------------------------------------------
 	local newgroup=(-Wl,--whole-archive "${GALLIUM_A}" -Wl,--no-whole-archive -Wl,--start-group "${SDL_A}")
 	[ "${G_GL}" = gl ] && newgroup+=("${GL_BRIDGE}")
 	for a in "${A[@]}"; do newgroup+=("${MB}/${a}"); done
 	newgroup+=("${LDA}" "${COMPAT_A}" "${ZA}" -Wl,--end-group)
-	for tok in "${ctl_args[@]}"; do
-		if [ "$skip" = 1 ]; then skip=0; i=$((i + 1)); continue; fi
-		case "$tok" in
-			"$glue_ctx"|"$glue_stubs") ;;
-			-o) dargs+=(-o "$elf"); skip=1 ;;
-			-Wl,--start-group) ingroup=1 ;;
-			-Wl,--end-group)
-				[ "$ingroup" = 1 ] || die "unbalanced group in the port link"
-				ingroup=2
-				dargs+=("$hooks_o" "${newgroup[@]}") ;;
-			*)
-				if [ "$ingroup" = 1 ]; then
-					case "$tok" in "$old_sdl"|"$old_gl"|"$old_v3d") ;; *) die "unexpected member of the port's link group: $tok" ;; esac
-				else
-					dargs+=("$tok")
-				fi ;;
-		esac
-		i=$((i + 1))
-	done
-	[ "$ingroup" = 2 ] || die "the port link has no --start-group/--end-group"
-	dargs+=(-static -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow -Wl,-Map,"${elf}.map")
+	local dargs=("${cc}" "${ENGINE_LINK_FLAGS[@]}" "${ENGINE_OBJS[@]}" "$hooks_o" "${newgroup[@]}" "${ENGINE_LINK_TAIL[@]}"
+		-o "$elf" -static -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=SDL_GL_SwapWindow -Wl,-Map,"${elf}.map")
 	local cmdtext="${dargs[*]}"
-	for tok in "${old_sdl}" libGL-phoenix libv3d-phoenix sdl_phoenix_glctx sdl_phoenix_glstubs "${shipped_prog}"; do
-		case "$cmdtext" in *" $tok "*|*" $tok") die "the ${G_APP} link command still names '$tok'" ;; esac
-	done
 	printf '%s\n' "$cmdtext" > "$out/link-cmd.txt"
-	log "${engine_drm} relink (KMSDRM SDL + Mesa GBM/EGL/${G_API_TEXT} + libdrm-phoenix)"
+	log "${engine_drm} link (KMSDRM SDL + Mesa GBM/EGL/${G_API_TEXT} + libdrm-phoenix)"
 	rm -f "$elf"
 	( export PATH="${tcbin}:${PATH}" && "${dargs[@]}" ) > "$out/link.log" 2>&1 \
 		|| { head -60 "$out/link.log" >&2; die "${engine_drm} link failed"; }
@@ -245,7 +166,7 @@ g_main() {
 	[ -s "$out/link.log" ] && sed "s/^/[${G_APP}]   link: /" "$out/link.log" | head -20
 	"$strip" -o "$elf.stripped" "$elf"
 
-	# --- proofs on the clone ----------------------------------------------------------------
+	# --- proofs on the program ----------------------------------------------------------------
 	local bad=0 und syms s n
 	if "$readelf" -l "$elf" | grep -q INTERP; then log "  PT_INTERP present"; bad=1; fi
 	und="$("$nm" -u "$elf" || true)"
@@ -260,8 +181,8 @@ g_main() {
 	done
 	local forbidden
 	forbidden="$(grep -E ' [TtWwDdBbRr] (PHOENIX_bootstrap|PHOENIX_PumpEvents|PHOENIX_GL_[A-Za-z_]*|phxgl_[A-Za-z_]*|phoenix_v3d_ioctl|winsys_init|boPool_take|mboxProp|v3da_connect|v3d_phoenix_flip)$' <<< "${syms}" || true)"
-	if [ -n "${forbidden}" ]; then log "  forbidden (old-lane) symbols PRESENT:"; sed "s/^/[${G_APP}]     /" <<< "${forbidden}"; bad=1
-	else log "  old-lane symbols (SDL phoenix video, phxgl/PHOENIX_GL glue, in-process + v3da winsys): none"; fi
+	if [ -n "${forbidden}" ]; then log "  forbidden (first-stack) symbols PRESENT:"; sed "s/^/[${G_APP}]     /" <<< "${forbidden}"; bad=1
+	else log "  first-stack symbols (SDL phoenix video, phxgl/PHOENIX_GL glue, in-process winsys): none"; fi
 
 	local calls
 	calls="$("$objdump" -d --no-show-raw-insn "$elf" | awk '
@@ -296,21 +217,12 @@ g_main() {
 	for s in 'v3d-winsys:' 'v3da-winsys:' 'phxgl' 'PHOENIX: GL_CreateContext' '/dev/fb0' 'RPI4FB_GETMODE' 'phoenix_v3d_ioctl' \
 			'peek_next_scanout' 'v3d-srv' 'v3d-pool:'; do
 		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
-		log "  old-lane string '$s': $n"
+		log "  first-stack string '$s': $n"
 		[ "$n" = 0 ] || bad=1
 	done
-	# inverse control: the game port's own binary is the old lane (the unstripped prog/ copy:
-	# the rootfs copy exists only when the image build installed it)
-	for s in "${G_APP}: new GPU lane" 'KMS/DRM Video Driver' 'libdrm-phoenix:'; do
-		if grep -aqF -- "$s" "$shipped_prog"; then log "  the port's ${G_ENGINE} carries '$s'"; bad=1; fi
-	done
-	grep -aqF 'v3d-winsys: RT scanout' "$shipped_prog" \
-		|| { log "  the port's ${G_ENGINE} lacks 'v3d-winsys: RT scanout' -- the negative checks prove nothing"; bad=1; }
-	log "  inverse control: prog/${G_ENGINE} = old lane (no KMSDRM / libdrm-phoenix / ${G_APP} strings)"
-
-	# silent duplicates: global symbols defined by the engine's objects AND the new stack
+	# silent duplicates: global symbols defined by the engine's objects AND the GPU stack
 	local dups
-	dups="$( { for f in "${objs[@]}"; do "$nm" -g --defined-only "$f" 2>/dev/null; done \
+	dups="$( { for f in "${ENGINE_OBJS[@]}"; do "$nm" -g --defined-only "$f" 2>/dev/null; done \
 			| awk 'NF >= 3 && $2 ~ /[TDBRVW]/ { print $3 }' | LC_ALL=C sort -u > "$out/obj/eng-defs.txt"; \
 		for f in "$GALLIUM_A" "${MB}/${A[0]}" "${MB}/${A[1]}" "${MB}/${A[2]}" "${MB}/src/mesa/glapi/shared-glapi/libglapi.a" \
 				"${MB}/src/util/libmesa_util.a" "$LDA" "$SDL_A" "$COMPAT_A" "$hooks_o" \
@@ -319,11 +231,11 @@ g_main() {
 			| awk 'NF >= 3 && $2 ~ /[TDBRVW]/ { print $3 }' | LC_ALL=C sort -u > "$out/obj/drm-defs.txt"; \
 		LC_ALL=C comm -12 "$out/obj/eng-defs.txt" "$out/obj/drm-defs.txt" || true; } )"
 	if [ -n "$dups" ]; then
-		log "  symbols defined by BOTH the engine's objects and the new stack ($(grep -c . <<< "$dups")):"
+		log "  symbols defined by BOTH the engine's objects and the GPU stack ($(grep -c . <<< "$dups")):"
 		sed "s/^/[${G_APP}]     /" <<< "$dups" | head -30
 		bad=1
 	else
-		log "  no global symbol defined by both the engine's objects and the new stack"
+		log "  no global symbol defined by both the engine's objects and the GPU stack"
 	fi
 	rm -f "$out/obj/eng-defs.txt" "$out/obj/drm-defs.txt"
 
@@ -331,7 +243,7 @@ g_main() {
 	local lsrc="$out/src/${launcher_drm}.c" diff_lines
 	sed -e "s|\"/usr/bin/${G_ENGINE}\"|\"/usr/bin/${engine_drm}\"|" "$G_LAUNCHER_SRC" > "$lsrc"
 	[ "$(grep -c "\"/usr/bin/${engine_drm}\"" "$lsrc")" = 1 ] || die "launcher exec target rewrite did not match exactly once"
-	[ "$(grep -c "\"/usr/bin/${G_ENGINE}\"" "$lsrc")" = 0 ] || die "launcher still names the shipped engine"
+	[ "$(grep -c "\"/usr/bin/${G_ENGINE}\"" "$lsrc")" = 0 ] || die "launcher still names /usr/bin/${G_ENGINE}"
 	diff_lines="$(diff "$G_LAUNCHER_SRC" "$lsrc" | grep -c '^>' || true)"
 	[ "$diff_lines" = 1 ] || die "launcher differs from $(basename "$G_LAUNCHER_SRC") in $diff_lines lines (expected exactly 1)"
 	"$cc" -O2 -static -Wall -Wextra --sysroot="${sysroot}/" -B"${sysroot}/lib/" -iprefix "${sysroot}/" \
@@ -348,9 +260,7 @@ g_main() {
 		echo "libSDL2.a (KMSDRM):  $(sha "$SDL_A")"
 		echo "Mesa (mesa_drm gl):  $(cat "${M}/opengl.txt"); libgallium $(sha "$GALLIUM_A" | cut -c1-16); API ${G_GL}"
 		echo "libdrm-phoenix:      $(sha "$LDA")"
-		echo "port build log:      $(sha "$buildlog") (${buildlog})"
-		echo "control relink:      $control_note"
-		echo "port prog:           $(sha "$shipped_prog") ($(stat -c%s "$shipped_prog") B)"
+		echo "engine-link.sh:      $(sha "$manifest") (${manifest})"
 		echo "drm unstripped:      $(sha "$elf") ($(stat -c%s "$elf") B)"
 		echo "drm stripped:        $(sha "$elf.stripped") ($(stat -c%s "$elf.stripped") B)"
 		echo "${launcher_drm}:$(printf '%*s' $((19 - ${#launcher_drm})) '') $(sha "$out/${launcher_drm}") ($(stat -c%s "$out/${launcher_drm}") B)"
