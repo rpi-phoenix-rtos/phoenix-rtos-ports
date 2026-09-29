@@ -9,7 +9,7 @@
 	# wants a dotted/numeric version, so record the release-ish "8.71" here and keep
 	# the authoritative provenance in `commit`/archive_filename/src_path below.
 	version="8.71"
-	desc="yQuake2 (Quake II engine) — single static ELF, ref_gl3/GLES3 on the ported SDL2 + Mesa/V3D GL stack"
+	desc="yQuake2 (Quake II engine) objects, ref_gl3/GLES3, for the SDL2 KMSDRM + Mesa GPU stack; linked by yquake2_drm"
 
 	# yQuake2 tags its releases but this port is pinned to a specific master commit
 	# (the one the tools/yquake2-port bring-up validated: YQ2VERSION 8.71pre,
@@ -28,45 +28,32 @@
 	license_file="LICENSE"
 
 	conflicts=""
-	depends="sdl2"
-	# rootfs: install /usr/bin/yquake2 into the image (the RPI4B_GPU_LEGACY=1 image). Without
-	# it the port only builds: the default image pulls it as a build dependency (yquake2_drm
-	# relinks this port's objects) and ships the *_drm program instead. TODO(TD-24): goes with
-	# the old GPU stack (P3).
-	iuse="rootfs"
+	# Headers only: SDL (sdl2_kmsdrm) and the GL/GLES headers of the Mesa source (mesa_drm).
+	depends="sdl2_kmsdrm mesa_drm[opengl]"
 
 	supports="phoenix>=3.3"
 }
 
-# Framework migration of tools/yquake2-port/build-yquake2-phoenix.py (the C4 Quake II
-# bring-up). Phoenix has no dlopen/dlsym, so yQuake2's two dynamic-load seams (the
-# game DLL and the renderer DLL) are folded into ONE static ELF: client + integrated
-# server + baseq2 game + one renderer (ref_gl3/GLES3 by default, ref_gl1 via
-# YQ2_RENDERER=gl1) + a Phoenix backend (glue/pl_phoenix_*),
-# linked against the ported SDL2 (depends="sdl2") + the Mesa/V3D GL stack. Installs
-# the engine as /usr/bin/yquake2. The `quake2` launcher + `ram-stage-play` + the
-# baseq2 game data (paks) are RUNTIME concerns staged separately (the port builds only
-# the engine binary), matching how tools/yquake2-port/quake2-launcher.c execs it.
+# The Quake II ENGINE, compiled once: its objects are linked into a program by the ports that
+# depend on this one (yquake2_drm: SDL KMSDRM + Mesa GBM/EGL/GLES + libdrm-phoenix). This port
+# installs nothing. Phoenix has no dlopen/dlsym, so yQuake2's two dynamic-load seams (the game
+# DLL and the renderer DLL) are folded into ONE set of objects: client + integrated server +
+# baseq2 game + one renderer (ref_gl3/GLES3 by default, ref_gl1 via YQ2_RENDERER=gl1) + a
+# Phoenix backend (glue/pl_phoenix_*).
 #
-# SHIPPING STATE: this port is registered `if: true` in the rpi4b project's ports.yaml,
-# so an image build installs /usr/bin/yquake2 INTO THE ROOTFS and it ships on the SD
-# image (no game binary goes into loader.disk). The gl3/GLES3 default below is the
-# configuration HW-verified rendering full textured 3D on V3D 4.2 from the clean image.
+# THE INTERFACE (for the linking ports): ${PREFIX_PORT_BUILD}/engine-link.sh, a bash file that
+# defines three arrays -- ENGINE_OBJS (the objects, in link order), ENGINE_LINK_FLAGS (the
+# driver flags before them: this port's ${CFLAGS} ${LDFLAGS}) and ENGINE_LINK_TAIL (after the
+# consumer's library group: -lstdc++ -lm and the 4 MiB main-thread stack). A consumer links
+#   ${CC} "${ENGINE_LINK_FLAGS[@]}" "${ENGINE_OBJS[@]}" <its objects + library group> \
+#       "${ENGINE_LINK_TAIL[@]}" -o <program>
+# (up to GPU migration P3 this port linked /usr/bin/yquake2 itself, on the /dev/fb0 SDL and
+# the in-process GL winsys, and its consumers took that link line from build.log).
 #
 # The diagnostic capture harness (-DYQ2CAP_PHOENIX + the per-frame TGA/TCP capture
 # hooks that live as local commits on the external/yquake2 clone) is intentionally
 # NOT part of this port: it is a visual-regression debugging aid, not engine
 # behaviour, so a clean upstream tarball + the single documented patch is built.
-#
-# GPU coupling note: libGL-phoenix.a / libv3d-phoenix.a (tools/.gpu-libs) and the
-# Mesa headers (external/mesa) are prebuilt artifacts of the Mesa/V3D GL stack, which
-# is not yet a framework port. Until it is, this recipe links those archives + the
-# shared SDL2-GL glue (sources/phoenix-rtos-ports/sdl2/glue) by absolute path,
-# anchored off PREFIX_PORT. Portifying that GL stack would remove this wart from all
-# the SDL2 game ports at once.
-
-# ---- Repository anchors (this port reaches artifacts outside the ports tree) ----
-_yq2_repo_root() { (cd "${PREFIX_PORT}/../../.." && pwd); }
 
 p_prepare() {
 	# Single documented patch: fold the dlopen game/renderer seams and drop the
@@ -81,39 +68,22 @@ p_prepare() {
 }
 
 p_build() {
-	local repo_root src glue_dir sdl2_glue gpu_libs mesa mcompat compat
-	repo_root="$(_yq2_repo_root)"
+	local src glue_dir compat
 	src="${PREFIX_PORT_WORKDIR}/src"
 	glue_dir="${PREFIX_PORT}/glue"
-	sdl2_glue="$(cd "${PREFIX_PORT}/../sdl2/glue" && pwd)"
-	gpu_libs="${repo_root}/tools/.gpu-libs"
-	mesa="${repo_root}/external/mesa"
-	mcompat="${repo_root}/sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/phoenix_mesa_compat.h"
 	compat="${glue_dir}/pl_phoenix_compat.h"
-
-	local sdllib="${PREFIX_A}/libSDL2.a"
-	local sdlinc="${PREFIX_H}"
-	local gllib="${gpu_libs}/libGL-phoenix.a"
-	local v3dlib="${gpu_libs}/libv3d-phoenix.a"
-	local glinc="${mesa}/include"
-
-	# --- Prerequisite artifacts of the not-yet-portified GL stack (fail loud) ---
-	local p missing=0
-	for p in "${sdllib}" "${gllib}" "${v3dlib}" "${mcompat}" \
-		"${sdl2_glue}/sdl_phoenix_glctx.c" "${sdl2_glue}/sdl_phoenix_glstubs.c"; do
-		[ -f "${p}" ] || { echo "yquake2: MISSING prerequisite file: ${p}" >&2; missing=1; }
+	local SP="${PORT_DEP_sdl2_kmsdrm:?}" GLINC="${PORT_DEP_mesa_drm:?}/src-include" p
+	for p in "${SP}/include/SDL2/SDL.h" "${GLINC}/GLES3/gl32.h" "${GLINC}/GL/gl.h" "${GLINC}/KHR/khrplatform.h"; do
+		[ -f "${p}" ] || b_die "yquake2: missing ${p}"
 	done
-	for p in "${mesa}/src" "${mesa}/include" "/tmp/mesa-v3d-build/src"; do
-		[ -d "${p}" ] || { echo "yquake2: MISSING prerequisite dir: ${p}" >&2; missing=1; }
-	done
-	if [ "${missing}" != 0 ]; then
-		b_die "GL/V3D stack not present. Rebuild it first: sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/build-gl-phoenix.py (and build-v3d-phoenix.py); it stages libGL/libv3d in tools/.gpu-libs and /tmp/mesa-v3d-build."
-	fi
 
 	# --- Compile flags (framework CFLAGS first so -mcpu/sysroot apply; port flags
 	#     after so they win). -fcommon merges the tentative-definition cvar globals
-	#     each .so declared independently; -include pulls the Phoenix compat shim. ---
-	local base_cflags="${CFLAGS} -c -O2 -g -ffreestanding -fno-strict-aliasing -fwrapv -fcommon -Wno-error -DNDEBUG -DYQ2OSTYPE=\"Phoenix\" -DYQ2ARCH=\"aarch64\" -DNOUNCRYPT -DIOAPI_NO_64 -include ${compat} -I${src} -I${sdlinc} -I${glinc}"
+	#     each .so declared independently; -include pulls the Phoenix compat shim.
+	#     The SDL headers come FIRST, ahead of the shared ports prefix CFLAGS names (it
+	#     may still hold the deleted sdl2 port's headers); GL headers: the include/ of
+	#     the Mesa source the programs link. ---
+	local base_cflags="-I${SP}/include ${CFLAGS} -c -O2 -g -ffreestanding -fno-strict-aliasing -fwrapv -fcommon -Wno-error -DNDEBUG -DYQ2OSTYPE=\"Phoenix\" -DYQ2ARCH=\"aarch64\" -DNOUNCRYPT -DIOAPI_NO_64 -include ${compat} -I${src} -I${GLINC}"
 	# ref_gl1's initialized `modes` (texture-filter table) collides with the client's
 	# initialized `modes` (video-mode menu); rename the renderer's across all gl1 TUs.
 	local gl1_cflags="${base_cflags} -Dmodes=yq2_gl1_modes"
@@ -125,8 +95,6 @@ p_build() {
 	# gl3_sdl.c's ES loader path is gated on the shorter one. The extra -I lets the
 	# glad-gles3 loader's `#include <glad/glad.h>` resolve.
 	local gl3_cflags="${base_cflags} -DYQ2_GL3_GLES3 -DYQ2_GL3_GLES -Dmodes=yq2_gl3_modes -I${src}/client/refresh/gl3/glad-gles3/include"
-	# SDL2 GL-context glue is compiled with Mesa's include/define set (winsys bridge).
-	local mesa_cflags="${CFLAGS} -c -O2 -g -ffreestanding -fno-strict-aliasing -Wno-error -Wno-undef -DUTIL_ARCH_LITTLE_ENDIAN=1 -DUTIL_ARCH_BIG_ENDIAN=0 -DHAVE_STRUCT_TIMESPEC -include ${mcompat} -I${mesa}/src -I${mesa}/include -I${mesa}/src/mesa -I${mesa}/src/mapi -I${mesa}/src/compiler -I${mesa}/src/gallium/include -I${mesa}/src/gallium/auxiliary -I${mesa}/src/util -I/tmp/mesa-v3d-build/src -I${sdlinc}"
 
 	# ---- TU lists, transcribed from CMakeLists.txt (paths relative to src/) ----
 	# Client-Source (already includes the integrated server sv_*.c).
@@ -201,9 +169,8 @@ p_build() {
 	# Phoenix backend (glue/) replacing backends/unix/{system,main,shared/hunk}.c.
 	local phoenix=(pl_phoenix_sys pl_phoenix_main pl_phoenix_hunk)
 
-	# Renderer selection: default gl3 (GLES3). That is the configuration the owner
-	# has actually seen render a textured 3D frame on the Pi 4's V3D 4.2, and it is
-	# the build that has been staged on the netboot root all along; the patch's
+	# Renderer selection: default gl3 (GLES3). That is the configuration that renders
+	# textured 3D on the Pi 4's V3D 4.2 (yquake2_drm links it as GLES); the patch's
 	# gl3_image.c hunk additionally defaults glGenerateMipmap OFF (set
 	# YQ2_GL3_MIPMAP=1 to re-enable), which is what makes it load in reasonable
 	# time. gl1 stays available via YQ2_RENDERER=gl1 but has never been confirmed to
@@ -217,6 +184,7 @@ p_build() {
 	esac
 
 	local objdir="${PREFIX_PORT_WORKDIR}/_phoenix_obj"
+	rm -rf "${objdir}"
 	mkdir -p "${objdir}"
 
 	# One gcc per TU, compiled in parallel; fail fast with the TU path. Bypasses
@@ -227,7 +195,6 @@ p_build() {
 			base) flags="${YQ2_BASE_CFLAGS}" ;;
 			gl1) flags="${YQ2_GL1_CFLAGS}" ;;
 			gl3) flags="${YQ2_GL3_CFLAGS}" ;;
-			mesa) flags="${YQ2_MESA_CFLAGS}" ;;
 		esac
 		obj="${YQ2_OBJDIR}/${unit//\//_}.o"
 		# shellcheck disable=2086
@@ -239,7 +206,7 @@ p_build() {
 	export -f _yq2_cc
 	export CC YQ2_OBJDIR="${objdir}" \
 		YQ2_BASE_CFLAGS="${base_cflags}" YQ2_GL1_CFLAGS="${gl1_cflags}" \
-		YQ2_GL3_CFLAGS="${gl3_cflags}" YQ2_MESA_CFLAGS="${mesa_cflags}"
+		YQ2_GL3_CFLAGS="${gl3_cflags}"
 
 	{
 		local u
@@ -248,31 +215,29 @@ p_build() {
 		done
 		for u in "${renderer[@]}"; do printf '%s\t%s\t%s\n' "${renderer_kind}" "${u}" "${src}"; done
 		for u in "${phoenix[@]}"; do printf 'base\t%s\t%s\n' "${u}" "${glue_dir}"; done
-		printf 'mesa\t%s\t%s\n' "sdl_phoenix_glctx" "${sdl2_glue}"
-		printf 'base\t%s\t%s\n' "sdl_phoenix_glstubs" "${sdl2_glue}"
-	} | xargs -P"$(nproc)" -L1 bash -c '_yq2_cc "$@"' _
+	} | xargs -P"$(nproc)" -L1 bash -c '_yq2_cc "$@"' _ || b_die "yquake2: compile failed"
 
 	# Deterministic object list (compile order above is parallel/non-deterministic).
 	local objs=() u
 	for u in "${client[@]}" "${client_sdl[@]}" "${generic[@]}" "${unix_keep[@]}" \
-		"${game[@]}" "${renderer[@]}" "${phoenix[@]}" sdl_phoenix_glctx sdl_phoenix_glstubs; do
+		"${game[@]}" "${renderer[@]}" "${phoenix[@]}"; do
 		local o="${objdir}/${u//\//_}.o"
 		[ -f "${o}" ] || b_die "yquake2: object missing after compile: ${o}"
 		objs+=("${o}")
 	done
 
-	# Circular refs (SDL <-> renderer <-> Mesa; libGL <-> libv3d) -> --start-group.
-	# 4 MB stack: Quake2 uses a few MB; a smaller committed PT_GNU_STACK trims the
-	# exec-time eager-commit footprint (matches the tools build's final choice).
-	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
-	# shellcheck disable=2086
-	"${CC}" ${CFLAGS} ${LDFLAGS} "${objs[@]}" \
-		-Wl,--start-group "${sdllib}" "${gllib}" "${v3dlib}" -Wl,--end-group \
-		-lstdc++ -lm -Wl,-z,stack-size=4194304 \
-		-o "${PREFIX_PROG}/yquake2"
-
-	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/yquake2" "${PREFIX_PROG}/yquake2"
-	if b_use rootfs; then
-		b_install "${PREFIX_PROG_TO_INSTALL}/yquake2" /usr/bin
-	fi
+	# The link interface (see the header). 4 MB stack: Quake2 uses a few MB; a smaller
+	# committed PT_GNU_STACK trims the exec-time eager-commit footprint.
+	local flags=() tail=(-lstdc++ -lm -Wl,-z,stack-size=4194304)
+	# shellcheck disable=2206
+	flags=(${CFLAGS} ${LDFLAGS})
+	{
+		echo "# Generated by the yquake2 port (p_build): the engine's link inputs. Do not edit."
+		echo "ENGINE_NAME=yquake2"
+		echo "ENGINE_RENDERER=${renderer_kind}"
+		printf 'ENGINE_OBJS=('; printf ' %q' "${objs[@]}"; echo ' )'
+		printf 'ENGINE_LINK_FLAGS=('; printf ' %q' "${flags[@]}"; echo ' )'
+		printf 'ENGINE_LINK_TAIL=('; printf ' %q' "${tail[@]}"; echo ' )'
+	} > "${PREFIX_PORT_BUILD}/engine-link.sh"
+	echo "yquake2: ${#objs[@]} engine objects (${renderer_kind}); link inputs in ${PREFIX_PORT_BUILD}/engine-link.sh"
 }

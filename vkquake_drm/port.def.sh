@@ -8,7 +8,7 @@
 	version="1.34"
 	desc="vkquake-drm + vkq-drm launcher: UPSTREAM vkQuake on the new GPU lane (SDL KMSDRM Vulkan + Mesa v3dv static ICD via phxvk)"
 
-	# the vkquake port's pinned upstream commit (same archive, same sha256)
+	# upstream vkQuake at the commit our fork (external/vkquake, phoenix-rpi4-port) is based on
 	commit="1aa13a56cdf1b8c18a556e8e48a71a559b925d5a"
 	source="https://github.com/Novum/vkQuake/archive"
 	archive_filename="${commit}.tar.gz"
@@ -20,10 +20,8 @@
 	license="GPL-2.0-or-later"
 	license_file="LICENSE.txt"
 
-	# NEW GPU LANE: private prefix; /usr/bin/vkquake and the vkquake port are untouched. Not a
-	# relink (unlike yquake2_drm/quake3_drm/supertuxkart_drm): the vkquake port replaces every
-	# SDL/platform TU with a no-WSI /dev/fb0 shim, so this is upstream vkQuake with upstream's TU
-	# list; the vkquake port is NOT a dependency (its SPIR-V arrays are read from its glue/).
+	# Private prefix. Upstream vkQuake with upstream's TU list (SDL platform code included) on
+	# SDL KMSDRM's Vulkan path (VK_KHR_display) and Mesa v3dv.
 	conflicts="vkquake_drm!=${version}"
 	depends="sdl2_kmsdrm[vulkan] mesa_drm[vulkan] libdrm_phoenix zlib"
 
@@ -36,7 +34,7 @@
 
 # Ported from the coordination repo's tools/gpu-lane/sdl2-drm/build-vkquake-drm.sh (steps 2-9;
 # its step 1, the SDL_VULKAN=ON SDL, is sdl2_kmsdrm's USE vulkan build):
-#   patches/0001-0004  the vkquake port's engine fixes that do not concern video (cmdline on
+#   patches/0001-0004  engine fixes carried over from the first vkQuake port (cmdline on
 #                      shareware, SV_LocalSound NULL guard, slurp-and-close reads, #29 texture
 #                      copy extents); 0005 no timestamp query pool until the render server serves
 #                      SUBMIT_CPU (gap G5); 0006 r_oit 0 and 0007 RGBA8 colour buffer (V3D
@@ -46,7 +44,8 @@
 #                      libphoenix-gap bridges (vkqdrm_compat.h: <arm_neon.h> + struct ipv6_mreq;
 #                      include/execinfo.h: zero-frame backtrace) that step aside by themselves
 #                      once the sysroot has them -- = tools/gpu-lane/sdl2-drm/vkqdrm/
-#   SPIR-V             the vkquake port's vendored glue/vkquake_shaders.c (this commit's shaders)
+#   SPIR-V             glue/vkquake_shaders.c: this commit's shaders compiled to SPIR-V byte arrays
+#                      (regenerate with the coordination repo's tools/vkquake-port/gen-vkquake-shaders.py)
 #   GL stubs           generated: SDL's KMSDRM GL half references gbm_*/egl*, which a Vulkan-only
 #                      window never calls; linking Mesa's GL build too would put a second copy
 #                      of Mesa's util/NIR/broadcom compiler next to the ICD's
@@ -71,7 +70,7 @@ p_build() {
 	local Q="${PREFIX_PORT_WORKDIR}" V="${PORT_DEP_mesa_drm}/vulkan" SVP="${PORT_DEP_sdl2_kmsdrm}/vulkan"
 	local ICD="${V}/prefix/lib/libvulkan_broadcom.a" VKINC="${V}/prefix/include" PHXVK="${V}/phxvk"
 	local COMPAT_A="${PORT_DEP_mesa_drm}/compat/libmesadrm-compat.a" SDL_A="${SVP}/lib/libSDL2.a"
-	local VKQ_SHADERS_C="${PREFIX_PORT}/../vkquake/glue/vkquake_shaders.c" G="${PREFIX_PORT}/glue/vkqdrm"
+	local VKQ_SHADERS_C="${PREFIX_PORT}/glue/vkquake_shaders.c" G="${PREFIX_PORT}/glue/vkqdrm"
 	local GD="${PORT_DEP_sdl2_kmsdrm}/share/gamedrm" LDA="${PORT_DEP_libdrm_phoenix}/lib/libdrm.a"
 	local p
 	for p in "${ICD}" "${VKINC}/vulkan/vulkan_core.h" "${PHXVK}/phxvk_loader.c" "${COMPAT_A}" "${SDL_A}" \
