@@ -31,6 +31,11 @@
 
 	conflicts=""
 	depends="sdl2"
+	# rootfs: install /usr/bin/quake3e into the image (the RPI4B_GPU_LEGACY=1 image). Without
+	# it the port only builds: the default image pulls it as a build dependency (quake3_drm
+	# relinks this port's objects) and ships the *_drm program instead. TODO(TD-24): goes with
+	# the old GPU stack (P3).
+	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
@@ -270,5 +275,7 @@ p_build() {
 		-o "${PREFIX_PROG}/quake3e"
 
 	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/quake3e" "${PREFIX_PROG}/quake3e"
-	b_install "${PREFIX_PROG_TO_INSTALL}/quake3e" /usr/bin
+	if b_use rootfs; then
+		b_install "${PREFIX_PROG_TO_INSTALL}/quake3e" /usr/bin
+	fi
 }

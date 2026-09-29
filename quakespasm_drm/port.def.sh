@@ -25,7 +25,8 @@
 	conflicts="quakespasm_drm!=${version}"
 	depends="sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/quakespasm-drm into the image
+	# rootfs: install /usr/bin/quakespasm-drm and its launcher /bin/qs-drm into the image,
+	# the launcher also as /usr/bin/quakespasm
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -42,6 +43,9 @@
 # SDL_GL_SwapWindow, behind -Wl,--wrap=SDL_GL_SwapWindow) that the migration gate reads.
 # The copies of the quakespasm port's patch and glue are kept identical to it by the
 # coordination repo's scripts/check-gpu-lane-ports-sync.sh.
+# The launcher (launcher/qs-drm-launcher.c, this port's own file, not a copy) passes the native
+# 1920x1080 fullscreen mode on the command line, so a lower mode that a session persisted in
+# id1/config.cfg never becomes the default (GPU migration P1 + M9).
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
@@ -149,12 +153,24 @@ p_build() {
 	GAMEDRM_OBJDUMP="${NL_OBJDUMP}" bash "${GD}/check-swap-order.sh" "${QS}" || bad=1
 	[ "${bad}" = 0 ] || b_die "quakespasm-drm: verification failed (see above)"
 
+	# --- launcher ---------------------------------------------------------------------------------
+	local target="/usr/bin/${qs_name}"
+	"${NL_CC}" -O2 -static -Wall -Wextra -Werror --sysroot="${NL_SYSROOT}/" -B"${NL_SYSROOT}/lib/" -iprefix "${NL_SYSROOT}/" \
+		-DQSDRM_TARGET="\"${target}\"" -o "${out}/qs-drm" "${PREFIX_PORT}/launcher/qs-drm-launcher.c"
+	nl_no_undefined "${out}/qs-drm"
+	grep -aqF "${target}" "${out}/qs-drm" || b_die "launcher ELF lacks its exec target ${target}"
+
 	local p="${PREFIX_PORT_INSTALL}"
 	mkdir -p "${p}/bin" "${p}/prog" "${p}/share/quakespasm-drm"
 	install -m 755 "${QS}" "${p}/prog/${qs_name}"
 	install -m 755 "${QS}.stripped" "${p}/bin/${qs_name}"
+	install -m 755 "${out}/qs-drm" "${p}/bin/qs-drm"
 	install -m 644 "${QS}.map" "${p}/share/quakespasm-drm/"
 	if b_use rootfs; then
 		b_install "${p}/bin/${qs_name}" /usr/bin
+		b_install "${p}/bin/qs-drm" /bin
+		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
+		# image). P4 gives the programs the plain names themselves.
+		install -m 755 "${p}/bin/qs-drm" "${PREFIX_FS}/root/usr/bin/quakespasm"
 	fi
 }

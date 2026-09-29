@@ -27,7 +27,8 @@
 	conflicts="yquake2_drm!=${version}"
 	depends="yquake2 sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/yquake2-drm and its launcher /usr/bin/quake2-drm into the image
+	# rootfs: install /usr/bin/yquake2-drm and its launcher /usr/bin/quake2-drm into the image,
+	# the launcher also as /usr/bin/quake2
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -65,4 +66,10 @@ p_build() {
 	G_ENGINE_SYMS="GL3_Init GL3_EndFrame gladLoadGLES2Loader GetRefAPI Qcommon_Init"
 	G_DO_CONTROL=1
 	g_main
+
+	# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
+	# image). P4 gives the programs the plain names themselves.
+	if b_use rootfs; then
+		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake2-drm" "${PREFIX_FS}/root/usr/bin/quake2"
+	fi
 }

@@ -26,7 +26,8 @@
 	conflicts="quake3_drm!=${version}"
 	depends="quake3 sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/quake3e-drm and its launcher /usr/bin/quake3-drm into the image
+	# rootfs: install /usr/bin/quake3e-drm and its launcher /usr/bin/quake3-drm into the image,
+	# the launcher also as /usr/bin/quake3
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -63,4 +64,10 @@ p_build() {
 	G_ENGINE_SYMS="GLimp_Init GLimp_EndFrame GetRefAPI Com_Init VM_Compile"
 	G_DO_CONTROL=1
 	g_main
+
+	# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
+	# image). P4 gives the programs the plain names themselves.
+	if b_use rootfs; then
+		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake3-drm" "${PREFIX_FS}/root/usr/bin/quake3"
+	fi
 }

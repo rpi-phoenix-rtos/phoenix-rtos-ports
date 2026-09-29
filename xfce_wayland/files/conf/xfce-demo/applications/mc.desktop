@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Midnight Commander
+GenericName=File Manager
+Comment=A text-mode file manager in a terminal
+Exec=/bin/foot-2 -e /bin/mc
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileManager;

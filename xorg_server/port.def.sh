@@ -30,6 +30,11 @@
 
 	conflicts=""
 	depends="xorg_libs xorg_fonts zlib"
+	# rootfs: install /usr/bin/Xphoenix into the image (the RPI4B_GPU_LEGACY=1 image). Without
+	# it the port only builds: the default image pulls it as a build dependency
+	# (xorg_server_drm takes libmd.a from this port) and ships the *_drm program instead.
+	# TODO(TD-24): goes with the old GPU stack (P3).
+	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
@@ -137,6 +142,10 @@ composite/.libs/libcomposite.a config/.libs/libconfig.a os/.libs/libos.a)
 		|| b_die "xorg-server: Xphoenix link failed"
 	"${CROSS}readelf" -h "${PREFIX_PROG}/Xphoenix" | grep -q AArch64 || b_die "xorg-server: Xphoenix not aarch64"
 	${STRIP} -o "${PREFIX_PROG_STRIPPED}/Xphoenix" "${PREFIX_PROG}/Xphoenix"
-	b_install "${PREFIX_PROG_TO_INSTALL}/Xphoenix" /usr/bin
-	echo "xorg-server: Xphoenix linked + installed (/usr/bin/Xphoenix)"
+	if b_use rootfs; then
+		b_install "${PREFIX_PROG_TO_INSTALL}/Xphoenix" /usr/bin
+		echo "xorg-server: Xphoenix linked + installed (/usr/bin/Xphoenix)"
+	else
+		echo "xorg-server: Xphoenix linked (not installed: USE rootfs off)"
+	fi
 }

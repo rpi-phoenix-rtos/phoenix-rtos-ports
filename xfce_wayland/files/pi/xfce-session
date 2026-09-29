@@ -1,0 +1,93 @@
+#!/bin/bash
+#
+# xfce-session -- the XFCE desktop in ONE psh command. Run ON THE Pi at the psh prompt:
+#
+#     /bin/xfce-session
+#
+# Starts whichever of the three new-lane servers is not running yet (as startx-drm
+# --servers), then the XFCE 4.20 session on labwc (xfce-desktop-2.sh xfce): the session
+# bus, xfconfd, labwc, xfdesktop's wallpaper, the panel, a Thunar window. It runs until
+# the panel's Log Out (the button at the right end of the panel; labwc's root menu has
+# Log Out too), then stops everything cleanly and returns to psh. The servers stay up, so
+# a second /bin/xfce-session starts faster. On the desktop:
+#   Super                 application finder         Super+Return   terminal (foot)
+#   Super+E               file manager (Thunar)      Super+D, Alt+F2 application finder
+#   Super+Space           fuzzel launcher            right click on the wallpaper: desktop menu
+#   the panel: applications menu, launchers (terminal, files, app finder), window buttons,
+#   the clock (local time), Log Out
+#
+# Environment knobs (psh `export NAME=value` before the command):
+#   HOLD       0 (default) = until Log Out; N = log out by itself after N seconds (automated
+#              cycles: the same logout path as the button)
+#   RENDERER   labwc's renderer: pixman (default) | gles2 (GPU composition on V3D)
+#   TZ         POSIX TZ string (default Europe/Warsaw: CET-1CEST,M3.5.0,M10.5.0/3); GLib's
+#              clock and file dates use it, libphoenix's localtime() does not yet
+#   VERBOSE    labwc log level: 0 (default: errors) | 1 (-V) | 2 (-d)
+#   THUNAR_START 1 (default) = open a Thunar window at start; THUNAR_SECOND=<dir> = then open
+#              <dir> with a second `thunar` (forwarded to the running one over the bus)
+#   V3DA_CMD KMS_CMD SHMSRV_CMD   the server commands (defaults below); NO_SERVERS=1 skips them
+#   SESSION_SCRIPT (default /bin/xfce-desktop-2.sh) and every knob it reads
+#
+# Every line of ours starts with "XFCE-SESSION " (grading); the session's own start with "XFCE ".
+#
+# Copyright 2026 Phoenix Systems
+#
+# This file is part of Phoenix-RTOS.
+#
+# %LICENSE%
+
+# psh wires a program's stdout to the console but not always its stderr (as startx-drm)
+exec 2>&1
+
+DEMO=/usr/lib/xfce-demo/bin
+V3DA_CMD=${V3DA_CMD:-/bin/rpi4-v3d-async-low -r 1 -m serial -i}
+KMS_CMD=${KMS_CMD:-/bin/rpi4-kms-g7 -G -p 96 -C}
+SHMSRV_CMD=${SHMSRV_CMD:-/bin/shmsrv}
+SESSION_SCRIPT=${SESSION_SCRIPT:-/bin/xfce-desktop-2.sh}
+
+export HOLD=${HOLD:-0}
+export RENDERER=${RENDERER:-pixman}
+export TZ=${TZ:-CET-1CEST,M3.5.0,M10.5.0/3}
+export VERBOSE=${VERBOSE:-0}
+export LABWC=${LABWC:-/bin/labwc-2}
+export CONF_DIR=${CONF_DIR:-/etc/xdg/labwc-xfce-demo}
+export XFCE_BIN=${XFCE_BIN:-${DEMO}}
+export THUNAR=${THUNAR:-${DEMO}/thunar}
+export PANEL=${PANEL:-${DEMO}/xfce4-panel}
+export XFDESKTOP=${XFDESKTOP:-${DEMO}/xfdesktop}
+# settings saved by the demo's programs (the panel layout on quit), apart from other XFCE
+# sessions of the same boot (m7f/m7h: /tmp/xfce-home)
+export XFCE_HOME=${XFCE_HOME:-/tmp/xfce-demo-home}
+# the demo's panel layout and fuzzel.ini, then XFCE's defaults
+export XFCE_CONFIG_DIRS=${XFCE_CONFIG_DIRS:-/etc/xdg/xfce-demo:/etc/xdg}
+# the demo's .desktop files (terminal = foot-2, files = this Thunar) shadow the ones of the
+# same name in /usr/share/applications
+export XFCE_DATA_DIRS=${XFCE_DATA_DIRS:-/usr/share/xfce-demo:/usr/share}
+# when HOLD is over: the Log Out button's own command
+export LOGOUT_CMD=${LOGOUT_CMD:-${DEMO}/loginctl terminate-session}
+
+echo "XFCE-SESSION start hold=${HOLD} renderer=${RENDERER} tz=${TZ} labwc=${LABWC} conf=${CONF_DIR} session=${SESSION_SCRIPT}"
+
+# --- servers (startx-drm's checks) -------------------------------------------------------------
+# /dev/v3d-async and /dev/kms are devfs nodes; /shm answers shmsrv's own stats request. Each
+# server daemonizes and refuses a second instance by itself.
+v3da_up() { [ -e /dev/v3d-async ]; }
+kms_up() { [ -e /dev/kms ]; }
+shm_up() { /bin/shmsrv -s > /dev/null 2>&1; }
+state() { "$1" && echo up || echo missing; }
+if [ "${NO_SERVERS:-0}" != 1 ]; then
+	# order matters: rpi4-kms -G connects to the render server at start-up
+	if ! v3da_up; then echo "XFCE-SESSION server start: ${V3DA_CMD}"; ${V3DA_CMD}; fi
+	if ! kms_up; then echo "XFCE-SESSION server start: ${KMS_CMD}"; ${KMS_CMD}; fi
+	if ! shm_up; then echo "XFCE-SESSION server start: ${SHMSRV_CMD}"; ${SHMSRV_CMD}; fi
+fi
+echo "XFCE-SESSION servers v3d-async=$(state v3da_up) kms=$(state kms_up) shm=$(state shm_up)"
+if ! v3da_up || ! kms_up || ! shm_up; then
+	echo "XFCE-SESSION done rc=1 (a server is missing)"
+	exit 1
+fi
+
+/bin/bash "${SESSION_SCRIPT}" xfce input
+rc=$?
+echo "XFCE-SESSION done rc=${rc}"
+exit "${rc}"

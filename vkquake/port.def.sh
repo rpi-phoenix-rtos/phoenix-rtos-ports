@@ -32,6 +32,10 @@
 	# ENTIRELY — a header shim (glue/sdl-shim/SDL.h) plus the SDL2 threading/path bodies
 	# in glue/pl_phoenix_sdlcompat.c — so no libSDL2.a is linked. See the header note.
 	depends=""
+	# rootfs: install /usr/bin/vkquake into the image (the RPI4B_GPU_LEGACY=1 image; the
+	# default image ships the *_drm program instead). TODO(TD-24): goes with the old GPU stack
+	# (P3).
+	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
@@ -255,5 +259,7 @@ p_build() {
 		-o "${PREFIX_PROG}/vkquake"
 
 	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/vkquake" "${PREFIX_PROG}/vkquake"
-	b_install "${PREFIX_PROG_TO_INSTALL}/vkquake" /usr/bin
+	if b_use rootfs; then
+		b_install "${PREFIX_PROG_TO_INSTALL}/vkquake" /usr/bin
+	fi
 }
