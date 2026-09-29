@@ -194,8 +194,9 @@ p_build() {
 
 	# Compile all STK src + bundled libs (GLES2/SP path); CMake's own link of the
 	# supertuxkart target is EXPECTED to fail (see the top of p_build). `make -k` keeps going
-	# so every real compile error surfaces in one pass; a genuine compile failure leaves no
-	# link.txt, or objects missing from it (checked below).
+	# so every real compile error surfaces in one pass. CMake writes link.txt at generate
+	# time, so a compile failure shows as objects named by link.txt that do not exist
+	# (checked below).
 	echo ">> [supertuxkart] NOTE: CMake's own link of bin/supertuxkart is EXPECTED"
 	echo ">> [supertuxkart]   to fail below with undefined GL/EGL/zlib/mbedtls symbols;"
 	echo ">> [supertuxkart]   supertuxkart_drm links the program from this build tree."
@@ -203,7 +204,7 @@ p_build() {
 
 
 	local linktxt="${build}/CMakeFiles/supertuxkart.dir/link.txt" f n=0
-	[ -f "${linktxt}" ] || b_die "supertuxkart: CMake link.txt missing — the make stage did not reach linking (a real compile error). See the build log."
+	[ -f "${linktxt}" ] || b_die "supertuxkart: CMake link.txt missing — the configure did not generate the supertuxkart target. See the build log."
 	[ "$(grep -oF " ${SP}/lib/libSDL2.a " "${linktxt}" | wc -l)" = 1 ] \
 		|| b_die "supertuxkart: link.txt does not name ${SP}/lib/libSDL2.a exactly once"
 	for f in $(tr ' ' '\n' < "${linktxt}" | grep -E '\.(o|obj)$'); do
