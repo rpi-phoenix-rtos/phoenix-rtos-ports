@@ -119,17 +119,20 @@ p_build() {
 		> "${D}/libffi/lib/pkgconfig/libffi.pc"
 
 	# --- wlphx-compat: epoll/timerfd/signalfd, memfd_create over shmsrv -------------------------
-	local defs=() f o="${PREFIX_PORT_BUILD}/compat-obj"
+	local defs=() f o="${PREFIX_PORT_BUILD}/compat-obj" objs=()
 	nl_has_libc msync || defs+=(-DWLPHX_NEED_MSYNC)
 	nl_has_libc pipe2 || defs+=(-DWLPHX_NEED_PIPE2)
+	rm -rf "${o}"
 	mkdir -p "${o}"
 	for f in wlphx_epoll wlphx_memfd wlphx_misc; do
 		"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${compat_inc}" -I"${mesa_compat_inc}" \
 			"${defs[@]}" -c "${PREFIX_PORT}/glue/compat/src/${f}.c" -o "${o}/${f}.o"
+		objs+=("${o}/${f}.o")
 	done
 	echo "wayland: compat stand-ins: ${defs[*]:-none}"
 	rm -f "${P}/lib/libwlphx-compat.a"
-	"${NL_AR}" rcs "${P}/lib/libwlphx-compat.a" "${o}"/*.o
+	# exactly the three objects: shmsrv.o (below, with its main()) must never land in the library
+	"${NL_AR}" rcs "${P}/lib/libwlphx-compat.a" "${objs[@]}"
 	cat > "${P}/lib/pkgconfig/wlphx-compat.pc" <<EOF
 prefix=${P}
 Name: wlphx-compat
@@ -170,17 +173,19 @@ EOF
 		[ -f "${P}/lib/${t}.a" ] || b_die "${t}.a not installed"
 	done
 	nl_has_sym "${P}/lib/libwayland-server.a" wl_display_create || b_die "libwayland-server.a: no wl_display_create"
+	! nl_has_sym "${P}/lib/libwlphx-compat.a" main || b_die "libwlphx-compat.a defines main()"
 	for t in memfd_create epoll_wait timerfd_settime signalfd eventfd __wrap_close __wrap_write; do
 		nl_has_sym "${P}/lib/libwlphx-compat.a" "${t}" || b_die "libwlphx-compat.a: no ${t}"
 	done
 	[ -f "${P}/share/pkgconfig/wayland-protocols.pc" ] || b_die "wayland-protocols.pc not installed"
 
 	# --- shmsrv: the /shm server (memfd_create backing) -----------------------------------------
-	mkdir -p "${P}/bin" "${P}/prog"
+	local so="${PREFIX_PORT_BUILD}/shmsrv-obj"
+	mkdir -p "${P}/bin" "${P}/prog" "${so}"
 	cp "${PREFIX_PORT}/glue/shmsrv/shm_proto.h" "${P}/include/"
 	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${PREFIX_PORT}/glue/shmsrv/shmsrv.c" \
-		-o "${o}/shmsrv.o"
-	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -o "${P}/prog/shmsrv" "${o}/shmsrv.o"
+		-o "${so}/shmsrv.o"
+	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -o "${P}/prog/shmsrv" "${so}/shmsrv.o"
 	"${NL_STRIP}" -o "${P}/bin/shmsrv" "${P}/prog/shmsrv"
 	nl_no_undefined "${P}/prog/shmsrv"
 	nl_forbid_old_lane "${P}/bin/shmsrv" /dev/v3d-srv Xphoenix '[fbdev]' glamor_phoenix phxgl
