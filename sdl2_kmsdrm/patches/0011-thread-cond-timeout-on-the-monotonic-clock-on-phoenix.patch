@@ -1,0 +1,77 @@
+Phoenix-RTOS: SDL_CondWaitTimeout() on CLOCK_MONOTONIC.
+
+SDL's pthread SDL_CondWaitTimeout() builds its deadline from CLOCK_REALTIME and waits on a
+condition variable created without attributes. libphoenix creates such a condition variable
+on CLOCK_MONOTONIC (sources/libphoenix/pthread/pthread.c, PTHREAD_COND_CLOCK_DEFAULT; kept on
+purpose, c283f2d: the wall clock jumps from 1970 to today when the boot sets the time). After
+that jump a CLOCK_REALTIME deadline is ~56 years ahead on the monotonic clock, so every timed
+wait -- SDL_CondWaitTimeout(), and SDL_SemWaitTimeout() of the generic semaphores built on it
+(SDL_PTHREADS_SEM is off on Phoenix) -- lasts until the next signal.
+
+Seen in ffplay (M10, m10a0/m10a1): its read thread's 10 ms wait at the end of the file never
+times out, so -autoexit never fires and a quit after the end joins that thread forever.
+
+On Phoenix, create SDL's condition variables on CLOCK_MONOTONIC explicitly and take the
+deadline from the same clock: correct whatever libphoenix's default is, and immune to the
+wall-clock jump. Other platforms are unchanged.
+
+Part of the shared set (sdl2-drm/patches = phoenix-rtos-ports sdl2_kmsdrm/patches), after 0010.
+
+--- a/src/thread/pthread/SDL_syscond.c
++++ b/src/thread/pthread/SDL_syscond.c
+@@ -34,6 +34,37 @@
+     pthread_cond_t cond;
+ };
+ 
++/* Phoenix-RTOS: time out on CLOCK_MONOTONIC. The wall clock jumps when the time is set
++   during boot (1970 -> today), and libphoenix creates a condition variable without
++   attributes on CLOCK_MONOTONIC, not on CLOCK_REALTIME: a CLOCK_REALTIME deadline there
++   lies decades ahead, so every timed wait would last until the next signal. The condition
++   variable and the deadline both name the monotonic clock, whatever the default. */
++#if defined(__phoenix__) && defined(HAVE_CLOCK_GETTIME)
++#define SDL_COND_MONOTONIC 1
++#define SDL_COND_CLOCK     CLOCK_MONOTONIC
++#else
++#define SDL_COND_CLOCK CLOCK_REALTIME
++#endif
++
++static int SDL_InitCondClock(pthread_cond_t *cond)
++{
++#ifdef SDL_COND_MONOTONIC
++    pthread_condattr_t attr;
++    int rc = pthread_condattr_init(&attr);
++
++    if (rc == 0) {
++        rc = pthread_condattr_setclock(&attr, SDL_COND_CLOCK);
++        if (rc == 0) {
++            rc = pthread_cond_init(cond, &attr);
++        }
++        pthread_condattr_destroy(&attr);
++    }
++    return rc;
++#else
++    return pthread_cond_init(cond, NULL);
++#endif
++}
++
+ /* Create a condition variable */
+ SDL_cond *SDL_CreateCond(void)
+ {
+@@ -41,7 +72,7 @@
+ 
+     cond = (SDL_cond *)SDL_malloc(sizeof(SDL_cond));
+     if (cond) {
+-        if (pthread_cond_init(&cond->cond, NULL) != 0) {
++        if (SDL_InitCondClock(&cond->cond) != 0) {
+             SDL_SetError("pthread_cond_init() failed");
+             SDL_free(cond);
+             cond = NULL;
+@@ -104,7 +135,7 @@
+     }
+ 
+ #ifdef HAVE_CLOCK_GETTIME
+-    clock_gettime(CLOCK_REALTIME, &abstime);
++    clock_gettime(SDL_COND_CLOCK, &abstime);
+ 
+     abstime.tv_nsec += (ms % 1000) * 1000000;
+     abstime.tv_sec += ms / 1000;
