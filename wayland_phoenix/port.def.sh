@@ -221,17 +221,19 @@ EOF
 	_dep_view zlib z "$(sed -n 's/^#define ZLIB_VERSION "\(.*\)"/\1/p' "${B}/include/zlib.h")" "" zlib.h zconf.h
 
 	# --- compat library ---
+	rm -rf "${out}/compat-obj"   # never archive a stale object (an old shmsrv.o carried a main())
 	mkdir -p "${out}/compat-obj"
-	local compat_defs=() f
+	local compat_defs=() f compat_objs=()
 	_has_libc msync || compat_defs+=(-DWLPHX_NEED_MSYNC)
 	_has_libc pipe2 || compat_defs+=(-DWLPHX_NEED_PIPE2)
 	for f in wlphx_epoll wlphx_memfd wlphx_misc; do
 		"${TC}-gcc" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${TFLAGS[@]}" -I"${COMPAT_INC}" -I"${MESA_COMPAT_INC}" \
 			"${compat_defs[@]}" -c "${F}/compat/src/${f}.c" -o "${out}/compat-obj/${f}.o"
+		compat_objs+=("${out}/compat-obj/${f}.o")
 	done
 	echo "wayland_phoenix: compat stand-ins: ${compat_defs[*]:-none}"
 	rm -f "${P}/lib/libwlphx-compat.a"
-	"${TC}-gcc-ar" rcs "${P}/lib/libwlphx-compat.a" "${out}/compat-obj/"*.o
+	"${TC}-gcc-ar" rcs "${P}/lib/libwlphx-compat.a" "${compat_objs[@]}"
 	cat >"${P}/lib/pkgconfig/wlphx-compat.pc" <<EOF
 prefix=${P}
 Name: wlphx-compat
