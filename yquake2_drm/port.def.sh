@@ -6,7 +6,7 @@
 
 	name="yquake2_drm"
 	version="8.71"
-	desc="yquake2-drm + quake2-drm launcher: the yquake2 port's engine relinked on the new GPU lane (SDL KMSDRM + Mesa GBM/EGL/GLES)"
+	desc="yquake2-drm + quake2-drm launcher: the yquake2 port's engine linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL/GLES)"
 
 	# The yquake2 port's archive. This clone RELINKS the yquake2 port's objects (it compiles
 	# nothing of the engine); the archive is extracted only because every framework port has
@@ -22,28 +22,33 @@
 	license="GPL-2.0-or-later"
 	license_file="LICENSE"
 
-	# NEW GPU LANE: private prefix. `yquake2` (and through it `sdl2`) is a dependency so that
-	# port_manager builds the engine objects and the build.log holding its final link first.
+	# Private prefix. `yquake2` (the engine port: compiles the engine, installs nothing) is a
+	# dependency so that its objects and port-sources/<it>/engine-link.sh exist first.
 	conflicts="yquake2_drm!=${version}"
-	depends="yquake2 sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
+	depends="yquake2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
 	# rootfs: install /usr/bin/yquake2-drm and its launcher /usr/bin/quake2-drm into the image,
 	# the launcher also as /usr/bin/quake2
+	# (the XFCE menu entry "Quake II" = /bin/game-window.sh quake2: the same program in a
+	# window of the desktop)
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
 
 # Ported from the coordination repo's tools/gpu-lane/sdl2-drm/build-quake2-drm.sh. The yquake2
-# port's own final link (from its build.log) re-run with the old SDL-GL glue objects and the
-# old group (ports libSDL2.a, libGL-phoenix.a, libv3d-phoenix.a) swapped for the new stack in
-# the stk-drm shape: yQuake2's ref_gl3 is a GLES3 renderer that loads every gl* through glad +
-# SDL_GL_GetProcAddress (= eglGetProcAddress), so it links libGLESv2 + the shared glapi, not
-# the desktop-GL bridge. The body and its proofs: sdl2_kmsdrm's gamedrm/relink-sdl-gl-game.subr.
-# The launcher is the shipped one (glue/quake2-launcher.c, a copy of the coordination repo's
-# tools/yquake2-port/quake2-launcher.c) with only its exec target rewritten
-# (/usr/bin/yquake2 -> /usr/bin/yquake2-drm): the same ram-stage-play of /usr/share/quake2 to
-# /tmp/quake2 and the same video/demo arguments.
+# port's engine objects (its port-sources/yquake2-8.71/engine-link.sh: objects, flags, tail)
+# linked on the GPU stack in the stk-drm shape: yQuake2's ref_gl3 is a GLES3 renderer that
+# loads every gl* through glad + SDL_GL_GetProcAddress (= eglGetProcAddress), so it links
+# libGLESv2 + the shared glapi, not the desktop-GL bridge. The body and its proofs:
+# sdl2_kmsdrm's gamedrm/relink-sdl-gl-game.subr. The launcher is the shipped one
+# (glue/quake2-launcher.c, a copy of the coordination repo's tools/yquake2-port/quake2-launcher.c)
+# with only its exec target rewritten (/usr/bin/yquake2 -> /usr/bin/yquake2-drm): the same
+# ram-stage-play of /usr/share/quake2 to /tmp/quake2 and the same video/demo arguments.
+# ONE binary: sdl2_kmsdrm's libSDL2.a has the KMSDRM AND the Wayland video drivers, Mesa's GL
+# build EGL on GBM and on Wayland, so the program runs full screen on KMS from psh and in a
+# window of the desktop (/bin/game-window.sh: SDL_VIDEODRIVER=wayland + the windowed
+# arguments, which the launcher forwards).
 
 p_prepare() {
 	:
@@ -64,7 +69,6 @@ p_build() {
 	G_LAUNCHER_SRC="${PREFIX_PORT}/glue/quake2-launcher.c"
 	G_LAUNCHER=quake2
 	G_ENGINE_SYMS="GL3_Init GL3_EndFrame gladLoadGLES2Loader GetRefAPI Qcommon_Init"
-	G_DO_CONTROL=1
 	g_main
 
 	# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
@@ -72,4 +76,6 @@ p_build() {
 	if b_use rootfs; then
 		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake2-drm" "${PREFIX_FS}/root/usr/bin/quake2"
 	fi
+
+	game_desktop_entry quake2 "Quake II" "yQuake2 in a window on the desktop"
 }

@@ -1,0 +1,65 @@
+Phoenix-RTOS: SDL's stock Wayland video driver, statically linked.
+
+The PHOENIX cmake branch (sdl2-drm patch 0002) skips the generic UNIX host probes;
+sdl2-drm patch 0006 added CheckEGL() + CheckKMSDRM(). This adds CheckWayland(): it
+finds wayland-client, wayland-egl, wayland-cursor, egl and xkbcommon through
+pkg-config of the cross prefixes the build points PKG_CONFIG_LIBDIR at (never the
+host's) and runs the host wayland-scanner on SDL's bundled protocol XML files.
+
+ * SDL_WAYLAND_SHARED must be OFF (enforced): SDL_waylanddyn.c then binds the
+   WAYLAND_wl_*/xkb_* symbols to the real functions instead of SDL_LoadObject().
+ * SDL_WAYLAND_LIBDECOR must be OFF (enforced): libdecor loads its decoration
+   plugins as shared objects. SDL then asks the compositor for server-side
+   decorations (zxdg_decoration_manager_v1), which labwc and Weston draw.
+ * HAVE_MEMFD_CREATE: libphoenix has none; the Wayland stack's compat library
+   (tools/gpu-lane/weston-drm/compat, over shmsrv) provides it and every Wayland
+   program links it. The build puts that compat include directory on the C flags.
+ * The core protocol's interface tables come from libwayland-client.a: SDL's
+   copy generated from its bundled wayland.xml would collide with it in a static
+   link, so only SDL's generated header is kept.
+ * src/core/unix (SDL_IOReady: the display fd poll) is built, as in the UNIX branch.
+
+KMSDRM stays enabled: with no Wayland socket, wl_display_connect() fails and SDL's
+video init falls through to KMSDRM, as on Linux.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1524,6 +1524,38 @@
+     set(SDL_INPUT_PHOENIX 1)
+     file(GLOB CORE_PHOENIX_SOURCES ${SDL2_SOURCE_DIR}/src/core/phoenix/*.c)
+     list(APPEND SOURCE_FILES ${CORE_PHOENIX_SOURCES})
++
++    # SDL's stock Wayland driver, for windows on a Wayland desktop (labwc, Weston):
++    # xdg-shell toplevels, server-side decorations through xdg-decoration, wl_seat
++    # keyboard (xkbcommon) + pointer (relative pointer, pointer constraints), GL/GLES
++    # through Mesa's EGL wayland platform. Linked statically like everything else on
++    # Phoenix: SDL_WAYLAND_SHARED must be OFF, and libdecor (a shared-library plugin
++    # system) is not used. The KMSDRM driver above stays: without a Wayland socket
++    # wl_display_connect() fails and SDL falls through to KMSDRM.
++    if(SDL_WAYLAND)
++      if(SDL_WAYLAND_SHARED)
++        message_error("SDL_WAYLAND_SHARED must be OFF on Phoenix-RTOS (static linking only)")
++      endif()
++      if(SDL_WAYLAND_LIBDECOR)
++        message_error("SDL_WAYLAND_LIBDECOR must be OFF on Phoenix-RTOS (no shared-library plugins)")
++      endif()
++      CheckWayland()
++      if(NOT HAVE_WAYLAND)
++        message_error("Phoenix-RTOS Wayland needs wayland-client, wayland-egl, wayland-cursor, egl and xkbcommon from the cross prefixes (pkg-config)")
++      endif()
++      # The core protocol's interface tables (wl_display_interface, wl_surface_interface...)
++      # are defined by libwayland-client itself. With a shared libwayland SDL's own copy,
++      # generated from its bundled wayland.xml, stays private to libSDL2; linked statically
++      # the two collide, so only SDL's generated header is used (libwayland 1.24 >= SDL's XML).
++      list(REMOVE_ITEM SOURCE_FILES "${CMAKE_CURRENT_BINARY_DIR}/wayland-generated-protocols/wayland-protocol.c")
++      # SDL_IOReady() (the display fd poll of the Wayland event loop, frame-callback waits)
++      file(GLOB CORE_UNIX_SOURCES ${SDL2_SOURCE_DIR}/src/core/unix/*.c)
++      list(APPEND SOURCE_FILES ${CORE_UNIX_SOURCES})
++      # libphoenix has no memfd_create(): the Wayland stack's compat library (weston-drm
++      # wlphx-compat, over the shmsrv server) provides it, and every Wayland program links
++      # that library. With it, SDL's cursor pools are shared memory the compositor maps too.
++      set(HAVE_MEMFD_CREATE 1)
++    endif()
+   endif()
+ 
+ elseif(UNIX AND NOT APPLE AND NOT RISCOS AND NOT HAIKU)

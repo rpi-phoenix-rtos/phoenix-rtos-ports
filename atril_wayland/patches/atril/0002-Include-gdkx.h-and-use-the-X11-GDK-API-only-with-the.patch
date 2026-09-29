@@ -1,0 +1,161 @@
+From dcea05bf7df1b16ab06d23e3bcf201bf9e28e6ed Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 21:14:07 +0200
+Subject: [PATCH 2/5] Include gdkx.h and use the X11 GDK API only with the X11
+ backend
+
+A GTK 3 built without its X11 backend installs no gdk/gdkx.h. Four files
+include it without using it; ev-application.c sets the X11 user time
+and sends the X11 screen number, which on other backends it already
+replaces (screen 0, gtk_window_present() without a timestamp). All under
+#ifdef GDK_WINDOWING_X11 now (gdkconfig.h, through gtk/gtk.h, which each
+file includes first).
+---
+ libdocument/ev-document-misc.c |  2 ++
+ libview/ev-view-presentation.c |  2 ++
+ libview/ev-view.c              |  2 ++
+ shell/ev-application.c         | 15 ++++++++++++++-
+ shell/ev-window.c              |  2 ++
+ 5 files changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/libdocument/ev-document-misc.c b/libdocument/ev-document-misc.c
+index 06dce9c..5d74329 100644
+--- a/libdocument/ev-document-misc.c
++++ b/libdocument/ev-document-misc.c
+@@ -25,7 +25,9 @@
+ 
+ #include <glib.h>
+ #include <gtk/gtk.h>
++#ifdef GDK_WINDOWING_X11
+ #include <gdk/gdkx.h>
++#endif
+ 
+ #include "ev-document-misc.h"
+ 
+diff --git a/libview/ev-view-presentation.c b/libview/ev-view-presentation.c
+index ac723eb..dd00d08 100644
+--- a/libview/ev-view-presentation.c
++++ b/libview/ev-view-presentation.c
+@@ -23,7 +23,9 @@
+ #include <stdlib.h>
+ #include <glib/gi18n-lib.h>
+ #include <gtk/gtk.h>
++#ifdef GDK_WINDOWING_X11
+ #include <gdk/gdkx.h>
++#endif
+ #include <gdk/gdkkeysyms.h>
+ 
+ #include "ev-view-presentation.h"
+diff --git a/libview/ev-view.c b/libview/ev-view.c
+index dfd4775..ef18b26 100644
+--- a/libview/ev-view.c
++++ b/libview/ev-view.c
+@@ -26,7 +26,9 @@
+ 
+ #include <glib/gi18n-lib.h>
+ #include <gtk/gtk.h>
++#ifdef GDK_WINDOWING_X11
+ #include <gdk/gdkx.h>
++#endif
+ #include <gdk/gdkkeysyms.h>
+ 
+ #include "ev-mapping-list.h"
+diff --git a/shell/ev-application.c b/shell/ev-application.c
+index 37d35ea..002c1d5 100644
+--- a/shell/ev-application.c
++++ b/shell/ev-application.c
+@@ -29,7 +29,9 @@
+ #include <glib/gi18n.h>
+ #include <glib/gstdio.h>
+ #include <gtk/gtk.h>
++#ifdef GDK_WINDOWING_X11
+ #include <gdk/gdkx.h>
++#endif
+ 
+ #include "eggsmclient.h"
+ 
+@@ -426,11 +428,14 @@ on_register_uri_cb (GObject      *source_object,
+ 	                       "display",
+ 	                       g_variant_new_string (gdk_display_get_name (gdk_screen_get_display (data->screen))));
+ 
++#ifdef GDK_WINDOWING_X11
+ 	if (GDK_IS_X11_SCREEN (data->screen)) {
+ 		g_variant_builder_add (&builder, "{sv}",
+ 		                     "screen",
+ 		                      g_variant_new_int32 (gdk_x11_screen_get_screen_number (data->screen)));
+-	} else {
++	} else
++#endif
++	{
+ 		/*Do not crash on wayland, use the first monitor for now*/
+ 		g_variant_builder_add (&builder, "{sv}",
+ 		                     "screen",
+@@ -599,7 +604,9 @@ ev_application_open_uri_in_window (EvApplication  *application,
+ 				   const gchar    *search_string,
+ 				   guint           timestamp)
+ {
++#ifdef GDK_WINDOWING_X11
+ 	GdkWindow *gdk_window;
++#endif
+ 
+ 	if (uri == NULL)
+ 	        uri = application->uri;
+@@ -616,6 +623,7 @@ ev_application_open_uri_in_window (EvApplication  *application,
+ 	if (!gtk_widget_get_realized (GTK_WIDGET (ev_window)))
+ 		gtk_widget_realize (GTK_WIDGET (ev_window));
+ 
++#ifdef GDK_WINDOWING_X11
+ 	gdk_window = gtk_widget_get_window (GTK_WIDGET (ev_window));
+ 
+ 	if (GDK_IS_X11_WINDOW (gdk_window)) {
+@@ -623,6 +631,7 @@ ev_application_open_uri_in_window (EvApplication  *application,
+ 			timestamp = gdk_x11_get_server_time (gdk_window);
+ 		gdk_x11_window_set_user_time (gdk_window, timestamp);
+ 	}
++#endif
+ 
+ 	gtk_window_present (GTK_WINDOW (ev_window));
+ }
+@@ -699,7 +708,9 @@ ev_application_open_window (EvApplication *application,
+ 			    guint32        timestamp)
+ {
+ 	GtkWidget *new_window = ev_window_new ();
++#ifdef GDK_WINDOWING_X11
+ 	GdkWindow *gdk_window;
++#endif
+ 
+ 	if (screen) {
+ 		ev_stock_icons_set_screen (screen);
+@@ -709,6 +720,7 @@ ev_application_open_window (EvApplication *application,
+ 	if (!gtk_widget_get_realized (new_window))
+ 		gtk_widget_realize (new_window);
+ 
++#ifdef GDK_WINDOWING_X11
+ 	gdk_window = gtk_widget_get_window (GTK_WIDGET (new_window));
+ 
+ 	if (GDK_IS_X11_WINDOW (gdk_window)) {
+@@ -716,6 +728,7 @@ ev_application_open_window (EvApplication *application,
+ 			timestamp = gdk_x11_get_server_time (gdk_window);
+ 		gdk_x11_window_set_user_time (gdk_window, timestamp);
+ 	}
++#endif
+ 
+ 	gtk_window_present (GTK_WINDOW (new_window));
+ }
+diff --git a/shell/ev-window.c b/shell/ev-window.c
+index b07e190..25cf374 100644
+--- a/shell/ev-window.c
++++ b/shell/ev-window.c
+@@ -40,7 +40,9 @@
+ #include <glib/gi18n.h>
+ #include <gio/gio.h>
+ #include <gtk/gtk.h>
++#ifdef GDK_WINDOWING_X11
+ #include <gdk/gdkx.h>
++#endif
+ 
+ #include "egg-editable-toolbar.h"
+ #include "egg-toolbar-editor.h"
+-- 
+2.53.0
+

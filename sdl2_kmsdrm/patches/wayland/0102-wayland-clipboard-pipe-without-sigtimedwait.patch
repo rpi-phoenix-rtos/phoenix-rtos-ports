@@ -1,0 +1,69 @@
+Phoenix-RTOS: SDL Wayland clipboard pipes without sigtimedwait() and PIPE_BUF.
+
+write_pipe() blocks SIGPIPE around its write() and then consumes a SIGPIPE the
+write may have raised with a zero-timeout sigtimedwait(), before it restores the
+mask. libphoenix has no sigtimedwait(). On Phoenix the write runs with SIGPIPE
+ignored instead (sigaction save/restore); a closed reader is reported as EPIPE in
+both variants. libphoenix's <limits.h> also has no PIPE_BUF, which sizes the
+chunks: the POSIX minimum (_POSIX_PIPE_BUF, 512) is used. Only the clipboard and
+drag-and-drop data path uses these pipes.
+
+--- a/src/video/wayland/SDL_waylanddatamanager.c
++++ b/src/video/wayland/SDL_waylanddatamanager.c
+@@ -35,6 +35,11 @@
+ #include "SDL_waylanddatamanager.h"
+ #include "primary-selection-unstable-v1-client-protocol.h"
+ 
++#if defined(__phoenix__) && !defined(PIPE_BUF)
++/* libphoenix's <limits.h> has no PIPE_BUF: use the POSIX minimum for an atomic pipe write */
++#define PIPE_BUF _POSIX_PIPE_BUF
++#endif
++
+ /* FIXME: This is arbitrary, but we want this to be less than a frame because
+  * any longer can potentially spin an infinite loop of PumpEvents (!)
+  */
+@@ -46,6 +51,18 @@
+     ssize_t bytes_written = 0;
+     ssize_t length = total_length - *pos;
+ 
++#ifdef __phoenix__
++    /* libphoenix has no sigtimedwait() to consume a SIGPIPE held back by the mask, so the
++     * write runs with SIGPIPE ignored instead (EPIPE is reported the same way). */
++    struct sigaction sa_ign, sa_old;
++
++    ready = SDL_IOReady(fd, SDL_IOR_WRITE, PIPE_MS_TIMEOUT);
++
++    SDL_zero(sa_ign);
++    sa_ign.sa_handler = SIG_IGN;
++    sigemptyset(&sa_ign.sa_mask);
++    sigaction(SIGPIPE, &sa_ign, &sa_old);
++#else
+     sigset_t sig_set;
+     sigset_t old_sig_set;
+     struct timespec zerotime = { 0 };
+@@ -60,6 +77,7 @@
+ #else
+     pthread_sigmask(SIG_BLOCK, &sig_set, &old_sig_set);
+ #endif
++#endif /* __phoenix__ */
+ 
+     if (ready == 0) {
+         bytes_written = SDL_SetError("Pipe timeout");
+@@ -75,6 +93,9 @@
+         }
+     }
+ 
++#ifdef __phoenix__
++    sigaction(SIGPIPE, &sa_old, NULL);
++#else
+     sigtimedwait(&sig_set, 0, &zerotime);
+ 
+ #ifdef SDL_THREADS_DISABLED
+@@ -82,6 +103,7 @@
+ #else
+     pthread_sigmask(SIG_SETMASK, &old_sig_set, NULL);
+ #endif
++#endif /* __phoenix__ */
+ 
+     return bytes_written;
+ }

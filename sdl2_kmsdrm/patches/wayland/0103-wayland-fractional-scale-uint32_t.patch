@@ -1,0 +1,17 @@
+wayland: the fractional-scale listener takes a uint32_t, not a uint.
+
+`uint` is a glibc/BSD <sys/types.h> extension that libphoenix does not define;
+the wp_fractional_scale_v1 preferred_scale event argument is a uint32_t in the
+generated protocol header.
+
+--- a/src/video/wayland/SDL_waylandwindow.c
++++ b/src/video/wayland/SDL_waylandwindow.c
+@@ -1620,7 +1620,7 @@
+ 
+ void handle_preferred_scale_changed(void *data,
+                                     struct wp_fractional_scale_v1 *wp_fractional_scale_v1,
+-                                    uint preferred_scale)
++                                    uint32_t preferred_scale)
+ {
+     SDL_WindowData *window = data;
+     float old_factor = window->scale_factor;

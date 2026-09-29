@@ -1,0 +1,174 @@
+From e76cb59ba319af3b3db958052b2b4e4b31c1efc2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 21:14:32 +0200
+Subject: [PATCH 3/5] shell: GtkImageMenuItem when built without
+ libmate-desktop
+
+MateImageMenuItem is the only libmate-desktop API Atril uses (three
+menus: the sidebar's page chooser, the navigation history and the
+outline's context menu). ev-image-menu-item.h wraps it; without
+HAVE_MATE_DESKTOP it maps to GtkImageMenuItem, the GTK 3 widget
+MateImageMenuItem was copied from (deprecated, still in GTK 3.24).
+---
+ shell/ev-image-menu-item.h   | 64 ++++++++++++++++++++++++++++++++++++
+ shell/ev-navigation-action.c |  4 +--
+ shell/ev-sidebar-links.c     |  6 ++--
+ shell/ev-sidebar.c           |  4 +--
+ shell/meson.build            |  1 +
+ 5 files changed, 72 insertions(+), 7 deletions(-)
+ create mode 100644 shell/ev-image-menu-item.h
+
+diff --git a/shell/ev-image-menu-item.h b/shell/ev-image-menu-item.h
+new file mode 100644
+index 0000000..345aefa
+--- /dev/null
++++ b/shell/ev-image-menu-item.h
+@@ -0,0 +1,64 @@
++/* ev-image-menu-item.h
++ *  this file is part of atril, a mate document viewer
++ *
++ * A menu item with an image: MateImageMenuItem from libmate-desktop, or,
++ * without it, GtkImageMenuItem (the GTK 3 widget MateImageMenuItem was
++ * copied from; deprecated, still present in GTK 3.24).
++ *
++ * Atril is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * Atril is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
++ */
++
++#ifndef EV_IMAGE_MENU_ITEM_H
++#define EV_IMAGE_MENU_ITEM_H
++
++#include <gtk/gtk.h>
++
++#ifdef HAVE_MATE_DESKTOP
++#include <libmate-desktop/mate-image-menu-item.h>
++#endif
++
++G_BEGIN_DECLS
++
++static inline GtkWidget *
++ev_image_menu_item_new_with_label (const gchar *label)
++{
++#ifdef HAVE_MATE_DESKTOP
++	return mate_image_menu_item_new_with_label (label);
++#else
++	GtkWidget *item;
++
++	G_GNUC_BEGIN_IGNORE_DEPRECATIONS
++	item = gtk_image_menu_item_new_with_label (label);
++	G_GNUC_END_IGNORE_DEPRECATIONS
++	return item;
++#endif
++}
++
++static inline void
++ev_image_menu_item_set_image (GtkWidget *item,
++			      GtkWidget *image)
++{
++#ifdef HAVE_MATE_DESKTOP
++	mate_image_menu_item_set_image (MATE_IMAGE_MENU_ITEM (item), image);
++#else
++	G_GNUC_BEGIN_IGNORE_DEPRECATIONS
++	gtk_image_menu_item_set_image (GTK_IMAGE_MENU_ITEM (item), image);
++	G_GNUC_END_IGNORE_DEPRECATIONS
++#endif
++}
++
++G_END_DECLS
++
++#endif /* EV_IMAGE_MENU_ITEM_H */
+diff --git a/shell/ev-navigation-action.c b/shell/ev-navigation-action.c
+index 181b0a5..6461efd 100644
+--- a/shell/ev-navigation-action.c
++++ b/shell/ev-navigation-action.c
+@@ -26,7 +26,7 @@
+ #include "ev-navigation-action.h"
+ #include "ev-navigation-action-widget.h"
+ 
+-#include <libmate-desktop/mate-image-menu-item.h>
++#include "ev-image-menu-item.h"
+ 
+ enum
+ {
+@@ -101,7 +101,7 @@ new_history_menu_item (EvNavigationAction *action,
+ 	const char *title;
+ 
+ 	title = ev_link_get_title (link);
+-	item = mate_image_menu_item_new_with_label (title);
++	item = ev_image_menu_item_new_with_label (title);
+ 	label = GTK_LABEL (gtk_bin_get_child (GTK_BIN (item)));
+ 	gtk_label_set_use_markup (label, TRUE);
+ 	g_object_set_data (G_OBJECT (item), "index",
+diff --git a/shell/ev-sidebar-links.c b/shell/ev-sidebar-links.c
+index e6531ca..65cc358 100644
+--- a/shell/ev-sidebar-links.c
++++ b/shell/ev-sidebar-links.c
+@@ -29,7 +29,7 @@
+ #include <glib/gi18n.h>
+ #include <gtk/gtk.h>
+ 
+-#include <libmate-desktop/mate-image-menu-item.h>
++#include "ev-image-menu-item.h"
+ 
+ #include "ev-document-links.h"
+ #include "ev-job-scheduler.h"
+@@ -337,9 +337,9 @@ build_popup_menu (EvSidebarLinks *sidebar)
+ 	GtkWidget *item;
+ 
+ 	menu = gtk_menu_new ();
+-	item = mate_image_menu_item_new_with_label ("Print…");
++	item = ev_image_menu_item_new_with_label ("Print…");
+ 	image = gtk_image_new_from_icon_name ("gtk-print", GTK_ICON_SIZE_MENU);
+-	mate_image_menu_item_set_image (MATE_IMAGE_MENU_ITEM (item), image);
++	ev_image_menu_item_set_image (item, image);
+ 	gtk_widget_show (item);
+ 	gtk_menu_shell_append (GTK_MENU_SHELL (menu), item);
+ 	g_signal_connect (item, "activate",
+diff --git a/shell/ev-sidebar.c b/shell/ev-sidebar.c
+index f05721d..a484ccf 100644
+--- a/shell/ev-sidebar.c
++++ b/shell/ev-sidebar.c
+@@ -31,7 +31,7 @@
+ #include <gtk/gtk.h>
+ #include <gdk/gdkkeysyms.h>
+ 
+-#include <libmate-desktop/mate-image-menu-item.h>
++#include "ev-image-menu-item.h"
+ 
+ #include "ev-sidebar.h"
+ #include "ev-sidebar-page.h"
+@@ -429,7 +429,7 @@ ev_sidebar_add_page (EvSidebar   *ev_sidebar,
+ 	index = gtk_notebook_append_page (GTK_NOTEBOOK (ev_sidebar->priv->notebook),
+ 					  main_widget, NULL);
+ 
+-	menu_item = mate_image_menu_item_new_with_label (title);
++	menu_item = ev_image_menu_item_new_with_label (title);
+ 	g_signal_connect (menu_item, "activate",
+ 			  G_CALLBACK (ev_sidebar_menu_item_activate_cb),
+ 			  ev_sidebar);
+diff --git a/shell/meson.build b/shell/meson.build
+index 17d093e..345ce8d 100644
+--- a/shell/meson.build
++++ b/shell/meson.build
+@@ -31,6 +31,7 @@ shell_sources = [
+     'ev-file-monitor.c',
+     'ev-history.c',
+     'ev-history.h',
++    'ev-image-menu-item.h',
+     'ev-loading-message.h',
+     'ev-loading-message.c',
+     'ev-keyring.h',
+-- 
+2.53.0
+

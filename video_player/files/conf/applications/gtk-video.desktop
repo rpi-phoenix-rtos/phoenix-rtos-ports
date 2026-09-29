@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Video Player
+GenericName=Video Player
+Comment=Play video files (FFmpeg; gtk-video, Phoenix-RTOS M10)
+Exec=gtk-video %f
+Icon=video-x-generic
+Terminal=false
+Categories=AudioVideo;Video;Player;GTK;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mp2t;video/x-m4v;video/ogg;audio/ogg;audio/mpeg;audio/x-wav;audio/flac;

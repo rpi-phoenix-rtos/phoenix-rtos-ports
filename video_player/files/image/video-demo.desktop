@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Video Demo
+GenericName=Video Player
+Comment=Play the 720p H.264 demo clip with ffplay in a window
+Exec=/bin/bash /bin/video-play /usr/share/video-demo/h264-720p30-aac.mp4
+Icon=video-x-generic
+Terminal=false
+Categories=AudioVideo;Video;Player;

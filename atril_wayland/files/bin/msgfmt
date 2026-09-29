@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# msgfmt stand-in for the XFCE cross build (tools/gpu-lane/xfce-wayland/build.sh).
+#
+# The build host has no GNU gettext, and the Phoenix build ships no translations (every
+# package is configured without NLS). The XFCE build systems still call msgfmt for two
+# things, and this script does exactly those:
+#
+#   msgfmt --desktop|--xml --template IN [-d PODIR] [-k KW]... -o OUT
+#       merges translations into a .desktop / AppStream file. With no translations the
+#       merge is the template itself: IN is copied to OUT unchanged.
+#   msgfmt [-c] [-o OUT] FILE.po
+#       compiles a catalogue. A valid EMPTY .mo (no messages) is written.
+#
+# plus the probes: --version (meson's i18n module needs >= 0.19 for --desktop) and
+# --statistics (autoconf's AM_PATH_PROG_WITH_TEST).
+import shutil
+import struct
+import sys
+
+
+def main(argv):
+    out = None
+    template = None
+    merge = False
+    inputs = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ('--version', '-V'):
+            print('msgfmt (GNU gettext-tools) 0.21 [xfce-wayland stand-in: no translations]')
+            return 0
+        if a == '--statistics':
+            return 0
+        if a in ('--desktop', '--xml'):
+            merge = True
+        elif a in ('-o', '--output-file', '--template', '-d', '-k', '--keyword', '-l', '--language',
+                   '--its', '--domain', '-D', '--directory'):
+            i += 1
+            v = argv[i] if i < len(argv) else None
+            if a in ('-o', '--output-file'):
+                out = v
+            elif a == '--template':
+                template = v
+        elif a.startswith('--output-file='):
+            out = a.split('=', 1)[1]
+        elif a.startswith('--template='):
+            template = a.split('=', 1)[1]
+        elif a.startswith('-o') and len(a) > 2:
+            out = a[2:]
+        elif a.startswith('-'):
+            pass  # -c, --check, --use-fuzzy, -f, -v, -k<kw>, -d<dir>, --keyword=...: no effect here
+        else:
+            inputs.append(a)
+        i += 1
+
+    if merge:
+        if template is None or out is None:
+            sys.stderr.write('msgfmt (stand-in): --desktop/--xml needs --template and -o\n')
+            return 1
+        shutil.copyfile(template, out)
+        return 0
+
+    if out is None:
+        out = 'messages.mo'
+    if out == '/dev/null':
+        return 0
+    # An empty GNU .mo: magic, revision 0, 0 strings, table offsets 28, hash size 0.
+    with open(out, 'wb') as f:
+        f.write(struct.pack('<7I', 0x950412de, 0, 0, 28, 28, 0, 28))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

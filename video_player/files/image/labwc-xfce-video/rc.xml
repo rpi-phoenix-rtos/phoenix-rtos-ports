@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<!--
+  labwc under the video desktop session on Phoenix-RTOS (XFCE + a video in a window,
+  /bin/xfce-session with CONF_DIR=/etc/xdg/labwc-xfce-video): /etc/xdg/labwc-xfce-video/rc.xml.
+  labwc-xfce-demo/rc.xml plus window rules that lay the desktop out (Thunar top left, foot
+  below it, the player on the right, under the 30 px panel).
+    Super (tap)             application finder
+    Super+Return            terminal (foot)
+    Super+E                 file manager (Thunar)
+    Super+D, Alt+F2         application finder (full / collapsed)
+    Super+Space             fuzzel launcher
+  labwc's defaults (<default />) stay: Alt+Tab, Alt+F4, window-menu keys and mouse bindings.
+-->
+<labwc_config>
+
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+  </core>
+
+  <theme>
+    <cornerRadius>6</cornerRadius>
+    <font place="ActiveWindow" name="DejaVu Sans" size="11" weight="bold" />
+    <font place="InactiveWindow" name="DejaVu Sans" size="11" />
+    <font place="MenuItem" name="DejaVu Sans" size="11" />
+    <font place="OnScreenDisplay" name="DejaVu Sans" size="11" />
+  </theme>
+
+  <keyboard>
+    <default />
+    <!-- a tap of Super alone: labwc runs onRelease bindings only if no other key came in between -->
+    <keybind key="Super_L" onRelease="yes">
+      <action name="Execute" command="/bin/xfce4-appfinder" />
+    </keybind>
+    <keybind key="W-Return">
+      <action name="Execute" command="/bin/foot" />
+    </keybind>
+    <keybind key="W-e">
+      <action name="Execute" command="/bin/thunar-wl" />
+    </keybind>
+    <keybind key="W-d">
+      <action name="Execute" command="/bin/xfce4-appfinder" />
+    </keybind>
+    <keybind key="A-F2">
+      <action name="Execute" command="/bin/xfce4-appfinder --collapsed" />
+    </keybind>
+    <keybind key="W-space">
+      <action name="Execute" command="/bin/fuzzel" />
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <default />
+  </mouse>
+
+  <!-- identifier = the Wayland app_id (a case-insensitive glob): the first Thunar window and
+       the first foot, and the players (ffplay: video-play's SDL_VIDEO_WAYLAND_WMCLASS) -->
+  <windowRules>
+    <windowRule identifier="ffplay">
+      <action name="MoveTo" x="636" y="40" />
+    </windowRule>
+    <windowRule identifier="*gtk-video*">
+      <action name="MoveTo" x="636" y="40" />
+    </windowRule>
+    <windowRule identifier="*thunar*" matchOnce="true">
+      <action name="ResizeTo" width="620" height="560" />
+      <action name="MoveTo" x="8" y="40" />
+    </windowRule>
+    <windowRule identifier="foot" matchOnce="true">
+      <action name="ResizeTo" width="620" height="420" />
+      <action name="MoveTo" x="8" y="640" />
+    </windowRule>
+  </windowRules>
+
+</labwc_config>

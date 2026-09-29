@@ -1,0 +1,11 @@
+# labwc autostart of the games desktop session on Phoenix-RTOS (XFCE + windowed GPU games):
+# /etc/xdg/labwc-xfce-games/autostart, used with `export CONF_DIR=/etc/xdg/labwc-xfce-games`
+# before /bin/xfce-session. labwc runs it with `sh` (busybox) once the compositor is up. As
+# labwc-xfce-demo/autostart (the desktop and the panel), plus a foot terminal and the games of
+# GAME_LIST (default quakespasm) in a window, one after another, after GAME_LIST_DELAY seconds
+# (/bin/game-window-autostart.sh). The games' output goes to labwc's (the console): their
+# banner, fps counter and exit lines are graded on the UART.
+/bin/xfdesktop > /tmp/xfce-logs/xfdesktop.log 2>&1 &
+/bin/xfce4-panel > /tmp/xfce-logs/xfce4-panel.log 2>&1 &
+/bin/foot > /tmp/xfce-logs/foot.log 2>&1 &
+/bin/bash /bin/game-window-autostart.sh &

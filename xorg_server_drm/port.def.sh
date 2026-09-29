@@ -8,7 +8,6 @@
 	version="21.1.24"
 	desc="Xorg-drm: X.Org server (hw/xfree86) + modesetting + glamor on GBM/EGL + DRI3/Present, static (new GPU lane)"
 
-	# the same tarball (and sha256) as the old lane's xorg_server port
 	source="https://www.x.org/releases/individual/xserver/"
 	archive_filename="xorg-server-${version}.tar.xz"
 	src_path="xorg-server-${version}/"
@@ -16,27 +15,25 @@
 	size="5072780"
 	sha256="1a4eb36ca65cc3b1b936566d677a9786e13c11cd5806e951ac55f3f5ce3984af"
 
-	# X.Org MIT; libxcvt (built in here) MIT; our glue (glue/src, glue/compat) BSD-3-Clause
+	# X.Org MIT; libxcvt (built in here) MIT; our glue (glue/src, glue/compat) BSD-3-Clause;
+	# glue/libmd (SHA1, built in here) public domain
 	license="MIT AND BSD-3-Clause"
 	license_file="COPYING"
 
-	# NEW GPU LANE: private install prefix (see libdrm_phoenix). The old lane's kdrive
-	# Xphoenix (xorg_server) is untouched.
+	# Private install prefix (see libdrm_phoenix).
 	conflicts="xorg_server_drm!=${version}"
 
-	# rootfs:   install /bin/Xorg-drm (+ /bin/Xorg-drm-noshim, the name startx-drm and the
-	#           migration gate run), /bin/startx-drm (+ /bin/startx and /bin/startx_gpu: it with HOLD=0)
-	#           and /etc/X11/xorg-drm.conf into the image
+	# rootfs:   install /bin/Xorg-drm, /bin/startx-drm (+ /bin/startx and /bin/startx_gpu: it
+	#           with HOLD=0) and /etc/X11/xorg-drm.conf into the image
 	# x11demo:  also build eglx11-demo, the GLES-in-an-X-window DRI3/Present client
 	#           (tools/gpu-lane/x11-drm): pulls mesa_drm's x11 build. Folded in here because a
 	#           framework port needs an upstream archive and the demo is our source only.
 	iuse="rootfs x11demo"
 
 	# The X11 libraries come from the shared ports prefix (archives + .pc; pixman, xkbfile,
-	# Xau, xtrans, xorgproto: xorg_libs; Xfont2, fontenc, freetype: xorg_fonts; libmd (SHA1,
-	# -Dsha1=libmd): the old lane's xorg_server port, which builds it for Xphoenix -- a
-	# dependency on that port until libmd moves, see MIGRATION.md section 7).
-	depends="libdrm_phoenix mesa_drm libepoxy libxshmfence_phoenix xorg_libs xorg_fonts xorg_server zlib x11demo? ( mesa_drm[x11] )"
+	# Xau, xtrans, xorgproto: xorg_libs; Xfont2, fontenc, freetype: xorg_fonts). libmd (SHA1
+	# for -Dsha1=libmd: glue/libmd) and libxcvt are built in here.
+	depends="libdrm_phoenix mesa_drm libepoxy libxshmfence_phoenix xorg_libs xorg_fonts zlib x11demo? ( mesa_drm[x11] )"
 
 	supports="phoenix>=3.3"
 }
@@ -92,7 +89,7 @@ p_build() {
 	[ "${n_getcap}" -ge 1 ] || b_die "${MB} lacks the DRM_CAP_PRIME fix (mesa_drm patch 0008)"
 	echo "xorg_server_drm: Mesa DRM_CAP_PRIME query present (${n_getcap} call(s) to drmGetCap in u_init_pipe_screen_caps)"
 
-	for p in "${B}/lib/libpixman-1.a" "${B}/lib/libXfont2.a" "${B}/lib/libxkbfile.a" "${B}/lib/libmd.a" \
+	for p in "${B}/lib/libpixman-1.a" "${B}/lib/libXfont2.a" "${B}/lib/libxkbfile.a" \
 			"${B}/share/pkgconfig/xproto.pc" "${B}/share/pkgconfig/xtrans.pc" \
 			"${MESA_PREFIX}/lib/libEGL.a" "${MESA_PREFIX}/lib/libgbm.a" "${LDP}/lib/libdrm.a" \
 			"${M}/zlib-prefix/lib/pkgconfig/zlib.pc" "${EPX}/lib/libepoxy.a" "${SHMF}/lib/libxshmfence.a"; do
@@ -122,6 +119,14 @@ p_build() {
 		'Name: libxcvt' 'Description: VESA CVT modelines (static, new GPU lane)' "Version: 0.1.2" \
 		'Libs: -L${libdir} -lxcvt -lm' 'Cflags: -I${includedir}' > "${DP}/lib/pkgconfig/libxcvt.pc"
 
+	# --- libmd: SHA1 with the BSD libmd entry points (SHA1Init/Update/Final), one source file.
+	# meson's -Dsha1=libmd finds it by cc.find_library('md') (the -L below), os/xsha1.c
+	# includes <sha1.h> (the -I below); the hand link names the archive.
+	mkdir -p "${PREFIX_PORT_BUILD}/md-obj"
+	"${NL_CC}" -O2 -g -Wall "${NL_TFLAGS[@]}" -c "${PREFIX_PORT}/glue/libmd/sha1.c" -o "${PREFIX_PORT_BUILD}/md-obj/sha1.o"
+	"${NL_AR}" rcs "${DP}/lib/libmd.a" "${PREFIX_PORT_BUILD}/md-obj/sha1.o"
+	cp "${PREFIX_PORT}/glue/libmd/sha1.h" "${DP}/include/"
+
 	# The pkg-config every configure step sees: only these prefixes, in this order (never the
 	# shared sysroot; the ports prefix only for the X11 libraries -- its include/ must have no
 	# GL/EGL/GLES/gbm/drm headers that could shadow ours, checked below). The tools build had
@@ -135,11 +140,12 @@ p_build() {
 		[ ! -e "${B}/include/${h}" ] || b_die "${B}/include/${h} would shadow the new-lane headers"
 	done
 	nl_meson_cross "${PREFIX_PORT_BUILD}/nl/cross.txt" "${PREFIX_PORT_BUILD}/nl/pkg-config" \
-		"'-I${COMPAT_INC}'" "'-L${B}/lib'"
+		"'-I${COMPAT_INC}', '-I${DP}/include'" "'-L${DP}/lib', '-L${B}/lib'"
 
 	# --- xorg-server configure + build (static archives; the executable is linked below) ------
 	local deps_stamp
-	deps_stamp="$(printf '%s\n' "${M}" "$(sha256sum "${LDP}/lib/libdrm.a" "${EPX}/lib/libepoxy.a" | cut -c1-64)" | sha256sum | cut -c1-16)"
+	deps_stamp="$(printf '%s\n' "${M}" "$(sha256sum "${LDP}/lib/libdrm.a" "${EPX}/lib/libepoxy.a" \
+		"${PREFIX_PORT}/glue/libmd/sha1.c" "${PREFIX_PORT}/glue/libmd/sha1.h" | cut -c1-64)" | sha256sum | cut -c1-16)"
 	if [ "$(cat "${PREFIX_PORT_BUILD}/xorg-deps.stamp" 2>/dev/null || true)" != "${deps_stamp}" ]; then
 		rm -rf "${XB}"   # headers/pkg-config paths of another Mesa or libdrm: reconfigure
 	fi
@@ -236,7 +242,7 @@ PY
 		-Wl,--start-group "${xmod[@]}" "${xlibc[@]}" "${EPX}/lib/libepoxy.a" "${DP}/lib/libxcvt.a" "${SHMF}/lib/libxshmfence.a" \
 		"${ma[@]}" "${LDP}/lib/libdrm.a" "${M}/compat/libmesadrm-compat.a" "${OBJ}/xorg_drm_compat.o" \
 		"${B}/lib/libpixman-1.a" "${B}/lib/libXfont2.a" "${B}/lib/libfontenc.a" "${B}/lib/libfreetype.a" \
-		"${B}/lib/libxkbfile.a" "${B}/lib/libXau.a" "${B}/lib/libmd.a" "${PORT_DEP_zlib}/lib/libz.a" \
+		"${B}/lib/libxkbfile.a" "${B}/lib/libXau.a" "${DP}/lib/libmd.a" "${PORT_DEP_zlib}/lib/libz.a" \
 		-Wl,--end-group -lm > "${PREFIX_PORT_BUILD}/Xorg-drm-link.log" 2>&1 \
 		|| { grep -v '^/.*: warning: ' "${PREFIX_PORT_BUILD}/Xorg-drm-link.log" | head -80; b_die "Xorg-drm link failed"; }
 	"${NL_STRIP}" -o "${P}/bin/Xorg-drm" "${X}"
@@ -271,13 +277,6 @@ PY
 			EGL_KHR_platform_gbm EGL_MESA_platform_gbm 'DRI3' 'Present' 'X.Org X Server' 'Xorg-drm'; do
 		echo "  strings '${s}': $(nl_count_strings "${P}/bin/Xorg-drm" "${s}")"
 	done
-	# The old lane's X server (kdrive Xphoenix + fbdev DDX + glamor shim) and in-process winsys
-	for s in Xphoenix '[fbdev]' fbdevKeyboardDriver fbdevMouseDriver 'FBCONSETMODE(' glamor_phoenix phxgl \
-			'v3d-winsys:' phoenix_v3d_ioctl peek_next_scanout v3d-srv /dev/v3d-srv; do
-		n="$(nl_count_strings "${P}/bin/Xorg-drm" "${s}")"
-		echo "  old-lane string '${s}': ${n}"
-		[ "${n}" = 0 ] || bad=1
-	done
 	# xorg-server patch 0008: without libpciaccess xf86PostProbe() must not abort a
 	# framebuffer-slot (legacy Probe) screen -- the m4a failure; the FatalError string is then
 	# dead code and gone.
@@ -298,11 +297,10 @@ PY
 	fi
 
 	if b_use rootfs; then
-		# startx-drm (and the migration gate) start /bin/Xorg-drm-noshim -config
-		# /etc/X11/xorg-drm.conf and the GL client /bin/eglx11-demo-x; both names are installed.
+		# startx-drm starts /bin/Xorg-drm -config /etc/X11/xorg-drm.conf and the GL client
+		# /bin/eglx11-demo-x. (Up to GPU migration P3 the server was also installed as
+		# /bin/Xorg-drm-noshim, the name of its Pi-proven build configuration.)
 		b_install "${P}/bin/Xorg-drm" /bin
-		cp "${P}/bin/Xorg-drm" "${PREFIX_PORT_BUILD}/Xorg-drm-noshim"
-		b_install "${PREFIX_PORT_BUILD}/Xorg-drm-noshim" /bin
 		b_install "${P}/bin/startx-drm" /bin
 		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
 		# image). P4 gives the programs the plain names themselves.

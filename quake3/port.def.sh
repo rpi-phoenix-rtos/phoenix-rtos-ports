@@ -9,7 +9,7 @@
 	# resolver wants a dotted/numeric version, so record "1.32" here and keep the
 	# authoritative provenance in `commit`/archive_filename/src_path below.
 	version="1.32"
-	desc="quake3e (Quake III Arena engine) — single static ELF on the ported SDL2 + Mesa/V3D GL stack"
+	desc="quake3e (Quake III Arena engine, opengl1 renderer, QVM JIT) objects for the SDL2 KMSDRM + Mesa GPU stack; linked by quake3_drm"
 
 	# quake3e's authoritative repo is ec-/quake3e; it does not tag releases, so this
 	# port is pinned to the specific master commit the tools/quake3-port bring-up
@@ -30,25 +30,27 @@
 	license_file="COPYING.txt"
 
 	conflicts=""
-	depends="sdl2"
-	# rootfs: install /usr/bin/quake3e into the image (the RPI4B_GPU_LEGACY=1 image). Without
-	# it the port only builds: the default image pulls it as a build dependency (quake3_drm
-	# relinks this port's objects) and ships the *_drm program instead. TODO(TD-24): goes with
-	# the old GPU stack (P3).
-	iuse="rootfs"
+	# Headers only: SDL (sdl2_kmsdrm) and the GL headers of the Mesa source (mesa_drm).
+	depends="sdl2_kmsdrm mesa_drm[opengl]"
 
 	supports="phoenix>=3.3"
 }
 
-# Framework migration of tools/quake3-port/build-quake3e-phoenix.py (the quake3
-# bring-up). quake3e is structurally simpler to fold into one ELF than yQuake2: the
-# game / cgame / ui modules are interpreted QVM bytecode shipped in the pak (data,
-# not C we compile or link), so there is NO GetGameAPI game-DLL fold and NO game-TU
-# list. The renderer is compiled in directly (USE_RENDERER_DLOPEN=0 -> the engine
-# calls the renderer's GetRefAPI at link time). So the client + integrated server +
-# botlib + opengl1 renderer + code/sdl backend + bundled libjpeg + a Phoenix backend
-# (glue/pl_phoenix_*) link into ONE static ELF installed as /usr/bin/quake3e, against
-# the ported SDL2 (depends="sdl2") + the Mesa/V3D GL stack.
+# The Quake III Arena ENGINE, compiled once: its objects are linked into a program by the
+# ports that depend on this one (quake3_drm: SDL KMSDRM + Mesa GBM/EGL desktop GL +
+# libdrm-phoenix). This port installs nothing. quake3e is structurally simpler to fold into
+# one ELF than yQuake2: the game / cgame / ui modules are interpreted QVM bytecode shipped in
+# the pak (data, not C we compile or link), so there is NO GetGameAPI game-DLL fold and NO
+# game-TU list. The renderer is compiled in directly (USE_RENDERER_DLOPEN=0 -> the engine
+# calls the renderer's GetRefAPI at link time): client + integrated server + botlib +
+# opengl1 renderer + code/sdl backend + bundled libjpeg + a Phoenix backend (glue/pl_phoenix_*).
+#
+# THE INTERFACE (for the linking ports): ${PREFIX_PORT_BUILD}/engine-link.sh defines
+# ENGINE_OBJS (the objects, in link order), ENGINE_LINK_FLAGS (this port's ${CFLAGS}
+# ${LDFLAGS}) and ENGINE_LINK_TAIL (-lstdc++ -lm and the 4 MiB main-thread stack); a consumer
+# links ${CC} "${ENGINE_LINK_FLAGS[@]}" "${ENGINE_OBJS[@]}" <its group> "${ENGINE_LINK_TAIL[@]}".
+# (Up to GPU migration P3 this port linked /usr/bin/quake3e itself, on the /dev/fb0 SDL and the
+# in-process GL winsys; see the yquake2 port for the same interface.)
 #
 # VM config: the aarch64 QVM JIT (code/qcommon/vm_aarch64.c) IS compiled in, with
 # vm_interpreted.c as the fallback. The single documented patch makes the JIT viable
@@ -58,17 +60,12 @@
 # NO_VM_COMPILED/interpreter-only note in the old python docstring; the actual flags
 # never defined NO_VM_COMPILED and the TU list has always compiled vm_aarch64.)
 #
-# The `quake3` launcher (tools/quake3-port/quake3-launcher.c: ram-stage-play then
-# exec /usr/bin/quake3e) and the demoq3 game data (pak0.pk3 …) are RUNTIME concerns
-# staged separately under /usr/share/quake3; the port builds only the engine binary.
-#
-# SHIPPING STATE: this port is registered `if: true` in the rpi4b project's ports.yaml,
-# so an image build installs /usr/bin/quake3e INTO THE ROOTFS and it ships on the SD
-# image (no game binary goes into loader.disk). The game runs on the FREE DEMO data —
-# no retail content and no retail CD key. Besides the demo pak0.pk3 it needs a pak1.pk3
-# holding three QVMs built from ioquake3 (the demo's 1999 QVMs report UI API 3 while
-# this engine's UI_API_VERSION is 6) and a q3key whose FORMAT alone is checked; both are
-# staged by the coordination repo's scripts/stage-game-data.sh from assets/quake3-qvm/.
+# The demoq3 game data (pak0.pk3 …) is a RUNTIME concern staged separately under
+# /usr/share/quake3. The game runs on the FREE DEMO data — no retail content and no retail
+# CD key. Besides the demo pak0.pk3 it needs a pak1.pk3 holding three QVMs built from
+# ioquake3 (the demo's 1999 QVMs report UI API 3 while this engine's UI_API_VERSION is 6) and
+# a q3key whose FORMAT alone is checked; both are staged by the coordination repo's
+# scripts/stage-game-data.sh from assets/quake3-qvm/.
 #
 # The diagnostic capture harness — the -DQ3CAP_PHOENIX per-frame readback hook in
 # tr_init.c, which lives as a clone-local commit on the external/quake3e clone (on
@@ -81,7 +78,7 @@
 # The single patch (patches/0001-quake3e-phoenix-single-elf.patch) carries ONLY the
 # genuine Phoenix engine fixes:
 #   * q_platform.h — add the __phoenix__ OS identity + ID_INLINE.
-#   * qgl.h        — pull GL types from the ported Mesa headers, exclude the X11/GLX
+#   * qgl.h        — pull GL types from the Mesa headers, exclude the X11/GLX
 #                    proc block (SDL owns the GL context; Phoenix has no GLX).
 #   * vm_aarch64.c — allocate the JIT code buffer RWX; tolerate mprotect(RX) failure.
 #   * huffman.c    — rename the file-local `send` to `Huff_send` so it no longer
@@ -89,16 +86,6 @@
 #                    headers, which declare send()).
 # The msg_t type clash (Phoenix SysV-IPC msg_t vs Q3 network msg_t) is defused with
 # ZERO Q3-source edits by the force-included glue/pl_phoenix_compat.h shim.
-#
-# GPU coupling note (identical wart to the yquake2 / quakespasm ports): libGL-phoenix.a
-# / libv3d-phoenix.a (tools/.gpu-libs) and the Mesa headers (external/mesa) are prebuilt
-# artifacts of the Mesa/V3D GL stack, which is not yet a framework port. Until it is,
-# this recipe links those archives + the shared SDL2-GL glue
-# (sources/phoenix-rtos-ports/sdl2/glue) by absolute path, anchored off PREFIX_PORT.
-# Portifying that GL stack would remove this wart from all the SDL2 game ports at once.
-
-# ---- Repository anchors (this port reaches artifacts outside the ports tree) ----
-_q3_repo_root() { (cd "${PREFIX_PORT}/../../.." && pwd); }
 
 p_prepare() {
 	# Single documented patch: the genuine Phoenix/V3D engine fixes only (the
@@ -112,47 +99,28 @@ p_prepare() {
 }
 
 p_build() {
-	local repo_root src glue_dir sdl2_glue gpu_libs mesa mcompat compat
-	repo_root="$(_q3_repo_root)"
+	local src glue_dir compat
 	src="${PREFIX_PORT_WORKDIR}/code"
 	glue_dir="${PREFIX_PORT}/glue"
-	sdl2_glue="$(cd "${PREFIX_PORT}/../sdl2/glue" && pwd)"
-	gpu_libs="${repo_root}/tools/.gpu-libs"
-	mesa="${repo_root}/external/mesa"
-	mcompat="${repo_root}/sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/phoenix_mesa_compat.h"
 	compat="${glue_dir}/pl_phoenix_compat.h"
-
-	local sdllib="${PREFIX_A}/libSDL2.a"
-	local sdlinc="${PREFIX_H}"
-	local gllib="${gpu_libs}/libGL-phoenix.a"
-	local v3dlib="${gpu_libs}/libv3d-phoenix.a"
-	local glinc="${mesa}/include"
-
-	# --- Prerequisite artifacts of the not-yet-portified GL stack (fail loud) ---
-	local p missing=0
-	for p in "${sdllib}" "${gllib}" "${v3dlib}" "${mcompat}" \
-		"${sdl2_glue}/sdl_phoenix_glctx.c" "${sdl2_glue}/sdl_phoenix_glstubs.c"; do
-		[ -f "${p}" ] || { echo "quake3: MISSING prerequisite file: ${p}" >&2; missing=1; }
+	local SP="${PORT_DEP_sdl2_kmsdrm:?}" GLINC="${PORT_DEP_mesa_drm:?}/src-include" p
+	for p in "${SP}/include/SDL2/SDL.h" "${GLINC}/GL/gl.h" "${GLINC}/KHR/khrplatform.h"; do
+		[ -f "${p}" ] || b_die "quake3: missing ${p}"
 	done
-	for p in "${mesa}/src" "${mesa}/include" "/tmp/mesa-v3d-build/src"; do
-		[ -d "${p}" ] || { echo "quake3: MISSING prerequisite dir: ${p}" >&2; missing=1; }
-	done
-	if [ "${missing}" != 0 ]; then
-		b_die "GL/V3D stack not present. Rebuild it first: sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/build-gl-phoenix.py (and build-v3d-phoenix.py); it stages libGL/libv3d in tools/.gpu-libs and /tmp/mesa-v3d-build."
-	fi
 
 	# --- Compile flags (framework CFLAGS first so -mcpu/sysroot apply; port flags
 	#     after so they win). -fcommon merges the tentative-definition cvar globals
 	#     the .so-era build gave several TUs; -include pulls the Phoenix compat shim
 	#     (msg_t defuse + __clear_cache builtin for the JIT). -DUSE_OPENGL_API +
-	#     -DUSE_LOCAL_HEADERS=1 match the opengl1 / local-SDL-header config. ---
-	local base_cflags="${CFLAGS} -c -O2 -g -ffreestanding -fno-strict-aliasing -fwrapv -fcommon -Wno-error -DNDEBUG -DUSE_OPENGL_API -DUSE_LOCAL_HEADERS=1 -include ${compat} -I${src} -I${src}/qcommon -I${src}/renderercommon -I${src}/renderer -I${src}/client -I${src}/libjpeg -I${sdlinc}/SDL2 -I${sdlinc} -I${glinc}"
+	#     -DUSE_LOCAL_HEADERS=1 match the opengl1 / "SDL.h" config. The SDL headers come
+	#     FIRST, ahead of the shared ports prefix CFLAGS names (it may still hold the
+	#     deleted sdl2 port's headers); GL headers: the include/ of the Mesa source the
+	#     programs link. ---
+	local base_cflags="-I${SP}/include/SDL2 -I${SP}/include ${CFLAGS} -c -O2 -g -ffreestanding -fno-strict-aliasing -fwrapv -fcommon -Wno-error -DNDEBUG -DUSE_OPENGL_API -DUSE_LOCAL_HEADERS=1 -include ${compat} -I${src} -I${src}/qcommon -I${src}/renderercommon -I${src}/renderer -I${src}/client -I${src}/libjpeg -I${GLINC}"
 	# botlib TUs select their engine-build include set with -DBOTLIB (mirrors the
 	# Makefile's do_cc_botlib rule); without it source_t/punctuation_t/fielddef_t are
 	# undefined.
 	local botlib_cflags="${base_cflags} -DBOTLIB"
-	# SDL2 GL-context glue is compiled with Mesa's include/define set (winsys bridge).
-	local mesa_cflags="${CFLAGS} -c -O2 -g -ffreestanding -fno-strict-aliasing -Wno-error -Wno-undef -DUTIL_ARCH_LITTLE_ENDIAN=1 -DUTIL_ARCH_BIG_ENDIAN=0 -DHAVE_STRUCT_TIMESPEC -include ${mcompat} -I${mesa}/src -I${mesa}/include -I${mesa}/src/mesa -I${mesa}/src/mapi -I${mesa}/src/compiler -I${mesa}/src/gallium/include -I${mesa}/src/gallium/auxiliary -I${mesa}/src/util -I/tmp/mesa-v3d-build/src -I${sdlinc}"
 
 	# ---- TU lists, transcribed from the Makefile (Q3OBJ/Q3REND1OBJ/JPGOBJ) ----
 	# qcommon core (incl. the aarch64 JIT + interpreter fallback, unzip, net_ip).
@@ -211,11 +179,11 @@ p_build() {
 	# Unix backend TU kept verbatim (no dlopen; pure POSIX signal handling).
 	local unix_keep=(linux_signals)
 	# Phoenix backend (glue/): forks of unix_main.c + unix_shared.c with the dlopen
-	# seam stubbed. The libc/Mesa gap-filler (pthread_getcpuclockid) is the shared
-	# SDL2-port Zlib glstubs, not a per-port copy.
+	# seam stubbed.
 	local phoenix=(pl_phoenix_main pl_phoenix_sys)
 
 	local objdir="${PREFIX_PORT_WORKDIR}/_phoenix_obj"
+	rm -rf "${objdir}"
 	mkdir -p "${objdir}"
 
 	# One gcc per TU, compiled in parallel; fail fast with the TU path. Bypasses
@@ -225,7 +193,6 @@ p_build() {
 		case "${kind}" in
 			base) flags="${Q3_BASE_CFLAGS}" ;;
 			botlib) flags="${Q3_BOTLIB_CFLAGS}" ;;
-			mesa) flags="${Q3_MESA_CFLAGS}" ;;
 		esac
 		obj="${Q3_OBJDIR}/${unit//\//_}.o"
 		# shellcheck disable=2086
@@ -236,7 +203,7 @@ p_build() {
 	}
 	export -f _q3_cc
 	export CC Q3_OBJDIR="${objdir}" \
-		Q3_BASE_CFLAGS="${base_cflags}" Q3_BOTLIB_CFLAGS="${botlib_cflags}" Q3_MESA_CFLAGS="${mesa_cflags}"
+		Q3_BASE_CFLAGS="${base_cflags}" Q3_BOTLIB_CFLAGS="${botlib_cflags}"
 
 	{
 		local u
@@ -250,32 +217,28 @@ p_build() {
 		for u in "${sdlbk[@]}"; do printf 'base\t%s\t%s\n' "${u}" "${src}/sdl"; done
 		for u in "${unix_keep[@]}"; do printf 'base\t%s\t%s\n' "${u}" "${src}/unix"; done
 		for u in "${phoenix[@]}"; do printf 'base\t%s\t%s\n' "${u}" "${glue_dir}"; done
-		printf 'mesa\t%s\t%s\n' "sdl_phoenix_glctx" "${sdl2_glue}"
-		printf 'base\t%s\t%s\n' "sdl_phoenix_glstubs" "${sdl2_glue}"
-	} | xargs -P"$(nproc)" -L1 bash -c '_q3_cc "$@"' _
+	} | xargs -P"$(nproc)" -L1 bash -c '_q3_cc "$@"' _ || b_die "quake3: compile failed"
 
 	# Deterministic object list (compile order above is parallel/non-deterministic).
 	local objs=() u
 	for u in "${qcommon[@]}" "${client[@]}" "${server[@]}" "${botlib[@]}" "${jpeg[@]}" \
-		"${rendcommon[@]}" "${rend1[@]}" "${sdlbk[@]}" "${unix_keep[@]}" "${phoenix[@]}" \
-		sdl_phoenix_glctx sdl_phoenix_glstubs; do
+		"${rendcommon[@]}" "${rend1[@]}" "${sdlbk[@]}" "${unix_keep[@]}" "${phoenix[@]}"; do
 		local o="${objdir}/${u//\//_}.o"
 		[ -f "${o}" ] || b_die "quake3: object missing after compile: ${o}"
 		objs+=("${o}")
 	done
 
-	# Circular refs (SDL <-> renderer <-> Mesa; libGL <-> libv3d) -> --start-group.
-	# 4 MB stack matches the tools build's final choice (Phoenix commits PT_GNU_STACK
+	# The link interface (see the header). 4 MB stack (Phoenix commits PT_GNU_STACK
 	# eagerly at exec; keep the exec footprint modest).
-	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
-	# shellcheck disable=2086
-	"${CC}" ${CFLAGS} ${LDFLAGS} "${objs[@]}" \
-		-Wl,--start-group "${sdllib}" "${gllib}" "${v3dlib}" -Wl,--end-group \
-		-lstdc++ -lm -Wl,-z,stack-size=4194304 \
-		-o "${PREFIX_PROG}/quake3e"
-
-	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/quake3e" "${PREFIX_PROG}/quake3e"
-	if b_use rootfs; then
-		b_install "${PREFIX_PROG_TO_INSTALL}/quake3e" /usr/bin
-	fi
+	local flags=() tail=(-lstdc++ -lm -Wl,-z,stack-size=4194304)
+	# shellcheck disable=2206
+	flags=(${CFLAGS} ${LDFLAGS})
+	{
+		echo "# Generated by the quake3 port (p_build): the engine's link inputs. Do not edit."
+		echo "ENGINE_NAME=quake3e"
+		printf 'ENGINE_OBJS=('; printf ' %q' "${objs[@]}"; echo ' )'
+		printf 'ENGINE_LINK_FLAGS=('; printf ' %q' "${flags[@]}"; echo ' )'
+		printf 'ENGINE_LINK_TAIL=('; printf ' %q' "${tail[@]}"; echo ' )'
+	} > "${PREFIX_PORT_BUILD}/engine-link.sh"
+	echo "quake3: ${#objs[@]} engine objects; link inputs in ${PREFIX_PORT_BUILD}/engine-link.sh"
 }

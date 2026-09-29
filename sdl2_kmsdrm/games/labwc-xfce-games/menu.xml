@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  labwc root menu of the games desktop session (XFCE + windowed GPU games):
+  /etc/xdg/labwc-xfce-games/menu.xml, = labwc-xfce-demo/menu.xml plus the Games entries. Opens on a right click on the desktop background
+  when xfdesktop does not claim the click. Log Out ends the session in order (as the
+  panel's button); Exit stops labwc at once.
+-->
+<openbox_menu>
+
+<menu id="client-menu">
+  <item label="Minimize"><action name="Iconify" /></item>
+  <item label="Maximize"><action name="ToggleMaximize" /></item>
+  <item label="Fullscreen"><action name="ToggleFullscreen" /></item>
+  <item label="Decorations"><action name="ToggleDecorations" /></item>
+  <item label="Always on Top"><action name="ToggleAlwaysOnTop" /></item>
+  <item label="Close"><action name="Close" /></item>
+</menu>
+
+<menu id="root-menu">
+  <item label="Run…"><action name="Execute" command="/bin/xfce4-appfinder" /></item>
+  <item label="Terminal"><action name="Execute" command="/bin/foot" /></item>
+  <item label="Files"><action name="Execute" command="/bin/thunar-wl" /></item>
+  <item label="Settings"><action name="Execute" command="/bin/xfce4-settings-manager" /></item>
+  <separator />
+  <item label="Midnight Commander"><action name="Execute" command="/bin/foot -e /bin/mc" /></item>
+  <separator />
+  <item label="Quake (window)"><action name="Execute" command="/bin/bash /bin/game-window.sh quakespasm" /></item>
+  <item label="Quake II (window)"><action name="Execute" command="/bin/bash /bin/game-window.sh quake2" /></item>
+  <item label="Quake III (window)"><action name="Execute" command="/bin/bash /bin/game-window.sh quake3" /></item>
+  <item label="SuperTuxKart (window)"><action name="Execute" command="/bin/bash /bin/game-window.sh stk" /></item>
+  <separator />
+  <item label="Reconfigure"><action name="Reconfigure" /></item>
+  <item label="Log Out"><action name="Execute" command="/usr/lib/xfce-demo/bin/loginctl terminate-session" /></item>
+  <item label="Exit"><action name="Exit" /></item>
+</menu>
+
+</openbox_menu>

@@ -1,0 +1,30 @@
+From ac5595428017275ea60bbb5425f35bb618ae0d36 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 21:17:38 +0200
+Subject: [PATCH] cmake: accept fontconfig 2.14
+
+Poppler asks for fontconfig >= 2.15, but uses only API that has existed
+since fontconfig 2.x (FcFontSort, FcPatternGet*, FcLangSet*, FcCharSet*,
+FcConfigSubstitute, FcDefaultSubstitute). The Phoenix-RTOS ports prefix
+ships fontconfig 2.14.2, the one every other program there links; a second
+fontconfig in the same static program is not an option.
+---
+ CMakeLists.txt | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 077e52d..cb16bf2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -151,7 +151,7 @@ set(GLIB_REQUIRED "2.80")
+ set(GTK_REQUIRED "3.24")
+ set(GDK_PIXBUF_REQUIRED "2.42")
+ set(FREETYPE_VERSION "2.13")
+-set(FONTCONFIG_VERSION "2.15")
++set(FONTCONFIG_VERSION "2.14")
+ set(LIBCURL_VERSION "8.5")
+ set(NSS3_VERSION "3.98")
+ set(GPGME_VERSION "1.19")
+-- 
+2.53.0
+

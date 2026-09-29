@@ -6,7 +6,7 @@
 
 	name="supertuxkart"
 	version="1.4"
-	desc="SuperTuxKart 1.4 — 3D kart racing game (stk-code; GLES2/SP renderer)"
+	desc="SuperTuxKart 1.4 (stk-code; GLES2/SP renderer): the CMake build for the SDL2 KMSDRM + Mesa GPU stack, linked by supertuxkart_drm"
 	cpe23="cpe:2.3:a:supertuxkart:supertuxkart:${version}:*:*:*:*:*:*:*"
 
 	# GitHub auto-generated source archive for tag 1.4. The remote file is served
@@ -33,12 +33,7 @@
 	# install prefix first. freetype is provided by xorg_fonts. enet is NOT
 	# listed: STK uses its bundled enet whenever USE_IPV6 is ON (the default), so
 	# the ported enet is not consumed by this configuration.
-	depends="sdl2 libjpeg libpng zlib xorg_fonts curl mbedtls sqlite3 libogg libvorbis libsamplerate harfbuzz"
-	# rootfs: install /usr/bin/supertuxkart into the image (the RPI4B_GPU_LEGACY=1 image).
-	# Without it the port only builds: the default image pulls it as a build dependency
-	# (supertuxkart_drm relinks this port's objects) and ships the *_drm program instead.
-	# TODO(TD-24): goes with the old GPU stack (P3).
-	iuse="rootfs"
+	depends="sdl2_kmsdrm mesa_drm[opengl] libjpeg libpng zlib xorg_fonts curl mbedtls sqlite3 libogg libvorbis libsamplerate harfbuzz"
 
 	supports="phoenix>=3.3"
 }
@@ -79,32 +74,30 @@ p_prepare() {
 }
 
 p_build() {
-	# ---------------------------------------------------------------------------
-	# MILESTONE M3: cross-CONFIGURE + BUILD + LINK the supertuxkart ELF.
+	# cmake-configure + compile the whole game (all STK src + bundled Irrlicht/GE/
+	# bullet/angelscript/mojoal/shaderc on the GLES2/SP path) against the KMSDRM SDL
+	# (sdl2_kmsdrm) and the Mesa GLES headers. This port links NOTHING and installs
+	# nothing: CMake's own link of bin/supertuxkart cannot succeed (the gl* entry points
+	# Irrlicht/GE reference and SDL's EGL/GBM calls are resolved only by the Mesa
+	# archives), so `make -k` compiles everything, fails that one link, and the linking
+	# port (supertuxkart_drm) relinks from the build tree.
 	#
-	# Stages: (1) cmake configure/generate for aarch64-phoenix; (2) `make` the
-	# full game (all STK src + bundled Irrlicht/GE/bullet/angelscript/mojoal/
-	# shaderc on the GLES2/SP path); (3) compile the shared SDL2 phoenix GL glue;
-	# (4) final group-link against our in-process Mesa/V3D GL stack — CMake's own
-	# link step cannot resolve the GLES entrypoints (they live in libGL-phoenix.a,
-	# not in the static STK libs), so we relink from CMake's computed object/lib
-	# list (link.txt) with the yQuake2 gl3 --start-group recipe.
-	# ---------------------------------------------------------------------------
+	# THE INTERFACE: ${PREFIX_PORT_WORKDIR}/build (objects + static libs) and CMake's
+	# computed link line build/CMakeFiles/supertuxkart.dir/link.txt (paths relative to
+	# build/, `-o bin/supertuxkart`, naming sdl2_kmsdrm's libSDL2.a once). A consumer runs
+	# it from build/ with -o redirected and appends its library group: the GPU stack plus
+	# zlib, ogg/vorbis/vorbisfile/vorbisenc and mbedtls/mbedx509/mbedcrypto, which CMake
+	# lists out of order or not at all. (Up to GPU migration P3 this port linked
+	# /usr/bin/supertuxkart itself, on the /dev/fb0 SDL and the in-process GL winsys.)
 
 	# All non-conflict framework ports install into ONE shared prefix, so every
-	# PORT_DEP_* points at the same directory; use SDL2's as the anchor.
-	local pfx="${PORT_DEP_sdl2}"
+	# PORT_DEP_* of those points at the same directory; use zlib's as the anchor.
+	local pfx="${PORT_DEP_zlib%/}"
 	local sysroot="${PREFIX_SYSROOT:-${pfx}/sysroot}"
-
-	# This port reaches build artifacts outside the ports tree (the not-yet-
-	# portified Mesa/V3D GL stack): repo_root/external/mesa (GLES2/GLES3 headers +
-	# glue includes) and repo_root/tools/.gpu-libs (libGL/libv3d). Same anchor
-	# pattern as the yquake2 port.
-	local repo_root; repo_root="$(cd "${PREFIX_PORT}/../../.." && pwd)"
-	local mesa="${repo_root}/external/mesa"
-	local gpu_libs="${repo_root}/tools/.gpu-libs"
-	local mcompat="${repo_root}/sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/phoenix_mesa_compat.h"
-	local sdl2_glue; sdl2_glue="$(cd "${PREFIX_PORT}/../sdl2/glue" && pwd)"
+	local SP="${PORT_DEP_sdl2_kmsdrm:?}" GLINC="${PORT_DEP_mesa_drm:?}/src-include" p
+	for p in "${SP}/lib/libSDL2.a" "${SP}/include/SDL2/SDL.h" "${GLINC}/GLES2/gl2.h" "${GLINC}/KHR/khrplatform.h"; do
+		[ -e "${p}" ] || b_die "supertuxkart: missing ${p}"
+	done
 
 	# Consumed by the committed toolchain file (aarch64-phoenix.cmake) for the
 	# cross compilers, the flag surface and find-root confinement.
@@ -112,13 +105,15 @@ p_build() {
 	export STK_PREFIX="${pfx}"
 	export STK_SYSROOT="${sysroot}"
 
-	# Two compile-surface additions folded into the flags every sub-project sees:
-	#   * -I${mesa}/include so Irrlicht's <GLES2/gl2.h> / <GLES3/gl3.h> resolve
+	# Three compile-surface additions folded into the flags every sub-project sees:
+	#   * -I<sdl2_kmsdrm>/include/SDL2 FIRST: ahead of the shared ports prefix that CFLAGS
+	#     names, which may still hold the deleted sdl2 port's headers from an earlier build;
+	#   * -I<mesa_drm>/src-include so Irrlicht's <GLES2/gl2.h> / <GLES3/gl3.h> resolve
 	#     (STK's Irrlicht/GE select GLES purely by preprocessor define and never
-	#     find_package a GL lib, so no headers are on the include path otherwise).
+	#     find_package a GL lib, so no headers are on the include path otherwise);
 	#   * a force-included compat header supplying a few BSD socket constants that
 	#     libphoenix omits but bundled enet/dnsc reference (macro-only, C+C++ safe).
-	CFLAGS="${CFLAGS} -I${mesa}/include -include ${PREFIX_PORT}/stk_phoenix_compat.h"
+	CFLAGS="-I${SP}/include/SDL2 ${CFLAGS} -I${GLINC} -include ${PREFIX_PORT}/stk_phoenix_compat.h"
 
 	# Fold CFLAGS into LDFLAGS so link-time configure probes (STK's
 	# std::atomic<uint64_t> check, shaderc's compiler-flag checks) carry the
@@ -126,6 +121,15 @@ p_build() {
 	LDFLAGS="${CFLAGS} ${LDFLAGS}"
 
 	local build="${PREFIX_PORT_WORKDIR}/build"
+	# The configure is skipped when a CMakeCache.txt exists, and the cache holds the flags and
+	# the SDL paths of the configure that made it: reconfigure whenever they change (as they
+	# did when the /dev/fb0 SDL of the shared prefix gave way to sdl2_kmsdrm).
+	local stamp="${PREFIX_PORT_BUILD}/configure-inputs.sha" want
+	want="$(printf '%s\n' "${CFLAGS}" "${LDFLAGS}" "${SP}" "${GLINC}" | sha256sum | cut -d' ' -f1)"
+	if [ -f "${build}/CMakeCache.txt" ] && [ "$(cat "${stamp}" 2>/dev/null)" != "${want}" ]; then
+		echo ">> [supertuxkart] configure inputs changed: reconfiguring from scratch"
+		rm -rf "${build}"
+	fi
 	if [ ! -f "${build}/CMakeCache.txt" ]; then
 		mkdir -p "${build}"
 		# NOTE on the Generic-vs-UNIX trap: CMAKE_SYSTEM_NAME=Generic (set by the
@@ -155,8 +159,8 @@ p_build() {
 			-DUSE_DNS_C=ON \
 			-DUSE_CRYPTO_OPENSSL=OFF \
 			\
-			-DSDL2_LIBRARY="${pfx}/lib/libSDL2.a" \
-			-DSDL2_INCLUDEDIR="${pfx}/include/SDL2" \
+			-DSDL2_LIBRARY="${SP}/lib/libSDL2.a" \
+			-DSDL2_INCLUDEDIR="${SP}/include/SDL2" \
 			-DJPEG_LIBRARY="${pfx}/lib/libjpeg.a" \
 			-DJPEG_INCLUDE_DIR="${pfx}/include" \
 			-DPNG_LIBRARY="${pfx}/lib/libpng.a" \
@@ -182,120 +186,30 @@ p_build() {
 			-DOGGVORBIS_VORBISFILE_LIBRARY="${pfx}/lib/libvorbisfile.a" \
 			-DOGGVORBIS_VORBISENC_LIBRARY="${pfx}/lib/libvorbisenc.a" \
 			-DPTHREAD_LIBRARY="${sysroot}/lib/libpthread.a" \
-			"${PREFIX_PORT_WORKDIR}")
+			"${PREFIX_PORT_WORKDIR}") || b_die "supertuxkart: cmake configure failed"
+		echo "${want}" > "${stamp}"
 	fi
 
 	echo ">> [supertuxkart] cmake configure complete. Building game objects + libs."
 
-	# ----- Stage 2: compile all STK src + bundled libs (GLES2/SP path) ----------
-	# CMake's own link of the supertuxkart target CANNOT succeed here: the GLES
-	# entrypoints referenced by Irrlicht/GE are unresolved in the static libs
-	# (resolved only against libGL-phoenix.a at the executable link, stage 4). So
-	# we let `make` compile everything and reach — and fail — its link step, then
-	# relink ourselves. `make -k` keeps going so every real compile error surfaces
-	# in one pass; a genuine compile failure is caught by the object check below.
+	# Compile all STK src + bundled libs (GLES2/SP path); CMake's own link of the
+	# supertuxkart target is EXPECTED to fail (see the top of p_build). `make -k` keeps going
+	# so every real compile error surfaces in one pass. CMake writes link.txt at generate
+	# time, so a compile failure shows as objects named by link.txt that do not exist
+	# (checked below).
 	echo ">> [supertuxkart] NOTE: CMake's own link of bin/supertuxkart is EXPECTED"
-	echo ">> [supertuxkart]   to fail below with undefined GL/zlib/mbedtls symbols."
-	echo ">> [supertuxkart]   That is by design -- stage 4 relinks with an archive"
-	echo ">> [supertuxkart]   group. A REAL failure is the 'no ELF' b_die after it."
+	echo ">> [supertuxkart]   to fail below with undefined GL/EGL/zlib/mbedtls symbols;"
+	echo ">> [supertuxkart]   supertuxkart_drm links the program from this build tree."
 	(cd "${build}" && make -k -j"$(nproc)" supertuxkart) || true
 
-	# ----- Prerequisite check: GL stack artifacts (fail loud) -------------------
-	local sdllib="${pfx}/lib/libSDL2.a"
-	local gllib="${gpu_libs}/libGL-phoenix.a"
-	local v3dlib="${gpu_libs}/libv3d-phoenix.a"
-	local p missing=0
-	for p in "${sdllib}" "${gllib}" "${v3dlib}" "${mcompat}" \
-		"${sdl2_glue}/sdl_phoenix_glctx.c" "${sdl2_glue}/sdl_phoenix_glstubs.c"; do
-		[ -f "${p}" ] || { echo "supertuxkart: MISSING prerequisite: ${p}" >&2; missing=1; }
+
+	local linktxt="${build}/CMakeFiles/supertuxkart.dir/link.txt" f n=0
+	[ -f "${linktxt}" ] || b_die "supertuxkart: CMake link.txt missing — the configure did not generate the supertuxkart target. See the build log."
+	[ "$(grep -oF " ${SP}/lib/libSDL2.a " "${linktxt}" | wc -l)" = 1 ] \
+		|| b_die "supertuxkart: link.txt does not name ${SP}/lib/libSDL2.a exactly once"
+	for f in $(tr ' ' '\n' < "${linktxt}" | grep -E '\.(o|obj)$'); do
+		[ -f "${build}/${f}" ] || [ -f "${f}" ] || b_die "supertuxkart: object named by link.txt missing: ${f} (a compile error)"
+		n=$((n + 1))
 	done
-	for p in "${mesa}/src" "${mesa}/include" "/tmp/mesa-v3d-build/src"; do
-		[ -d "${p}" ] || { echo "supertuxkart: MISSING prerequisite dir: ${p}" >&2; missing=1; }
-	done
-	[ "${missing}" = 0 ] || b_die "GL/V3D stack not present. Build it first: sources/phoenix-rtos-devices/gpu/rpi4-v3d/mesa/build-gl-phoenix.py (+ build-v3d-phoenix.py) → tools/.gpu-libs + /tmp/mesa-v3d-build."
-
-	local linktxt="${build}/CMakeFiles/supertuxkart.dir/link.txt"
-	[ -f "${linktxt}" ] || b_die "supertuxkart: CMake link.txt missing — the make stage did not reach linking (a real compile error). See the build log."
-
-	# ----- Stage 3: compile the SDL2 phoenix GL-context glue --------------------
-	# Identical seam to the yquake2 gl3 port: the SDL2 static lib is built with
-	# undefined PHOENIX_GL_* / phxgl_* that this glue provides, bridging the ES
-	# 3.0 context request (SDL_GL_CONTEXT_PROFILE_ES) to the in-process Mesa/V3D
-	# winsys and blitting the default FBO to /dev/fb0.
-	local gluedir="${build}/_phoenix_glue"
-	mkdir -p "${gluedir}"
-	local base_cc="${CFLAGS}"
-	local mesa_cc="${CFLAGS} -O2 -ffreestanding -fno-strict-aliasing -Wno-error -Wno-undef \
-		-DUTIL_ARCH_LITTLE_ENDIAN=1 -DUTIL_ARCH_BIG_ENDIAN=0 -DHAVE_STRUCT_TIMESPEC \
-		-include ${mcompat} -I${mesa}/src -I${mesa}/include -I${mesa}/src/mesa \
-		-I${mesa}/src/mapi -I${mesa}/src/compiler -I${mesa}/src/gallium/include \
-		-I${mesa}/src/gallium/auxiliary -I${mesa}/src/util -I/tmp/mesa-v3d-build/src \
-		-I${pfx}/include -I${pfx}/include/SDL2"
-	# shellcheck disable=2086
-	"${CROSS}gcc" ${mesa_cc} -c -o "${gluedir}/sdl_phoenix_glctx.o" "${sdl2_glue}/sdl_phoenix_glctx.c"
-	# shellcheck disable=2086
-	"${CROSS}gcc" ${base_cc} -O2 -ffreestanding -fno-strict-aliasing -Wno-error \
-		-c -o "${gluedir}/sdl_phoenix_glstubs.o" "${sdl2_glue}/sdl_phoenix_glstubs.c"
-
-	# ----- Stage 4: final group-link --------------------------------------------
-	# Re-run CMake's computed link line (objects + STK/bundled static libs) with
-	# the glue objects and a trailing --start-group appended. The group resolves,
-	# in one extra pass, two classes the single-pass CMake order leaves undefined:
-	#   * the GLES entrypoints (glClear, glDrawArrays, ...) referenced by the STK
-	#     libs but provided only by libGL-phoenix.a / libv3d-phoenix.a;
-	#   * ogg/vorbis/zlib — CMake lists libogg/libvorbis/libvorbisfile as raw file
-	#     paths in producer-first order (no CMake-target dependency info), so
-	#     vorbisfile->vorbis->ogg and zlib back-references cannot resolve L-to-R.
-	# The group also covers the libGL<->libv3d<->SDL<->glue cycle. Driver is g++
-	# (from link.txt) so libstdc++/libm come in automatically; the 8 MB committed
-	# stack matches the heavier C++ (yQuake2 used 4 MB).
-	echo ">> [supertuxkart] final group-link against libGL/libv3d + SDL2 glue"
-	local linkcmd; linkcmd="$(cat "${linktxt}")"
-	# link.txt uses paths relative to the build dir (objects + `-o bin/supertuxkart`),
-	# so run the relink from ${build}; and create bin/ first — on a CLEAN build CMake
-	# has not yet made the output dir (it would create it only during its own link,
-	# which we bypass), so ld's `-o bin/supertuxkart` fails with "cannot open output
-	# file ... No such file or directory". (An incremental build masked this because a
-	# prior partial link had already created bin/.)
-	# libcurl is listed by CMake as a raw path, and on a CLEAN build it is
-	# configured WITH the mbedTLS backend (the mbedtls port is built before curl,
-	# so curl's configure finds it). It then references mbedtls_ssl_* and
-	# mbedtls_x509_*, which live in libmbedtls.a / libmbedx509.a -- neither of
-	# which CMake knows about: the recipe passes only -DMBEDCRYPTO_LIBRARY, which
-	# covers STK's OWN crypto use, not curl's TLS use. An incremental tree hid
-	# this because its curl predated the mbedtls port and had no TLS backend at
-	# all. All three go in the group so curl <-> mbedtls back-references resolve.
-	local elf="${build}/bin/supertuxkart"
-
-	# Delete any previous ELF before relinking, and check the linker's own exit
-	# status -- not just that a file exists afterwards.
-	#
-	# The existence test alone is only meaningful on a CLEAN tree. On an
-	# INCREMENTAL one a stale supertuxkart from an earlier build is already
-	# sitting in bin/, so a relink that fails still leaves `[ -f ]` true: the port
-	# would install and ship the OLD binary and report success. That failure mode
-	# is invisible in exactly the situation where it matters most -- iterating on a
-	# source change and measuring the result, where the measurement would silently
-	# be of the previous build.
-	rm -f "${elf}"
-	if ! ( cd "${build}" && mkdir -p bin && eval "${linkcmd} '${gluedir}/sdl_phoenix_glctx.o' '${gluedir}/sdl_phoenix_glstubs.o' \
-		-Wl,--start-group '${sdllib}' '${gllib}' '${v3dlib}' \
-		'${pfx}/lib/libz.a' '${pfx}/lib/libogg.a' '${pfx}/lib/libvorbis.a' \
-		'${pfx}/lib/libvorbisfile.a' '${pfx}/lib/libvorbisenc.a' \
-		'${pfx}/lib/libmbedtls.a' '${pfx}/lib/libmbedx509.a' '${pfx}/lib/libmbedcrypto.a' \
-		-Wl,--end-group -Wl,-z,stack-size=8388608" ); then
-		b_die "supertuxkart: final group-link FAILED (see link errors above). No ELF installed."
-	fi
-
-	[ -f "${elf}" ] || b_die "supertuxkart: final link reported success but produced no ELF."
-
-	# Install the engine binary. The ~1 GB art assets (stk-assets) are a separate
-	# RUNTIME concern staged outside the port (see the port plan §6).
-	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
-	cp "${elf}" "${PREFIX_PROG}/supertuxkart"
-	"${STRIP}" -o "${PREFIX_PROG_STRIPPED}/supertuxkart" "${elf}"
-	if b_use rootfs; then
-		b_install "${PREFIX_PROG_TO_INSTALL}/supertuxkart" /usr/bin
-	fi
-	echo ">> [supertuxkart] M3 complete: /usr/bin/supertuxkart linked + installed."
+	echo ">> [supertuxkart] build tree ready for supertuxkart_drm: ${n} objects + the static libs in ${linktxt}"
 }
