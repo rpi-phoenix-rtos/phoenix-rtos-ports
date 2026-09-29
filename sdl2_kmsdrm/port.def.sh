@@ -77,7 +77,8 @@
 #   libGLESv2.a), "tail <a>" (libwayland-client/-egl/-cursor, libxkbcommon, wlphx-compat,
 #   libffi, libdrm, the Mesa compat shim, zlib) and "flag <ld flag>" (--wrap=mmap/ioctl for
 #   libdrm-phoenix, --wrap=close/write + -u for the compat layer's emulated descriptors);
-#   share/gamewl/ (gamewl_hooks.c, relink-sdl-gl-game-wl.subr, the session helpers).
+#   share/gamewl/ (gamewl_hooks.c, relink-sdl-gl-game-wl.subr); the session helpers are
+#   staged from gamewl/pi and gamewl/labwc-xfce-m8 (USE rootfs).
 #   libwayland-cursor's os_create_anonymous_file() clashes with Mesa's (util/anon_file.c,
 #   another signature; hidden from each other as shared libraries): the link uses a private
 #   copy of libwayland-cursor.a with its copy renamed (the tools build renamed Mesa's instead).
@@ -281,7 +282,7 @@ _sdl2_kmsdrm_wayland() {
 		while IFS= read -r l; do
 			case "${l}" in
 				"--whole-archive "*) gallium="${l#--whole-archive }" ;;
-				*) for t in "${tail_mesa[@]}"; do [ "${l}" = "${t}" ] && continue 2; done
+				*) for t in "${tail_mesa[@]}"; do [ "${l}" -ef "${t}" ] && continue 2; done   # (-ef: PREFIX_BUILD may end in /)
 					[ -f "${l}" ] || b_die "wayland: ${M}/link-${k}.txt names a missing ${l}"
 					if [ "${k}" = gl ]; then echo "mesa-gl ${l}"; else echo "mesa-es ${l}"; fi ;;
 			esac
