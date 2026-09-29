@@ -1,0 +1,124 @@
+From cb0729d0409bfb670f2c97b7870891d995178d1d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 27 Sep 2026 21:17:25 +0200
+Subject: [PATCH 5/5] Optionally keep Atril's GSettings schema in its own
+ directory
+
+-Dschemas_dir=<dir> installs org.mate.Atril.gschema.xml there instead of
+<datadir>/glib-2.0/schemas, and atril appends the directory to
+GSETTINGS_SCHEMA_DIR at the start of main(), before the first GSettings
+object is made (GLib reads the variable once, when it builds the default
+schema source; its directories are searched in addition to the
+XDG_DATA_DIRS ones).
+
+For systems where the shared compiled schema file is not rebuilt when a
+program is installed (no glib-compile-schemas on the target): Atril's
+compiled schema then ships next to it. g_settings_new() aborts on a
+missing schema. The default ('') builds exactly what it did.
+---
+ data/meson.build  |  2 +-
+ meson.build       |  4 ++++
+ meson_options.txt |  5 +++++
+ shell/main.c      | 35 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/data/meson.build b/data/meson.build
+index 1d76df3..e0771f2 100644
+--- a/data/meson.build
++++ b/data/meson.build
+@@ -20,7 +20,7 @@ configure_file(
+ 
+ schema_file = install_data(
+     'org.mate.Atril.gschema.xml',
+-    install_dir: join_paths(datadir, 'glib-2.0', 'schemas')
++    install_dir: schema_dir
+ )
+ 
+ desktop_conf = configuration_data()
+diff --git a/meson.build b/meson.build
+index 628902f..5849245 100644
+--- a/meson.build
++++ b/meson.build
+@@ -44,6 +44,10 @@ includedir = get_option('includedir')
+ libexecdir = get_option('libexecdir')
+ desktopdir = join_paths(datadir, 'applications')
+ schema_dir = join_paths(datadir, 'glib-2.0', 'schemas')
++if get_option('schemas_dir') != ''
++  schema_dir = get_option('schemas_dir')
++  atril_conf.set_quoted('EV_SCHEMAS_DIR', schema_dir)
++endif
+ header_dir = join_paths(meson.project_name(), api_version)
+ 
+ po_dir = join_paths(meson.project_source_root(), 'po')
+diff --git a/meson_options.txt b/meson_options.txt
+index 93fab67..da798d8 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -55,6 +55,11 @@ option('builtin_backends',
+     value: false,
+     description: 'Link the document backends into the programs instead of loading them as modules (only the pdf backend supports it)'
+ )
++option('schemas_dir',
++    type: 'string',
++    value: '',
++    description: 'Install Atril\'s GSettings schema into this directory (default: <datadir>/glib-2.0/schemas); atril adds it to GSETTINGS_SCHEMA_DIR'
++)
+ option('caja',
+     type: 'feature',
+     description: 'Support for the Caja extension'
+diff --git a/shell/main.c b/shell/main.c
+index 2bb4cd3..80e99ac 100644
+--- a/shell/main.c
++++ b/shell/main.c
+@@ -60,6 +60,37 @@ option_version_cb (const gchar *option_name,
+   return FALSE;
+ }
+ 
++#ifdef EV_SCHEMAS_DIR
++/* Atril's GSettings schema lives in its own directory (-Dschemas_dir): add it
++ * to GLib's schema path before the first GSettings object is made. */
++static void
++ev_add_schemas_dir (const gchar *dir)
++{
++	const gchar *dirs = g_getenv ("GSETTINGS_SCHEMA_DIR");
++	gchar      **list;
++	gchar       *value;
++	gint         i;
++
++	if (dirs == NULL || dirs[0] == '\0') {
++		g_setenv ("GSETTINGS_SCHEMA_DIR", dir, TRUE);
++		return;
++	}
++
++	list = g_strsplit (dirs, G_SEARCHPATH_SEPARATOR_S, -1);
++	for (i = 0; list[i] != NULL; i++) {
++		if (g_strcmp0 (list[i], dir) == 0) {
++			g_strfreev (list);
++			return;
++		}
++	}
++	g_strfreev (list);
++
++	value = g_strconcat (dirs, G_SEARCHPATH_SEPARATOR_S, dir, NULL);
++	g_setenv ("GSETTINGS_SCHEMA_DIR", value, TRUE);
++	g_free (value);
++}
++#endif /* EV_SCHEMAS_DIR */
++
+ static const GOptionEntry goption_options[] =
+ {
+ 	{ "page-label", 'p', 0, G_OPTION_ARG_STRING, &ev_page_label, N_("The page label of the document to display."), N_("PAGE")},
+@@ -281,6 +312,10 @@ main (int argc, char *argv[])
+ 	GError         *error = NULL;
+ 	int             status;
+ 
++#ifdef EV_SCHEMAS_DIR
++	ev_add_schemas_dir (EV_SCHEMAS_DIR);
++#endif
++
+ #ifdef ENABLE_NLS
+ 	/* Initialize the i18n stuff */
+ 	bindtextdomain (GETTEXT_PACKAGE, ev_get_locale_dir());
+-- 
+2.53.0
+
