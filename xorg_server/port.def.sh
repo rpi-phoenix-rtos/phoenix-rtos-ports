@@ -80,7 +80,18 @@ p_build() {
 	# desktop renders through fontconfig/Xft (verified 2026-09-04), and no X11 core
 	# bitmap fonts are shipped at all -- that gap is tracked separately.
 	# --- 2. configure + build the kdrive CORE archives ---
-	if [ ! -f "$KD/dix/.libs/libdix.a" ]; then
+	# Every core archive the hand link below uses. A partial tree (a build that stopped in one
+	# directory) must neither skip configure+make nor reach the link: the check is all of them.
+	local core_la=(dix/.libs/libmain.a dix/.libs/libdix.a hw/kdrive/src/.libs/libkdrive.a \
+fb/.libs/libfb.a mi/.libs/libmi.a xfixes/.libs/libxfixes.a Xext/.libs/libXext.a \
+Xext/.libs/libXvidmode.a Xext/.libs/libhashtable.a dbe/.libs/libdbe.a record/.libs/librecord.a \
+randr/.libs/librandr.a render/.libs/librender.a damageext/.libs/libdamageext.a present/.libs/libpresent.a \
+miext/sync/.libs/libsync.a miext/damage/.libs/libdamage.a miext/shadow/.libs/libshadow.a \
+Xi/.libs/libXi.a Xi/.libs/libXistubs.a xkb/.libs/libxkb.a xkb/.libs/libxkbstubs.a \
+composite/.libs/libcomposite.a config/.libs/libconfig.a os/.libs/libos.a)
+	local missing_la=""; local a
+	for a in "${core_la[@]}"; do [ -f "$KD/$a" ] || missing_la="$missing_la $a"; done
+	if [ -n "$missing_la" ]; then
 		( cd "$KD" \
 		  && PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig" \
 		     PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig" \
@@ -99,7 +110,9 @@ p_build() {
 		# --disable-xephyr = no server binary linked here; make only builds the libs.
 		# A trailing no-op target can exit non-zero, so the archive check is the gate.
 		( cd "$KD" && make -j"$(nproc)" ) || echo "xorg-server: make non-zero, verifying archives"
-		[ -f "$KD/dix/.libs/libdix.a" ] || b_die "xorg-server: core archives missing after make"
+		missing_la=""
+		for a in "${core_la[@]}"; do [ -f "$KD/$a" ] || missing_la="$missing_la $a"; done
+		[ -z "$missing_la" ] || b_die "xorg-server: core archives missing after make:$missing_la"
 		echo "xorg-server: core archives OK"
 	fi
 
@@ -125,14 +138,7 @@ p_build() {
 
 	# --- 4. hand-ld link Xphoenix (circular core refs -> --start-group; ddxLoad.o
 	#        BEFORE the group so its XkbDDX* win; -L$SYSROOT/lib first for fresh libc) ---
-	local core_la=(dix/.libs/libmain.a dix/.libs/libdix.a hw/kdrive/src/.libs/libkdrive.a \
-fb/.libs/libfb.a mi/.libs/libmi.a xfixes/.libs/libxfixes.a Xext/.libs/libXext.a \
-Xext/.libs/libXvidmode.a Xext/.libs/libhashtable.a dbe/.libs/libdbe.a record/.libs/librecord.a \
-randr/.libs/librandr.a render/.libs/librender.a damageext/.libs/libdamageext.a present/.libs/libpresent.a \
-miext/sync/.libs/libsync.a miext/damage/.libs/libdamage.a miext/shadow/.libs/libshadow.a \
-Xi/.libs/libXi.a Xi/.libs/libXistubs.a xkb/.libs/libxkb.a xkb/.libs/libxkbstubs.a \
-composite/.libs/libcomposite.a config/.libs/libconfig.a os/.libs/libos.a)
-	local GROUP=""; local a
+	local GROUP=""
 	for a in "${core_la[@]}"; do GROUP="$GROUP $KD/$a"; done
 	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
 	# shellcheck disable=2086
