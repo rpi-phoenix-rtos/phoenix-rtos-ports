@@ -1,0 +1,10 @@
+# labwc autostart of the M8 desktop session on Phoenix-RTOS (the XFCE demo + windowed GPU
+# games): stage as /etc/xdg/labwc-xfce-m8/autostart. labwc runs it with `sh` (busybox) once the
+# compositor is up. As labwc-xfce-demo/autostart (the desktop and the panel), plus a foot
+# terminal and the games of M8_GAMES (default quakespasm) in a window, one after another,
+# after M8_DELAY seconds (/bin/game-window-autostart.sh). The games' output goes to labwc's
+# (the console): their banner, fps counter and exit lines are graded on the UART.
+/usr/lib/xfce-demo/bin/xfdesktop > /tmp/xfce-logs/xfdesktop.log 2>&1 &
+/usr/lib/xfce-demo/bin/xfce4-panel > /tmp/xfce-logs/xfce4-panel.log 2>&1 &
+/bin/foot-2 > /tmp/xfce-logs/foot.log 2>&1 &
+/bin/bash /bin/game-window-autostart.sh &
