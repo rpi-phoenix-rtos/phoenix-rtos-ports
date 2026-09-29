@@ -25,11 +25,14 @@
 	# NEW GPU LANE: private prefix. `yquake2` (and through it `sdl2`) is a dependency so that
 	# port_manager builds the engine objects and the build.log holding its final link first.
 	conflicts="yquake2_drm!=${version}"
-	depends="yquake2 sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
+	depends="yquake2 sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib wayland? ( sdl2_kmsdrm[wayland] )"
 
 	# rootfs: install /usr/bin/yquake2-drm and its launcher /usr/bin/quake2-drm into the image,
 	# the launcher also as /usr/bin/quake2
-	iuse="rootfs"
+	# wayland: ALSO relink the WINDOWED clone for the Wayland desktop (M8): /usr/bin/yquake2-wl
+	# + its launcher /usr/bin/quake2-wl, and (with rootfs) the XFCE menu entry "Quake II
+	# (window)" = /bin/game-window.sh quake2 (sdl2_kmsdrm USE rootfs)
+	iuse="rootfs wayland"
 
 	supports="phoenix>=3.3"
 }
@@ -44,6 +47,9 @@
 # tools/yquake2-port/quake2-launcher.c) with only its exec target rewritten
 # (/usr/bin/yquake2 -> /usr/bin/yquake2-drm): the same ram-stage-play of /usr/share/quake2 to
 # /tmp/quake2 and the same video/demo arguments.
+# USE wayland: tools/gpu-lane/sdl2-wl/build-quake2-wl.sh -- the same relink on sdl2_kmsdrm's
+# Wayland link group (share/gamewl/relink-sdl-gl-game-wl.subr); the launcher forwards the
+# extra arguments /bin/game-window.sh passes for a window.
 
 p_prepare() {
 	:
@@ -71,5 +77,15 @@ p_build() {
 	# image). P4 gives the programs the plain names themselves.
 	if b_use rootfs; then
 		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake2-drm" "${PREFIX_FS}/root/usr/bin/quake2"
+	fi
+
+	if b_use wayland; then
+		# shellcheck disable=SC1091
+		. "${PORT_DEP_sdl2_kmsdrm}/share/gamewl/relink-sdl-gl-game-wl.subr"
+		G_APP=quake2-wl
+		# the -drm clone above ran the control relink on the same engine objects
+		G_DO_CONTROL=0
+		gwl_main
+		gamewl_desktop_entry quake2 "Quake II (window)" "yQuake2 in a window on the desktop"
 	fi
 }

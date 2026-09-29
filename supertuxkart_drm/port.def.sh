@@ -24,11 +24,14 @@
 	# NEW GPU LANE: private prefix. `supertuxkart` is a dependency so that its CMake build tree
 	# (objects + link.txt) exists first; the audio/TLS archives are its link group's.
 	conflicts="supertuxkart_drm!=${version}"
-	depends="supertuxkart sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib libogg libvorbis mbedtls"
+	depends="supertuxkart sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib libogg libvorbis mbedtls wayland? ( sdl2_kmsdrm[wayland] )"
 
 	# rootfs: install /usr/bin/supertuxkart-drm and its launcher /bin/stk-drm into the image,
 	# the launcher also as /bin/stk
-	iuse="rootfs"
+	# wayland: ALSO relink the WINDOWED clone for the Wayland desktop (M8): /usr/bin/supertuxkart-wl
+	# + its launcher /bin/stk-wl, and (with rootfs) the XFCE menu entry "SuperTuxKart (window)"
+	# = /bin/game-window.sh stk (sdl2_kmsdrm USE rootfs)
+	iuse="rootfs wayland"
 
 	supports="phoenix>=3.3"
 }
@@ -54,6 +57,11 @@
 # __wrap_SDL_GL_SwapWindow -> SDL_GL_SwapWindow; only the wrappers call ioctl/mmap; submit-first
 # swap order; new-lane strings present, old-lane absent (the port's binary the reverse); no
 # global symbol defined both by STK's inputs and by the new stack; guarded inputs unchanged.
+# USE wayland: tools/gpu-lane/sdl2-wl/build-stk-wl.sh -- the same stage-4 relink with
+# sdl2_kmsdrm's Wayland libSDL2.a and link group (wayland/link-inputs.txt, the GLES half), the
+# gamewl hooks (GAMEWL_NAME stk-wl) and the launcher rewritten to /usr/bin/supertuxkart-wl
+# (`--windowed --screensize=WxH` come from /bin/game-window.sh; `--windowed` is read after
+# `--fullscreen`). Its control relink is the -drm one above (the same inputs).
 
 p_prepare() {
 	:
@@ -324,4 +332,225 @@ p_build() {
 		# image). P4 gives the programs the plain names themselves.
 		install -m 755 "${p}/bin/stk-$name" "${PREFIX_FS}/root/bin/stk"
 	fi
+
+	if b_use wayland; then _stk_wl; fi
+}
+
+# USE wayland: supertuxkart-wl + /bin/stk-wl (tools/gpu-lane/sdl2-wl/build-stk-wl.sh)
+_stk_wl() {
+	local pfx="${PREFIX_BUILD%/}" sysroot="${NL_SYSROOT}" tcbin
+	tcbin="$(dirname "${NL_CC}")"
+	local cc="${NL_CC}" nm="${NL_NM}" strip="${NL_STRIP}" readelf="${NL_READELF}" objdump="${NL_OBJDUMP}" size="${NL_SIZE}"
+	local stkbuild="${pfx}/port-sources/supertuxkart-1.4/stk-code-1.4/build"
+	local linktxt="${stkbuild}/CMakeFiles/supertuxkart.dir/link.txt"
+	local old_sdl="${PORT_DEP_sdl2}/lib/libSDL2.a"
+	local shipped_prog="${PREFIX_PROG%/}/supertuxkart"
+	local launcher_src="${PREFIX_PORT}/glue/stk-launcher.c"
+	local SP="${PORT_DEP_sdl2_kmsdrm}/wayland" GW="${PORT_DEP_sdl2_kmsdrm}/share/gamewl"
+	local LI="${SP}/link-inputs.txt" hooks_src="${GW}/gamewl_hooks.c"
+	local zl="${PORT_DEP_zlib}/lib" og="${PORT_DEP_libogg}/lib" vb="${PORT_DEP_libvorbis}/lib" mt="${PORT_DEP_mbedtls}/lib"
+	local name="wl"
+	local out="${PREFIX_PORT_BUILD}/relink-wl"
+	local elf="${out}/supertuxkart-${name}"
+
+	log()  { printf '[stk-wl] %s\n' "$*"; }
+	die()  { b_die "[stk-wl] $*"; }
+	sha()  { if [ -e "$1" ]; then sha256sum "$1" | cut -d' ' -f1; else echo "absent"; fi; }
+
+	# --- preconditions (fail loud; never fall back) -------------------------------------------
+	local TFLAGS=("${NL_TFLAGS[@]}")
+	[ -f "${LI}" ] || die "missing ${LI} (sdl2_kmsdrm built without USE wayland?)"
+	local kind item GALLIUM_A="" SDL_A="" MESA=() TAILL=() WRAPS=()
+	while read -r kind item; do
+		case "${kind}" in
+			gallium) GALLIUM_A="${item}" ;;
+			sdl) SDL_A="${item}" ;;
+			mesa-es) MESA+=("${item}") ;;   # STK is a GLES program (-DUSE_GLES2=ON): libGLESv2
+			mesa-gl) ;;
+			tail) TAILL+=("${item}") ;;
+			flag) WRAPS+=("${item}") ;;
+			*) die "unknown line in ${LI}: ${kind}" ;;
+		esac
+	done < "${LI}"
+	[ -n "${GALLIUM_A}" ] && [ -n "${SDL_A}" ] && [ "${#MESA[@]}" -gt 10 ] && [ "${#TAILL[@]}" -gt 5 ] || die "${LI} is incomplete"
+	local f a
+	for f in "$linktxt" "$old_sdl" "$shipped_prog" "$sysroot/lib/libphoenix.a" "$launcher_src" "$hooks_src" "$SDL_A" \
+			"$GALLIUM_A" "$SP/include/SDL2/SDL_config.h" "${MESA[@]}" "${TAILL[@]}" "${zl}/libz.a" "${mt}/libmbedtls.a"; do
+		[ -e "$f" ] || die "missing: $f"
+	done
+	case " ${MESA[*]} " in *libGLESv2.a*) ;; *) die "the GLES link group has no libGLESv2.a" ;; esac
+	case " ${MESA[*]} " in *libglapi_bridge.a*) die "the GLES link group holds libglapi_bridge.a" ;; esac
+	local cfg="${SP}/include/SDL2/SDL_config.h" d
+	for d in SDL_VIDEO_DRIVER_WAYLAND SDL_VIDEO_DRIVER_KMSDRM SDL_VIDEO_OPENGL_EGL SDL_VIDEO_OPENGL_ES2 SDL_AUDIO_DRIVER_PHOENIX; do
+		grep -qE "^#define ${d} +1" "${cfg}" || die "the Wayland SDL_config.h lacks ${d} 1"
+	done
+	for d in SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC SDL_VIDEO_DRIVER_KMSDRM_DYNAMIC SDL_VIDEO_DRIVER_PHOENIX SDL_LOADSO_DLOPEN; do
+		if grep -qE "^#define ${d}( |$)" "${cfg}"; then die "the Wayland SDL_config.h defines ${d}"; fi
+	done
+
+	local guarded=("$old_sdl" "$shipped_prog" "$linktxt" "$SDL_A" "$GALLIUM_A" "${MESA[@]}" "${TAILL[@]}")
+	declare -A before
+	for f in "${guarded[@]}"; do before["$f"]="$(sha "$f")"; done
+
+	rm -rf "$out"
+	mkdir -p "$out/src" "$out/obj"
+
+	# --- 1. the clone's hooks object -----------------------------------------------------------
+	local hooks_o="$out/obj/gamewl_hooks.o"
+	"$cc" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${TFLAGS[@]}" -I"${SP}/include" \
+		-DGAMEWL_NAME='"stk-wl"' -DGAMEWL_API='"GLES"' -c "$hooks_src" -o "$hooks_o" || die "gamewl_hooks.c compile failed"
+
+	# --- 2. the stage-4 link --------------------------------------------------------------------
+	local linkcmd
+	linkcmd="$(cat "$linktxt")"
+	[ "$(grep -o ' -o bin/supertuxkart ' "$linktxt" | wc -l)" = 1 ] \
+		|| die "link.txt must name ' -o bin/supertuxkart ' exactly once -- the port recipe changed; update this recipe"
+	[ "$(grep -oF " ${old_sdl} " "$linktxt" | wc -l)" = 1 ] \
+		|| die "link.txt must name ${old_sdl} exactly once -- the port recipe changed; update this recipe"
+	local AA="" WW="" w cmd bad
+	for a in "${MESA[@]}" "${TAILL[@]}"; do AA="${AA} '${a}'"; done
+	for w in "${WRAPS[@]}"; do WW="${WW} ${w}"; done
+	cmd="${linkcmd/ -o bin\/supertuxkart / -o '${elf}' }"
+	cmd="${cmd/ ${old_sdl} / '${SDL_A}' }"
+	cmd="${cmd} '${hooks_o}' -static${WW} -Wl,--wrap=SDL_GL_SwapWindow -Wl,-Map,'${elf}.map' \
+		-Wl,--whole-archive '${GALLIUM_A}' -Wl,--no-whole-archive \
+		-Wl,--start-group '${SDL_A}'${AA} \
+		'${zl}/libz.a' '${og}/libogg.a' '${vb}/libvorbis.a' \
+		'${vb}/libvorbisfile.a' '${vb}/libvorbisenc.a' \
+		'${mt}/libmbedtls.a' '${mt}/libmbedx509.a' '${mt}/libmbedcrypto.a' \
+		-Wl,--end-group -lm -Wl,-z,stack-size=8388608"
+	for bad in "${old_sdl}" libGL-phoenix libv3d-phoenix sdl_phoenix_glctx sdl_phoenix_glstubs " -o bin/supertuxkart "; do
+		case "$cmd" in *"$bad"*) die "the stk-wl link command still names '$bad'" ;; esac
+	done
+	printf '%s\n' "$cmd" > "$out/link-cmd.txt"
+	log "stk-wl relink (SDL Wayland + KMSDRM, Mesa EGL wayland/GLES, Wayland client stack, libdrm-phoenix)"
+	rm -f "$elf"
+	( cd "$stkbuild" && export PATH="${tcbin}:${PATH}" && eval "$cmd" ) > "$out/link.log" 2>&1 \
+		|| { head -60 "$out/link.log" >&2; die "stk-wl link failed"; }
+	[ -f "$elf" ] || die "link reported success but produced no ELF"
+	"$strip" -o "$elf.stripped" "$elf"
+
+	# --- proofs on the clone --------------------------------------------------------------------
+	bad=0
+	local und syms s n forbidden calls stk_in dups
+	if "$readelf" -l "$elf" | grep -q INTERP; then log "  PT_INTERP present"; bad=1; fi
+	und="$("$nm" -u "$elf" || true)"
+	log "  undefined symbols (nm -u): $(grep -c . <<< "${und}" || true)"
+	[ -n "${und}" ] && { sed 's/^/[stk-wl]     /' <<< "${und}" | head -20; bad=1; }
+	syms="$("$nm" "$elf")"
+	for s in Wayland_CreateDevice Wayland_GLES_SwapWindow Wayland_PumpEvents KMSDRM_CreateDevice SDL_EGL_LoadLibrary \
+			SDL_GL_SwapWindow __wrap_SDL_GL_SwapWindow __wrap_mmap __wrap_ioctl __wrap_close __wrap_write drm_phoenix_ioctl \
+			wl_display_connect wl_egl_window_create wl_cursor_theme_load xkb_keymap_new_from_string dri2_initialize_wayland \
+			memfd_create os_create_anonymous_file wlcursor_os_create_anonymous_file kmsro_drm_screen_create \
+			v3d_drm_screen_create_renderonly eglGetPlatformDisplayEXT eglGetProcAddress _mesa_glapi_get_proc_address; do
+		if grep -qE " [TtWw] ${s}\$" <<< "${syms}"; then log "  symbol ${s}: yes"; else log "  symbol ${s}: NO"; bad=1; fi
+	done
+	forbidden="$(grep -E ' [TtWwDdBbRr] (PHOENIX_bootstrap|PHOENIX_PumpEvents|PHOENIX_GL_[A-Za-z_]*|phxgl_[A-Za-z_]*|phoenix_v3d_ioctl|winsys_init|boPool_take|mboxProp|v3da_connect|v3d_phoenix_flip)$' <<< "${syms}" || true)"
+	if [ -n "${forbidden}" ]; then log "  forbidden (old-lane) symbols PRESENT:"; sed 's/^/[stk-wl]     /' <<< "${forbidden}"; bad=1
+	else log "  old-lane symbols (SDL phoenix video, phxgl/PHOENIX_GL glue, in-process + v3da winsys): none"; fi
+
+	calls="$("$objdump" -d --no-show-raw-insn "$elf" | awk '
+		/^[0-9a-f]+ <.*>:$/ { fn = $2; gsub(/[<>:]/, "", fn); next }
+		/\tbl?\t/ && / <(ioctl|mmap|__wrap_SDL_GL_SwapWindow|SDL_GL_SwapWindow|__real_SDL_GL_SwapWindow)>$/ {
+			t = $NF; gsub(/[<>]/, "", t); print t, fn }' | sort | uniq -c)"
+	printf '%s\n' "$calls" > "$out/call-sites.txt"
+	awk '$2 == "ioctl" && $3 != "__wrap_ioctl" { bad = 1 } END { exit bad }' <<< "$calls" \
+		|| { log "  real ioctl() called from outside __wrap_ioctl:"; awk '$2 == "ioctl"' <<< "$calls" | sed 's/^/[stk-wl]     /'; bad=1; }
+	awk '$2 == "mmap" && $3 != "__wrap_mmap" { bad = 1 } END { exit bad }' <<< "$calls" \
+		|| { log "  real mmap() called from outside __wrap_mmap:"; awk '$2 == "mmap"' <<< "$calls" | sed 's/^/[stk-wl]     /'; bad=1; }
+	if grep -qE ' __wrap_SDL_GL_SwapWindow _ZN3irr5video13COGLES2Driver' <<< "$calls" \
+			&& ! grep -qE ' SDL_GL_SwapWindow _ZN3irr' <<< "$calls" \
+			&& grep -qE ' SDL_GL_SwapWindow __wrap_SDL_GL_SwapWindow$' <<< "$calls"; then
+		log "  PROOF: COGLES2Driver -> __wrap_SDL_GL_SwapWindow -> SDL_GL_SwapWindow (frame counter in the path)"
+	else
+		log "  the SDL_GL_SwapWindow wrap is NOT in Irrlicht's swap path:"; sed 's/^/[stk-wl]     /' <<< "$calls"; bad=1
+	fi
+	for s in 'SDL Wayland video driver' 'KMS/DRM Video Driver' 'xdg_wm_base' 'zxdg_decoration_manager_v1' \
+			'zwp_relative_pointer_manager_v1' 'zwp_pointer_constraints_v1' 'zwp_linux_dmabuf_v1' '/dev/dri/' \
+			'libdrm-phoenix:' '/dev/audio0' 'kmsro' 'stk-wl: windowed GPU game' 'stk-wl flipstat' 'stk-wl swapstat'; do
+		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
+		log "  string '$s': $n"
+		[ "$n" != 0 ] || bad=1
+	done
+	for s in 'v3d-winsys:' 'v3da-winsys:' 'phxgl' 'PHOENIX: GL_CreateContext' '/dev/fb0' 'RPI4FB_GETMODE' 'phoenix_v3d_ioctl' \
+			'peek_next_scanout' 'v3d-srv' 'v3d-pool:'; do
+		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
+		log "  old-lane string '$s': $n"
+		[ "$n" = 0 ] || bad=1
+	done
+	# inverse control: the supertuxkart port's own binary is the old lane
+	for s in 'stk-wl: windowed GPU game' 'SDL Wayland video driver' 'libdrm-phoenix:'; do
+		if grep -aqF -- "$s" "$shipped_prog"; then log "  the port's supertuxkart carries '$s'"; bad=1; fi
+	done
+	grep -aqF 'v3d-winsys: RT scanout' "$shipped_prog" || { log "  prog/supertuxkart lacks 'v3d-winsys: RT scanout' -- the negative check proves nothing"; bad=1; }
+
+	# silent duplicates: global symbols defined by STK's own link inputs AND the new stack
+	stk_in="$( cd "$stkbuild" && tr ' ' '\n' < "$linktxt" | grep -E '\.(obj|a)$' | grep -vxF "${old_sdl}" )"
+	dups="$( { ( cd "$stkbuild" && while IFS= read -r f; do "$nm" -g --defined-only "$f" 2>/dev/null; done <<< "$stk_in" ) \
+			| awk 'NF >= 3 && $2 ~ /[TDBRVW]/ { print $3 }' | LC_ALL=C sort -u > "$out/obj/stk-defs.txt"; \
+		for f in "$GALLIUM_A" "${MESA[@]}" "${TAILL[@]}" "$SDL_A" "$hooks_o"; do
+				# (the ports libz.a is one of STK's own inputs too: the same archive, not a duplicate)
+				[ "$f" = "${zl}/libz.a" ] || "$nm" -g --defined-only "$f" 2>/dev/null; done \
+			| awk 'NF >= 3 && $2 ~ /[TDBRVW]/ { print $3 }' | LC_ALL=C sort -u > "$out/obj/wl-defs.txt"; \
+		LC_ALL=C comm -12 "$out/obj/stk-defs.txt" "$out/obj/wl-defs.txt" | grep -vxF 'DW.ref.__gxx_personality_v0' || true; } )"
+	if [ -n "$dups" ]; then
+		log "  symbols defined by BOTH STK's inputs and the new stack ($(grep -c . <<< "$dups")):"
+		sed 's/^/[stk-wl]     /' <<< "$dups" | head -30
+		bad=1
+	fi
+	rm -f "$out/obj/stk-defs.txt" "$out/obj/wl-defs.txt"
+
+	# --- 3. stk-wl launcher ------------------------------------------------------------------------
+	local lsrc="$out/src/stk-$name.c" diff_lines
+	sed -e "s|\"/usr/bin/supertuxkart\"|\"/usr/bin/supertuxkart-$name\"|" \
+	    -e "s|\"stk: exec /usr/bin/supertuxkart\"|\"stk-$name: exec /usr/bin/supertuxkart-$name\"|" \
+	    -e "s|\"stk: DATADIR=|\"stk-$name: DATADIR=|" \
+	    "$launcher_src" > "$lsrc"
+	[ "$(grep -c "\"/usr/bin/supertuxkart-$name\"" "$lsrc")" = 1 ] || die "launcher exec path rewrite did not match exactly once"
+	[ "$(grep -c "\"stk-$name: DATADIR=" "$lsrc")" = 1 ] || die "launcher banner rewrite did not match exactly once"
+	[ "$(grep -c '/usr/bin/supertuxkart"' "$lsrc")" = 0 ] || die "launcher still names the shipped engine"
+	grep -qF 'scale_rtts_factor=\"0.75\"' "$lsrc" || die "launcher lost the seeded scale_rtts_factor=0.75"
+	diff_lines="$(diff "$launcher_src" "$lsrc" | grep -c '^>' || true)"
+	[ "$diff_lines" = 3 ] || die "launcher differs from stk-launcher.c in $diff_lines lines (expected exactly 3)"
+	"$cc" -O2 -static -Wall -Wextra --sysroot="${sysroot}/" -B"${sysroot}/lib/" -iprefix "${sysroot}/" \
+		-o "$out/stk-$name" "$lsrc" || die "launcher compile failed"
+	if "$readelf" -l "$out/stk-$name" 2>/dev/null | grep -q INTERP; then die "stk-$name has a PT_INTERP segment"; fi
+	grep -aqF "/usr/bin/supertuxkart-$name" "$out/stk-$name" || die "launcher ELF lacks its exec path"
+	[ -z "$("$nm" -u "$out/stk-$name" || true)" ] || die "launcher has undefined symbols"
+
+	# --- provenance + guards ------------------------------------------------------------------------
+	"$size" "$elf" | sed 's/^/[stk-wl]   /'
+	{
+		echo "built:               $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		echo "gamewl_hooks.c:      $(sha "$hooks_src") (stk-wl, GLES)"
+		echo "libSDL2.a (Wayland): $(sha "$SDL_A")"
+		echo "link inputs:         $(sha "$LI"); libgallium $(sha "$GALLIUM_A" | cut -c1-16)"
+		echo "link.txt:            $(sha "$linktxt")"
+		echo "port prog:           $(sha "$shipped_prog") ($(stat -c%s "$shipped_prog") B)"
+		echo "wl unstripped:       $(sha "$elf") ($(stat -c%s "$elf") B)"
+		echo "wl stripped:         $(sha "$elf.stripped") ($(stat -c%s "$elf.stripped") B)"
+		echo "stk-$name:             $(sha "$out/stk-$name") ($(stat -c%s "$out/stk-$name") B)"
+		echo "libphoenix.a:        $(sha "$sysroot/lib/libphoenix.a")"
+	} > "$out/BUILD-INFO.txt"
+	sed 's/^/[stk-wl]   /' "$out/BUILD-INFO.txt"
+	local gbad=0
+	for f in "${guarded[@]}"; do
+		if [ "${before[$f]}" != "$(sha "$f")" ]; then log "ERROR: shared file CHANGED during this build: $f"; gbad=1; fi
+	done
+	[ "$gbad" = 0 ] || die "guarded inputs changed"
+	[ "$bad" = 0 ] || die "verification failed (see above)"
+
+	local p="${PREFIX_PORT_INSTALL}"
+	mkdir -p "${p}/bin" "${p}/prog" "${p}/share/stk-wl"
+	install -m 755 "$elf" "${p}/prog/supertuxkart-$name"
+	install -m 755 "$elf.stripped" "${p}/bin/supertuxkart-$name"
+	install -m 755 "$out/stk-$name" "${p}/bin/stk-$name"
+	install -m 644 "${elf}.map" "$out/link-cmd.txt" "$out/call-sites.txt" "$out/BUILD-INFO.txt" "${p}/share/stk-wl/"
+	if b_use rootfs; then
+		b_install "${p}/bin/supertuxkart-$name" /usr/bin
+		b_install "${p}/bin/stk-$name" /bin
+	fi
+	# shellcheck disable=SC1091
+	. "${GW}/relink-sdl-gl-game-wl.subr"
+	gamewl_desktop_entry stk "SuperTuxKart (window)" "SuperTuxKart kart racing in a window on the desktop"
 }

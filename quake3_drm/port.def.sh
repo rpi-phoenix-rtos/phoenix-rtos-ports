@@ -24,11 +24,14 @@
 	# NEW GPU LANE: private prefix. `quake3` (and `sdl2`) are dependencies so that the engine
 	# objects and the build.log holding the port's final link exist first.
 	conflicts="quake3_drm!=${version}"
-	depends="quake3 sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
+	depends="quake3 sdl2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib wayland? ( sdl2_kmsdrm[wayland] )"
 
 	# rootfs: install /usr/bin/quake3e-drm and its launcher /usr/bin/quake3-drm into the image,
 	# the launcher also as /usr/bin/quake3
-	iuse="rootfs"
+	# wayland: ALSO relink the WINDOWED clone for the Wayland desktop (M8): /usr/bin/quake3e-wl
+	# + its launcher /usr/bin/quake3-wl, and (with rootfs) the XFCE menu entry "Quake III
+	# (window)" = /bin/game-window.sh quake3 (sdl2_kmsdrm USE rootfs)
+	iuse="rootfs wayland"
 
 	supports="phoenix>=3.3"
 }
@@ -42,6 +45,8 @@
 # gamedrm/relink-sdl-gl-game.subr. The launcher is the shipped one (glue/quake3-launcher.c, a
 # copy of the coordination repo's tools/quake3-port/quake3-launcher.c) with only its exec
 # target rewritten (/usr/bin/quake3e -> /usr/bin/quake3e-drm).
+# USE wayland: tools/gpu-lane/sdl2-wl/build-quake3-wl.sh -- the same relink on sdl2_kmsdrm's
+# Wayland link group, desktop GL half (share/gamewl/relink-sdl-gl-game-wl.subr).
 
 p_prepare() {
 	:
@@ -69,5 +74,15 @@ p_build() {
 	# image). P4 gives the programs the plain names themselves.
 	if b_use rootfs; then
 		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake3-drm" "${PREFIX_FS}/root/usr/bin/quake3"
+	fi
+
+	if b_use wayland; then
+		# shellcheck disable=SC1091
+		. "${PORT_DEP_sdl2_kmsdrm}/share/gamewl/relink-sdl-gl-game-wl.subr"
+		G_APP=quake3-wl
+		# the -drm clone above ran the control relink on the same engine objects
+		G_DO_CONTROL=0
+		gwl_main
+		gamewl_desktop_entry quake3 "Quake III Arena (window)" "Quake III Arena (quake3e) in a window on the desktop"
 	fi
 }
