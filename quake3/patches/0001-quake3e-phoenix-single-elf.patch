@@ -329,3 +329,52 @@ index 76f1160f..ee88bdf0 100644
  	qglGetIntegerv(GL_PACK_ALIGNMENT, &packAlign);
  
  	linelen = cmd->width * 3;
+diff --git a/code/unix/linux_local.h b/code/unix/linux_local.h
+index 72d395fa..39e4b956 100644
+--- a/code/unix/linux_local.h
++++ b/code/unix/linux_local.h
+@@ -48,5 +48,8 @@ char *strlwr (char *s);
+ 
+ // signals.c
+ void InitSig(void);
++#ifdef __phoenix__
++qboolean Sys_QuitRequested( void );
++#endif
+ 
+ #endif // __LINUX_LOCAL_H__
+diff --git a/code/unix/linux_signals.c b/code/unix/linux_signals.c
+index b37ced71..4542f4b8 100644
+--- a/code/unix/linux_signals.c
++++ b/code/unix/linux_signals.c
+@@ -38,10 +38,31 @@ static qboolean signalcaught = qfalse;
+ 
+ extern void NORETURN Sys_Exit( int code );
+ 
++#ifdef __phoenix__
++/* A termination request (SIGTERM, SIGHUP, SIGQUIT) only sets this flag, and the main loop quits
++   through the normal "quit" path between frames. Shutting the client down inside the handler
++   can wait for something the interrupted frame holds: on Phoenix RE_Shutdown() never returned,
++   so the game had to be killed. A second request, or a fault, takes the path below. */
++static volatile sig_atomic_t quitRequested = 0;
++
++qboolean Sys_QuitRequested( void )
++{
++	return quitRequested ? qtrue : qfalse;
++}
++#endif
++
+ static void signal_handler( int sig )
+ {
+ 	char msg[32];
+ 
++#ifdef __phoenix__
++	if ( ( sig == SIGTERM || sig == SIGHUP || sig == SIGQUIT ) && !quitRequested && signalcaught == qfalse )
++	{
++		quitRequested = 1;
++		return;
++	}
++#endif
++
+ 	if ( signalcaught == qtrue )
+ 	{
+ 		printf( "DOUBLE SIGNAL FAULT: Received signal %d, exiting...\n", sig );
