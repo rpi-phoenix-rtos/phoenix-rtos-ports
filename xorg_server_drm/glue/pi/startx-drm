@@ -33,7 +33,7 @@
 #   HOLD        seconds the desktop stays up, then the clean teardown (default 200: startup +
 #               hold + teardown fit the showcase gate's 300 s per command). 0 = until the window
 #               manager exits (interactive use; xlaunch's behaviour).
-#   XSRV CONF   server binary / config (default /bin/Xorg-drm-noshim, /etc/X11/xorg-drm.conf)
+#   XSRV CONF   server binary / config (default /bin/Xorg-drm, /etc/X11/xorg-drm.conf)
 #   XVERB       Xorg -verbose level on the UART (default 3); DRMPHX_TRACE libdrm-phoenix ioctl
 #               trace in the server (default 0)
 #   GLDEMO      the GL client (default /bin/eglx11-demo-x); GLGEOM (default 640x480+300+180,
@@ -64,7 +64,7 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-XSRV=${XSRV:-/bin/Xorg-drm-noshim}
+XSRV=${XSRV:-/bin/Xorg-drm}
 CONF=${CONF:-/etc/X11/xorg-drm.conf}
 HOLD=${HOLD:-200}
 XVERB=${XVERB:-3}

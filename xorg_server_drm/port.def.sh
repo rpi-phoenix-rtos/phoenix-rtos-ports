@@ -23,9 +23,8 @@
 	# Private install prefix (see libdrm_phoenix).
 	conflicts="xorg_server_drm!=${version}"
 
-	# rootfs:   install /bin/Xorg-drm (+ /bin/Xorg-drm-noshim, the name startx-drm and the
-	#           migration gate run), /bin/startx-drm (+ /bin/startx and /bin/startx_gpu: it with HOLD=0)
-	#           and /etc/X11/xorg-drm.conf into the image
+	# rootfs:   install /bin/Xorg-drm, /bin/startx-drm (+ /bin/startx and /bin/startx_gpu: it
+	#           with HOLD=0) and /etc/X11/xorg-drm.conf into the image
 	# x11demo:  also build eglx11-demo, the GLES-in-an-X-window DRI3/Present client
 	#           (tools/gpu-lane/x11-drm): pulls mesa_drm's x11 build. Folded in here because a
 	#           framework port needs an upstream archive and the demo is our source only.
@@ -298,11 +297,10 @@ PY
 	fi
 
 	if b_use rootfs; then
-		# startx-drm (and the migration gate) start /bin/Xorg-drm-noshim -config
-		# /etc/X11/xorg-drm.conf and the GL client /bin/eglx11-demo-x; both names are installed.
+		# startx-drm starts /bin/Xorg-drm -config /etc/X11/xorg-drm.conf and the GL client
+		# /bin/eglx11-demo-x. (Up to GPU migration P3 the server was also installed as
+		# /bin/Xorg-drm-noshim, the name of its Pi-proven build configuration.)
 		b_install "${P}/bin/Xorg-drm" /bin
-		cp "${P}/bin/Xorg-drm" "${PREFIX_PORT_BUILD}/Xorg-drm-noshim"
-		b_install "${PREFIX_PORT_BUILD}/Xorg-drm-noshim" /bin
 		b_install "${P}/bin/startx-drm" /bin
 		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
 		# image). P4 gives the programs the plain names themselves.
