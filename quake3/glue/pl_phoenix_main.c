@@ -1053,6 +1053,12 @@ int main( int argc, const char* argv[] )
 #ifdef __linux__
 		Sys_ConfigureFPU();
 #endif
+		// a termination signal only sets a flag (linux_signals.c): quit here, between frames
+		if ( Sys_QuitRequested() )
+		{
+			Com_Printf( "Termination requested, quitting from the main loop\n" );
+			Com_Quit_f();
+		}
 
 #ifdef DEDICATED
 		// run the game
