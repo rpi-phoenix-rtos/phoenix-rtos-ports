@@ -362,13 +362,22 @@ EOF
 	if [ "$(cat "${D}/icons.stamp" 2>/dev/null || true)" != "${stamp}" ]; then
 		rm -rf "${D}/icons"
 		mkdir -p "${D}/icons"
+		# pngify renders SVG icons with PyGObject (gi + Rsvg): a host tool. The ports framework
+		# runs with a Python venv first on PATH that has no gi, so take the first interpreter
+		# that can import it (the host's), and fail loud when none can.
+		local pygi=""
+		for pygi in python3 /usr/bin/python3; do
+			"${pygi}" -c 'import gi' 2>/dev/null && break
+			pygi=""
+		done
+		[ -n "${pygi}" ] || b_die "xfce_wayland: no host python3 with PyGObject (gi) for pngify-icon-theme.py (install python3-gi + gir1.2-rsvg-2.0)"
 		# Adwaita 3.38: full-colour PNGs as shipped (menu/toolbar/dialog/panel sizes), the
 		# symbolic SVGs encoded at 16 and 24 px
-		python3 "${F}/tools/pngify-icon-theme.py" --name Adwaita --inherits hicolor --sizes 16,24 \
+		"${pygi}" "${F}/tools/pngify-icon-theme.py" --name Adwaita --inherits hicolor --sizes 16,24 \
 			--include-sizes 16x16,22x22,24x24,32x32,48x48 --jobs "${jobs}" \
 			"${D}/icons/Adwaita" "${out}/src/adwaita-icon-theme/Adwaita"
 		# hicolor: the XFCE programs' own icons (org.xfce.*); scalable ones rendered to PNG
-		python3 "${F}/tools/pngify-icon-theme.py" --name hicolor --inherits "" --sizes 16,24,32,48 \
+		"${pygi}" "${F}/tools/pngify-icon-theme.py" --name hicolor --inherits "" --sizes 16,24,32,48 \
 			--comment "Fallback icon theme (XFCE application icons, PNG only)" --jobs "${jobs}" \
 			"${D}/icons/hicolor" "${P}/share/icons/hicolor"
 		for t in Adwaita hicolor; do
