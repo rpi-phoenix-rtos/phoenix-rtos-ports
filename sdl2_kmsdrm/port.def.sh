@@ -6,7 +6,7 @@
 
 	name="sdl2_kmsdrm"
 	version="2.30.12"
-	desc="SDL 2.30.12 with its stock KMSDRM video driver on Mesa GBM/EGL (new GPU lane) + Phoenix HID input and audio"
+	desc="SDL 2.30.12 with its stock KMSDRM and Wayland video drivers on Mesa GBM/EGL (new GPU lane) + Phoenix HID input and audio"
 
 	# the same release tarball as the sdl2 port (the old lane's /dev/fb0 SDL)
 	source="https://github.com/libsdl-org/SDL/releases/download/release-${version}"
@@ -22,35 +22,34 @@
 	# NEW GPU LANE: private install prefix -- the sdl2 port's libSDL2.a/headers in the shared
 	# prefix are the old lane's and stay exactly as they are.
 	conflicts="sdl2_kmsdrm!=${version}"
-	# SDL is configured against the desktop-GL Mesa build (SDL_OPENGL + SDL_OPENGLES).
-	# wayland: the desktop-GL Mesa with the EGL wayland platform, libwayland + wlphx-compat
-	# (the `wayland` port, the one that Mesa's wayland platform is built on) and libxkbcommon +
-	# <linux/input.h> (wayland_phoenix).
-	depends="libdrm_phoenix mesa_drm[opengl] zlib wayland? ( mesa_drm[waylandgl] wayland wayland_phoenix )"
+	# SDL is configured against the desktop-GL Mesa build (SDL_OPENGL + SDL_OPENGLES), which has
+	# the EGL platforms of both SDL video drivers: GBM (KMSDRM) and Wayland. The Wayland client
+	# stack: libwayland + wlphx-compat from the `wayland` port (the one Mesa's wayland platform is
+	# built on), libxkbcommon + <linux/input.h> from wayland_phoenix.
+	depends="libdrm_phoenix mesa_drm[opengl] zlib wayland wayland_phoenix"
 
 	# vulkan: ALSO build the SDL_VULKAN=ON variant (patches/vulkan/) into vulkan/ -- SDL's
-	# stock KMSDRM Vulkan code (VK_KHR_display) for vkquake_drm. The default libSDL2.a stays
-	# SDL_VULKAN=OFF, byte for byte what the GL games were measured with.
+	# stock KMSDRM Vulkan code (VK_KHR_display) for vkquake_drm (KMSDRM only: a vkQuake window
+	# on Wayland needs the V3DV Wayland WSI, which the static ICD does not have).
 	#
-	# wayland: ALSO build the SDL_WAYLAND=ON variant (patches/wayland/) into wayland/ -- SDL's
-	# stock Wayland video driver (xdg-shell windows, server-side decorations, wl_seat input)
-	# next to KMSDRM, on Mesa's EGL wayland platform with desktop GL + GLES: the WINDOWED games
-	# on the desktop (M8: quakespasm_drm, yquake2_drm, quake3_drm, supertuxkart_drm with USE
-	# wayland) and ffplay-wl. Installs share/gamewl/ (the -wl clones' hooks + relink body).
-	#
-	# rootfs (with wayland): install the windowed-game session helpers into the image:
-	# /bin/game-window.sh (one game in a window of the running desktop), game-window-autostart.sh,
-	# game-window-quit.sh and the labwc configuration of the games session
-	# /etc/xdg/labwc-xfce-m8/ (`export CONF_DIR=/etc/xdg/labwc-xfce-m8` before /bin/xfce-session).
-	iuse="vulkan wayland rootfs"
-	required_use="rootfs? ( wayland )"
+	# rootfs: install the desktop's game launcher into the image: /bin/game-window.sh <game>
+	# (one game in a window of the running desktop, the XFCE menu entries' command),
+	# game-window-autostart.sh, game-window-quit.sh and the labwc configuration of the games
+	# session /etc/xdg/labwc-xfce-games/ (`export CONF_DIR=/etc/xdg/labwc-xfce-games` before
+	# /bin/xfce-session: the games of GAME_LIST start by themselves, one after another).
+	iuse="vulkan rootfs"
 
 	supports="phoenix>=3.3"
 }
 
-# Ported from the coordination repo's tools/gpu-lane/sdl2-drm/build.sh (steps 2-3: the SDL
-# build; its step 4, quakespasm-drm, is the quakespasm_drm port) and build-vkquake-drm.sh
-# step 1 (the Vulkan variant). Same patches, overlay, cmake options and flags.
+# Ported from the coordination repo's tools/gpu-lane/sdl2-wl/build.sh (steps 1-3: the SDL
+# build with the Wayland AND the KMSDRM video drivers, and its link group; step 4, the game,
+# is the quakespasm_drm port) -- itself tools/gpu-lane/sdl2-drm/build.sh's SDL plus the
+# Wayland driver -- and build-vkquake-drm.sh step 1 (the Vulkan variant). Same patches,
+# overlay, cmake options and flags. ONE libSDL2.a serves full screen and windowed: SDL tries
+# its Wayland driver first and falls through to KMSDRM when there is no compositor socket
+# (SDL_VIDEODRIVER picks one explicitly), so a program runs full screen from psh and in a
+# window inside the desktop.
 #
 #   patches/0001-0004   = ports/sdl2 0001-0004 (Phoenix cmake branch, dynapi off, thread prio)
 #   patches/0005        cmake: the Phoenix audio driver (overlay/src/audio/phoenix)
@@ -61,27 +60,26 @@
 #                       (frame pacing: quake2-drm 30.00 -> 60.00 fps)
 #   patches/0010        KMSDRM: release the locked GBM buffers before destroying the EGL surface
 #                       (upstream 9cc2f248f5; exit use-after-free in Mesa's release_buffer)
+#   patches/0011        thread: condition-variable timeouts on the monotonic clock
+#   patches/wayland/0101-0103 (= tools/gpu-lane/sdl2-wl/patches) the Phoenix Wayland video
+#                       driver in cmake, a clipboard pipe without sigtimedwait, fractional-scale
+#                       uint32_t (applied after the vulkan copy: that variant has no Wayland)
 #   patches/vulkan/0001 (USE vulkan) PHOENIX in SDL_VULKAN's condition + SDL_VIDEO_VULKAN
-#   patches/wayland/0101-0103 (USE wayland; = tools/gpu-lane/sdl2-wl/patches) the Phoenix
-#                       Wayland video driver in cmake, a clipboard pipe without sigtimedwait,
-#                       fractional-scale uint32_t
 #
 # Installs: include/SDL2, lib/libSDL2.a (+ libSDL2main.a), vulkan/{include,lib} (USE vulkan),
-# and share/gamedrm/ -- the game clones' shared hooks and checks (gamedrm_hooks.c,
+# link-inputs.txt, and share/gamedrm/ -- the games' shared hooks and checks (gamedrm_hooks.c,
 # check-swap-order.sh, relink-sdl-gl-game.subr): installed here so that a change to them
-# rebuilds the clones (they depend on this port).
-# USE wayland (tools/gpu-lane/sdl2-wl/build.sh steps 1-3): wayland/{include,lib} and
-#   wayland/link-inputs.txt -- the link group of a Wayland SDL GL program, one item per line in
-#   link order: "gallium <libgallium>" (whole-archive), "sdl <libSDL2.a>", "mesa-gl <a>" (the
-#   desktop-GL archives, libglapi_bridge.a first), "mesa-es <a>" (the GLES archives, with
-#   libGLESv2.a), "tail <a>" (libwayland-client/-egl/-cursor, libxkbcommon, wlphx-compat,
-#   libffi, libdrm, the Mesa compat shim, zlib) and "flag <ld flag>" (--wrap=mmap/ioctl for
-#   libdrm-phoenix, --wrap=close/write + -u for the compat layer's emulated descriptors);
-#   share/gamewl/ (gamewl_hooks.c, relink-sdl-gl-game-wl.subr); the session helpers are
-#   staged from gamewl/pi and gamewl/labwc-xfce-m8 (USE rootfs).
-#   libwayland-cursor's os_create_anonymous_file() clashes with Mesa's (util/anon_file.c,
-#   another signature; hidden from each other as shared libraries): the link uses a private
-#   copy of libwayland-cursor.a with its copy renamed (the tools build renamed Mesa's instead).
+# rebuilds the games (they depend on this port).
+# link-inputs.txt (tools: sdl2-wl/build-out/link-inputs.txt) is the link group of an SDL GL
+#   program, one item per line in link order: "gallium <libgallium>" (whole-archive),
+#   "sdl <libSDL2.a>", "mesa-gl <a>" (the desktop-GL archives, libglapi_bridge.a first),
+#   "mesa-es <a>" (the GLES archives, with libGLESv2.a), "tail <a>" (libwayland-client/-egl/
+#   -cursor, libxkbcommon, wlphx-compat, libffi, libdrm, the Mesa compat shim, zlib) and
+#   "flag <ld flag>" (--wrap=mmap/ioctl for libdrm-phoenix, --wrap=close/write + -u for the
+#   compat layer's emulated descriptors).
+# libwayland-cursor's os_create_anonymous_file() clashes with Mesa's (util/anon_file.c, another
+# signature; hidden from each other as shared libraries): the group links a private copy of
+# libwayland-cursor.a with its copy renamed (the tools build renamed Mesa's copies instead).
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
@@ -92,11 +90,7 @@ p_prepare() {
 		[ -d "${vs}" ] || cp -a "${PREFIX_PORT_WORKDIR}" "${vs}"
 		b_port_apply_patches "${vs}" vulkan
 	fi
-	if b_use wayland; then
-		local ws="${PREFIX_PORT_BUILD}/sdl-wl-src"
-		[ -d "${ws}" ] || cp -a "${PREFIX_PORT_WORKDIR}" "${ws}"
-		b_port_apply_patches "${ws}" wayland
-	fi
+	b_port_apply_patches "${PREFIX_PORT_WORKDIR}" wayland
 }
 
 # _sdl2_kmsdrm_cmake <src> <build dir> <install prefix> <SDL_VULKAN ON|OFF>
@@ -161,68 +155,15 @@ p_build() {
 	. "${PORT_DEP_libdrm_phoenix}/share/phoenix-newlane/newlane.subr"
 	nl_setup "${PREFIX_PORT_BUILD}/nl"
 
-	# pkg-config sees ONLY Mesa's desktop-GL prefix (egl, gbm), libdrm-phoenix and Mesa's
-	# private zlib view (egl/gbm list zlib in Requires.private); -pthread removed (Mesa's .pc)
-	local M="${PORT_DEP_mesa_drm}/gl"
+	local M="${PORT_DEP_mesa_drm}/gl" WO="${PORT_DEP_wayland:?}" WX="${PORT_DEP_wayland_phoenix:?}/prefix"
+	local LDP="${PORT_DEP_libdrm_phoenix}" nl="${PREFIX_PORT_BUILD}/nl" p
+	command -v wayland-scanner > /dev/null || b_die "host wayland-scanner not found"
 	grep -qx 'opengl=true' "${M}/opengl.txt" 2>/dev/null || b_die "${M} is not a desktop-GL Mesa build"
-	nl_pkgconfig "${PREFIX_PORT_BUILD}/nl/pkg-config-sdl" \
-		"${M}/prefix/lib/pkgconfig:${PORT_DEP_libdrm_phoenix}/lib/pkgconfig:${PORT_DEP_mesa_drm}/zlib-prefix/lib/pkgconfig" \
-		strip-pthread
-
-	_sdl2_kmsdrm_cmake "${PREFIX_PORT_WORKDIR}" "${PREFIX_PORT_BUILD}/sdl-build" "${PREFIX_PORT_INSTALL}" OFF
-
-	# The configuration must be what this port is about -- fail loudly otherwise.
-	local cfg="${PREFIX_PORT_INSTALL}/include/SDL2/SDL_config.h" d
-	for d in SDL_VIDEO_DRIVER_KMSDRM SDL_VIDEO_OPENGL_EGL SDL_VIDEO_OPENGL SDL_INPUT_PHOENIX SDL_AUDIO_DRIVER_PHOENIX \
-			SDL_THREAD_PTHREAD SDL_TIMER_UNIX; do
-		grep -qE "^#define ${d} +1" "${cfg}" || b_die "SDL_config.h lacks ${d} 1"
-	done
-	for d in SDL_VIDEO_DRIVER_KMSDRM_DYNAMIC SDL_VIDEO_DRIVER_PHOENIX SDL_VIDEO_DRIVER_X11 SDL_VIDEO_DRIVER_WAYLAND \
-			SDL_INPUT_LINUXEV SDL_LOADSO_DLOPEN SDL_VIDEO_VULKAN; do
-		if grep -qE "^#define ${d}( |$)" "${cfg}"; then b_die "SDL_config.h defines ${d}"; fi
-	done
-
-	if b_use vulkan; then
-		local vp="${PREFIX_PORT_INSTALL}/vulkan"
-		_sdl2_kmsdrm_cmake "${PREFIX_PORT_BUILD}/sdl-vk-src" "${PREFIX_PORT_BUILD}/sdl-vk-build" "${vp}" ON
-		cfg="${vp}/include/SDL2/SDL_config.h"
-		for d in SDL_VIDEO_DRIVER_KMSDRM SDL_VIDEO_VULKAN SDL_VIDEO_OPENGL_EGL SDL_INPUT_PHOENIX SDL_AUDIO_DRIVER_PHOENIX \
-				SDL_THREAD_PTHREAD SDL_TIMER_UNIX; do
-			grep -qE "^#define ${d} +1" "${cfg}" || b_die "vulkan: SDL_config.h lacks ${d} 1"
-		done
-		for d in SDL_VIDEO_DRIVER_KMSDRM_DYNAMIC SDL_VIDEO_DRIVER_PHOENIX SDL_VIDEO_DRIVER_X11 SDL_VIDEO_DRIVER_WAYLAND \
-				SDL_INPUT_LINUXEV SDL_LOADSO_DLOPEN; do
-			if grep -qE "^#define ${d}( |$)" "${cfg}"; then b_die "vulkan: SDL_config.h defines ${d}"; fi
-		done
-		nl_has_sym "${vp}/lib/libSDL2.a" KMSDRM_Vulkan_CreateSurface || b_die "vulkan: libSDL2.a has no KMSDRM_Vulkan_CreateSurface"
-	fi
-
-	if b_use wayland; then _sdl2_kmsdrm_wayland; fi
-
-	local g="${PREFIX_PORT_INSTALL}/share/gamedrm"
-	mkdir -p "${g}"
-	install -m 644 "${PREFIX_PORT}/gamedrm/gamedrm_hooks.c" "${PREFIX_PORT}/gamedrm/relink-sdl-gl-game.subr" "${g}/"
-	install -m 755 "${PREFIX_PORT}/gamedrm/check-swap-order.sh" "${g}/"
-
-	if b_use rootfs; then _sdl2_kmsdrm_stage_session; fi
-}
-
-# USE wayland: SDL with its Wayland video driver (+ KMSDRM) into wayland/, the link group of a
-# Wayland SDL GL program (wayland/link-inputs.txt) and share/gamewl/. The tools build is
-# tools/gpu-lane/sdl2-wl/build.sh steps 1-3 (its step 4, quakespasm-wl, is quakespasm_drm's
-# USE wayland); the same patches (sdl2_kmsdrm's + patches/wayland), cmake options and flags.
-_sdl2_kmsdrm_wayland() {
-	local wp="${PREFIX_PORT_INSTALL}/wayland" nl="${PREFIX_PORT_BUILD}/nl"
-	local M="${PORT_DEP_mesa_drm}/waylandgl" WO="${PORT_DEP_wayland:?}" WX="${PORT_DEP_wayland_phoenix:?}/prefix"
-	local MB="${M}/mesa-build" LDP="${PORT_DEP_libdrm_phoenix}"
-	local p
-	command -v wayland-scanner > /dev/null || b_die "wayland: host wayland-scanner not found"
-	grep -qx 'opengl=true' "${M}/opengl.txt" 2>/dev/null || b_die "${M} is not a desktop-GL Mesa build (mesa_drm USE waylandgl)"
 	for p in "${M}/link-gl.txt" "${M}/link-gles.txt" "${WO}/lib/libwayland-client.a" "${WO}/lib/libwayland-egl.a" \
 			"${WO}/lib/libwayland-cursor.a" "${WO}/lib/libwlphx-compat.a" "${WO}/deps/libffi/lib/libffi.a" \
 			"${WO}/compat/include/sys/mman.h" "${WX}/lib/libxkbcommon.a" "${WX}/lib/pkgconfig/xkbcommon.pc" \
 			"${WX}/include/xkbcommon/xkbcommon.h" "${WX}/include/linux/input.h" "${WX}/include/evdev/input-event-codes.h"; do
-		[ -e "${p}" ] || b_die "wayland: missing ${p}"
+		[ -e "${p}" ] || b_die "missing ${p}"
 	done
 
 	# <linux/input.h> (BTN_* / KEY_* for SDL_waylandevents.c): wayland_phoenix's shim over the
@@ -242,56 +183,90 @@ _sdl2_kmsdrm_wayland() {
 	printf '%s\n' "prefix=${xv}" "Name: xkbcommon" "Description: libxkbcommon from wayland_phoenix (private view)" \
 		"Version: ${xver}" "Libs: ${WX}/lib/libxkbcommon.a" "Cflags: -I\${prefix}/include" > "${xv}/lib/pkgconfig/xkbcommon.pc"
 
-	# pkg-config sees ONLY: Mesa's waylandgl prefix (egl, gbm), libdrm-phoenix, Mesa's private
-	# zlib, the Wayland client stack + its libffi view, and the xkbcommon view
-	nl_pkgconfig "${nl}/pkg-config-sdl-wl" \
+	# pkg-config sees ONLY: Mesa's desktop-GL prefix (egl, gbm; egl.pc requires wayland-client,
+	# -server and wayland-egl-backend), libdrm-phoenix, Mesa's private zlib view, the Wayland
+	# client stack + its libffi view, and the xkbcommon view; -pthread removed (Mesa's .pc)
+	nl_pkgconfig "${nl}/pkg-config-sdl" \
 		"${M}/prefix/lib/pkgconfig:${LDP}/lib/pkgconfig:${PORT_DEP_mesa_drm}/zlib-prefix/lib/pkgconfig:${WO}/lib/pkgconfig:${WO}/share/pkgconfig:${WO}/deps/libffi/lib/pkgconfig:${xv}/lib/pkgconfig" \
 		strip-pthread
-	_sdl2_kmsdrm_cmake "${PREFIX_PORT_BUILD}/sdl-wl-src" "${PREFIX_PORT_BUILD}/sdl-wl-build" "${wp}" OFF \
-		"${nl}/pkg-config-sdl-wl" "-I${WO}/compat/include -I${wi}" ON
 
-	local cfg="${wp}/include/SDL2/SDL_config.h" d
+	_sdl2_kmsdrm_cmake "${PREFIX_PORT_WORKDIR}" "${PREFIX_PORT_BUILD}/sdl-build" "${PREFIX_PORT_INSTALL}" OFF \
+		"${nl}/pkg-config-sdl" "-I${WO}/compat/include -I${wi}" ON
+
+	# The configuration must be what this port is about -- fail loudly otherwise.
+	local cfg="${PREFIX_PORT_INSTALL}/include/SDL2/SDL_config.h" d
 	for d in SDL_VIDEO_DRIVER_WAYLAND SDL_VIDEO_DRIVER_KMSDRM SDL_VIDEO_OPENGL_EGL SDL_VIDEO_OPENGL SDL_VIDEO_OPENGL_ES2 \
 			SDL_INPUT_PHOENIX SDL_AUDIO_DRIVER_PHOENIX SDL_THREAD_PTHREAD SDL_TIMER_UNIX HAVE_MEMFD_CREATE; do
-		grep -qE "^#define ${d} +1" "${cfg}" || b_die "wayland: SDL_config.h lacks ${d} 1"
+		grep -qE "^#define ${d} +1" "${cfg}" || b_die "SDL_config.h lacks ${d} 1"
 	done
 	for d in SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_EGL SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_CURSOR \
 			SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_XKBCOMMON SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_LIBDECOR HAVE_LIBDECOR_H \
 			SDL_VIDEO_DRIVER_KMSDRM_DYNAMIC SDL_VIDEO_DRIVER_PHOENIX SDL_VIDEO_DRIVER_X11 SDL_INPUT_LINUXEV \
 			SDL_LOADSO_DLOPEN SDL_VIDEO_VULKAN; do
-		if grep -qE "^#define ${d}( |$)" "${cfg}"; then b_die "wayland: SDL_config.h defines ${d}"; fi
+		if grep -qE "^#define ${d}( |$)" "${cfg}"; then b_die "SDL_config.h defines ${d}"; fi
 	done
-	nl_has_sym "${wp}/lib/libSDL2.a" Wayland_CreateDevice || b_die "wayland: libSDL2.a has no Wayland_CreateDevice"
+	for d in Wayland_CreateDevice KMSDRM_CreateDevice; do
+		nl_has_sym "${PREFIX_PORT_INSTALL}/lib/libSDL2.a" "${d}" || b_die "libSDL2.a has no ${d}"
+	done
 
+	_sdl2_kmsdrm_link_inputs
+
+	if b_use vulkan; then
+		local vp="${PREFIX_PORT_INSTALL}/vulkan"
+		_sdl2_kmsdrm_cmake "${PREFIX_PORT_BUILD}/sdl-vk-src" "${PREFIX_PORT_BUILD}/sdl-vk-build" "${vp}" ON "${nl}/pkg-config-sdl"
+		cfg="${vp}/include/SDL2/SDL_config.h"
+		for d in SDL_VIDEO_DRIVER_KMSDRM SDL_VIDEO_VULKAN SDL_VIDEO_OPENGL_EGL SDL_INPUT_PHOENIX SDL_AUDIO_DRIVER_PHOENIX \
+				SDL_THREAD_PTHREAD SDL_TIMER_UNIX; do
+			grep -qE "^#define ${d} +1" "${cfg}" || b_die "vulkan: SDL_config.h lacks ${d} 1"
+		done
+		for d in SDL_VIDEO_DRIVER_KMSDRM_DYNAMIC SDL_VIDEO_DRIVER_PHOENIX SDL_VIDEO_DRIVER_X11 SDL_VIDEO_DRIVER_WAYLAND \
+				SDL_INPUT_LINUXEV SDL_LOADSO_DLOPEN; do
+			if grep -qE "^#define ${d}( |$)" "${cfg}"; then b_die "vulkan: SDL_config.h defines ${d}"; fi
+		done
+		nl_has_sym "${vp}/lib/libSDL2.a" KMSDRM_Vulkan_CreateSurface || b_die "vulkan: libSDL2.a has no KMSDRM_Vulkan_CreateSurface"
+	fi
+
+	local g="${PREFIX_PORT_INSTALL}/share/gamedrm"
+	mkdir -p "${g}"
+	install -m 644 "${PREFIX_PORT}/gamedrm/gamedrm_hooks.c" "${PREFIX_PORT}/gamedrm/relink-sdl-gl-game.subr" "${g}/"
+	install -m 755 "${PREFIX_PORT}/gamedrm/check-swap-order.sh" "${g}/"
+
+	if b_use rootfs; then _sdl2_kmsdrm_stage_session; fi
+}
+
+# link-inputs.txt (see the header), from Mesa's gl/ lists and the Wayland client stack
+_sdl2_kmsdrm_link_inputs() {
+	local M="${PORT_DEP_mesa_drm}/gl" WO="${PORT_DEP_wayland}" WX="${PORT_DEP_wayland_phoenix}/prefix"
+	local LDP="${PORT_DEP_libdrm_phoenix}"
 	# libwayland-cursor with its os_create_anonymous_file() renamed (see the header)
-	local cur="${wp}/lib/libwayland-cursor-phx.a"
+	local cur="${PREFIX_PORT_INSTALL}/lib/libwayland-cursor-phx.a"
 	nl_has_sym "${WO}/lib/libwayland-cursor.a" os_create_anonymous_file \
-		|| b_die "wayland: ${WO}/lib/libwayland-cursor.a defines no os_create_anonymous_file (the rename is stale)"
+		|| b_die "${WO}/lib/libwayland-cursor.a defines no os_create_anonymous_file (the rename is stale)"
 	"${NL_OBJCOPY}" --redefine-sym os_create_anonymous_file=wlcursor_os_create_anonymous_file \
 		"${WO}/lib/libwayland-cursor.a" "${cur}"
-	nl_has_sym "${cur}" wlcursor_os_create_anonymous_file || b_die "wayland: the libwayland-cursor rename failed"
-	if nl_has_sym "${cur}" os_create_anonymous_file; then b_die "wayland: ${cur} still defines os_create_anonymous_file"; fi
+	nl_has_sym "${cur}" wlcursor_os_create_anonymous_file || b_die "the libwayland-cursor rename failed"
+	if nl_has_sym "${cur}" os_create_anonymous_file; then b_die "${cur} still defines os_create_anonymous_file"; fi
 
-	# --- the link group (tools: build-out/link-inputs.txt) ---------------------------------------
+	# --- the link group (tools: sdl2-wl/build-out/link-inputs.txt) ------------------------------
 	# Mesa's two lists: "--whole-archive <libgallium>", its archives, then libdrm.a / the compat
 	# shim / libz.a (Mesa's tail_libs), which go to the end of the group here.
 	local tail_mesa=("${LDP}/lib/libdrm.a" "${PORT_DEP_mesa_drm}/compat/libmesadrm-compat.a" "${PORT_DEP_zlib}/lib/libz.a")
-	local li="${wp}/link-inputs.txt" l k gallium="" t
+	local li="${PREFIX_PORT_INSTALL}/link-inputs.txt" l k gallium="" t
 	: > "${li}.tmp"
 	for k in gl gles; do
 		while IFS= read -r l; do
 			case "${l}" in
 				"--whole-archive "*) gallium="${l#--whole-archive }" ;;
 				*) for t in "${tail_mesa[@]}"; do [ "${l}" -ef "${t}" ] && continue 2; done   # (-ef: PREFIX_BUILD may end in /)
-					[ -f "${l}" ] || b_die "wayland: ${M}/link-${k}.txt names a missing ${l}"
+					[ -f "${l}" ] || b_die "${M}/link-${k}.txt names a missing ${l}"
 					if [ "${k}" = gl ]; then echo "mesa-gl ${l}"; else echo "mesa-es ${l}"; fi ;;
 			esac
 		done < "${M}/link-${k}.txt"
 	done >> "${li}.tmp"
-	[ -f "${gallium}" ] || b_die "wayland: no libgallium in ${M}/link-gl.txt"
+	[ -f "${gallium}" ] || b_die "no libgallium in ${M}/link-gl.txt"
 	{
 		echo "gallium ${gallium}"
-		echo "sdl ${wp}/lib/libSDL2.a"
+		echo "sdl ${PREFIX_PORT_INSTALL}/lib/libSDL2.a"
 		cat "${li}.tmp"
 		for t in "${WO}/lib/libwayland-client.a" "${WO}/lib/libwayland-egl.a" "${cur}" "${WX}/lib/libxkbcommon.a" \
 				"${WO}/lib/libwlphx-compat.a" "${WO}/deps/libffi/lib/libffi.a" "${tail_mesa[@]}"; do
@@ -304,38 +279,28 @@ _sdl2_kmsdrm_wayland() {
 		done
 	} > "${li}"
 	rm -f "${li}.tmp"
-	grep -q '^mesa-gl .*/libglapi_bridge\.a$' "${li}" || b_die "wayland: no libglapi_bridge.a in the desktop-GL list"
-	grep -q '^mesa-es .*/libGLESv2\.a$' "${li}" || b_die "wayland: no libGLESv2.a in the GLES list"
-	if grep -q '^mesa-gl .*/libGLESv2\.a$' "${li}"; then b_die "wayland: libGLESv2.a in the desktop-GL list"; fi
-	echo "sdl2_kmsdrm: wayland: $(grep -c . "${li}") link items (${li})"
+	grep -q '^mesa-gl .*/libglapi_bridge\.a$' "${li}" || b_die "no libglapi_bridge.a in the desktop-GL list"
+	grep -q '^mesa-es .*/libGLESv2\.a$' "${li}" || b_die "no libGLESv2.a in the GLES list"
+	if grep -q '^mesa-gl .*/libGLESv2\.a$' "${li}"; then b_die "libGLESv2.a in the desktop-GL list"; fi
+	echo "sdl2_kmsdrm: $(grep -c . "${li}") link items (${li})"
 
-	# --- share/gamewl: the -wl clones' hooks + relink body, the session helpers ------------------
-	local g="${PREFIX_PORT_INSTALL}/share/gamewl"
-	rm -rf "${g}"
-	mkdir -p "${g}"
-	install -m 644 "${PREFIX_PORT}/gamewl/gamewl_hooks.c" "${PREFIX_PORT}/gamewl/relink-sdl-gl-game-wl.subr" "${g}/"
 }
 
-# USE rootfs (with wayland): the windowed-game session helpers into the image. The labwc
-# configuration is the tools' labwc-xfce-m8/ with the hand-staged program names of the
-# tools session rewritten to the image's, as xfce_wayland stages labwc-xfce-demo/.
-# TODO(TD-26): the M8 session's own names (labwc-xfce-m8, the "M8 " log prefix) go when P4
-# names the session's files for the image.
+# USE rootfs: the desktop's game launcher and the games session into the image (games/: this
+# port's own files, derived from the coordination repo's tools/gpu-lane/sdl2-wl/pi and
+# conf/labwc-xfce-m8 with the image's program names).
 _sdl2_kmsdrm_stage_session() {
 	local r="${PREFIX_FS}/root" f
-	local demo_sed=(-e 's|/usr/lib/xfce-demo/bin/thunar|/bin/thunar-wl|g'
-		-e 's|/usr/lib/xfce-demo/bin/xfce4-|/bin/xfce4-|g'
-		-e 's|/usr/lib/xfce-demo/bin/xfdesktop|/bin/xfdesktop|g'
-		-e 's|/bin/foot-2|/bin/foot|g' -e 's|/bin/fuzzel-2|/bin/fuzzel|g')
 	for f in game-window.sh game-window-autostart.sh game-window-quit.sh; do
-		b_install "${PREFIX_PORT}/gamewl/pi/${f}" /bin
+		b_install "${PREFIX_PORT}/games/${f}" /bin
 	done
-	mkdir -p "${r}/etc/xdg/labwc-xfce-m8"
+	mkdir -p "${r}/etc/xdg/labwc-xfce-games"
 	for f in rc.xml menu.xml autostart environment; do
-		sed "${demo_sed[@]}" "${PREFIX_PORT}/gamewl/labwc-xfce-m8/${f}" > "${r}/etc/xdg/labwc-xfce-m8/${f}"
-		chmod 644 "${r}/etc/xdg/labwc-xfce-m8/${f}"
+		install -m 644 "${PREFIX_PORT}/games/labwc-xfce-games/${f}" "${r}/etc/xdg/labwc-xfce-games/${f}"
 	done
-	if grep -nE '/bin/(foot|fuzzel|labwc)-2|xfce-demo/bin/(thunar|xfce4-|xfdesktop)' "${r}/etc/xdg/labwc-xfce-m8"/*; then
-		b_die "sdl2_kmsdrm: the games session config still names a program this image does not have (above)"
+	# nothing may name a hand-staged program of the tools sessions
+	if grep -nE '(foot|fuzzel|labwc|xfce-session|xfce-desktop)-2|-low\b|-wl2|-drm2|xfce-demo/bin/(thunar|xfce4-|xfdesktop)|simple-egl' \
+			"${r}/etc/xdg/labwc-xfce-games"/* "${r}/bin/game-window.sh" "${r}/bin/game-window-autostart.sh" "${r}/bin/game-window-quit.sh"; then
+		b_die "sdl2_kmsdrm: the games session names a program this image does not have (above)"
 	fi
 }

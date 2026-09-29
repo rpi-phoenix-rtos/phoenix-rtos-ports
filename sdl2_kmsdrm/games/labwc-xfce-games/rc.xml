@@ -1,12 +1,10 @@
 <?xml version="1.0"?>
 <!--
-  labwc under the M8 desktop session on Phoenix-RTOS (the XFCE demo + windowed GPU games,
-  /bin/xfce-session-2 with CONF_DIR=/etc/xdg/labwc-xfce-m8): stage as
-  /etc/xdg/labwc-xfce-m8/rc.xml. labwc-xfce-demo/rc.xml plus window rules that lay the
-  desktop out for the demo (Thunar top left, foot below it, the game window on the right,
-  1280x720 content next to a 620 px wide left column on the 1920x1080 output, under the
-  30 px panel) and Super+G = Quake in a window. As labwc-xfce/rc.xml, with the demo's programs:
-  foot-2 (the timerfd-fixed foot), fuzzel-2, and the XFCE programs of /usr/lib/xfce-demo/bin.
+  labwc under the games desktop session on Phoenix-RTOS (XFCE + windowed GPU games,
+  /bin/xfce-session with CONF_DIR=/etc/xdg/labwc-xfce-games): /etc/xdg/labwc-xfce-games/rc.xml.
+  labwc-xfce-demo/rc.xml plus window rules that lay the desktop out (Thunar top left, foot
+  below it, the game window on the right: 1280x720 content next to a 620 px wide left column
+  on the 1920x1080 output, under the 30 px panel) and Super+G = Quake in a window.
     Super (tap)             application finder
     Super+Return            terminal (foot)
     Super+E                 file manager (Thunar)
@@ -33,22 +31,22 @@
     <default />
     <!-- a tap of Super alone: labwc runs onRelease bindings only if no other key came in between -->
     <keybind key="Super_L" onRelease="yes">
-      <action name="Execute" command="/usr/lib/xfce-demo/bin/xfce4-appfinder" />
+      <action name="Execute" command="/bin/xfce4-appfinder" />
     </keybind>
     <keybind key="W-Return">
-      <action name="Execute" command="/bin/foot-2" />
+      <action name="Execute" command="/bin/foot" />
     </keybind>
     <keybind key="W-e">
-      <action name="Execute" command="/usr/lib/xfce-demo/bin/thunar" />
+      <action name="Execute" command="/bin/thunar-wl" />
     </keybind>
     <keybind key="W-d">
-      <action name="Execute" command="/usr/lib/xfce-demo/bin/xfce4-appfinder" />
+      <action name="Execute" command="/bin/xfce4-appfinder" />
     </keybind>
     <keybind key="A-F2">
-      <action name="Execute" command="/usr/lib/xfce-demo/bin/xfce4-appfinder --collapsed" />
+      <action name="Execute" command="/bin/xfce4-appfinder --collapsed" />
     </keybind>
     <keybind key="W-space">
-      <action name="Execute" command="/bin/fuzzel-2" />
+      <action name="Execute" command="/bin/fuzzel" />
     </keybind>
     <keybind key="W-g">
       <action name="Execute" command="/bin/bash /bin/game-window.sh quakespasm" />
@@ -70,20 +68,17 @@
       <action name="ResizeTo" width="620" height="420" />
       <action name="MoveTo" x="8" y="640" />
     </windowRule>
-    <windowRule identifier="quakespasm-wl">
+    <windowRule identifier="quakespasm">
       <action name="MoveTo" x="636" y="40" />
     </windowRule>
-    <windowRule identifier="quake2-wl">
+    <windowRule identifier="quake2">
       <action name="MoveTo" x="636" y="40" />
     </windowRule>
-    <windowRule identifier="quake3-wl">
+    <windowRule identifier="quake3">
       <action name="MoveTo" x="636" y="40" />
     </windowRule>
-    <windowRule identifier="stk-wl">
+    <windowRule identifier="stk">
       <action name="MoveTo" x="636" y="40" />
-    </windowRule>
-    <windowRule identifier="org.freedesktop.weston.simple-egl">
-      <action name="MoveTo" x="1100" y="300" />
     </windowRule>
   </windowRules>
 

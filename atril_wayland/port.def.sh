@@ -62,8 +62,7 @@
 # appends that directory to GSETTINGS_SCHEMA_DIR itself, so gtk3_wayland's shared
 # /usr/share/glib-2.0/schemas/gschemas.compiled is never replaced and no wrapper is needed),
 # its icons under /usr/share/atril/icons, /usr/share/applications/atril.desktop (the XFCE
-# applications menu: Office), /usr/share/doc/phoenix/sample.pdf and the m7j test session
-# /bin/xfce-desktop-atril.sh.
+# applications menu: Office) and /usr/share/doc/phoenix/sample.pdf.
 #
 # Host tools: meson, ninja, cmake >= 3.28, python3 with pycairo + the DejaVu fonts (the
 # sample PDF), glib-compile-resources, glib-compile-schemas, glib-mkenums, glib-genmarshal,
@@ -410,14 +409,13 @@ EOF
 		install -D -m "$1" "$2" "${ST}/$3"
 	}
 	# a verbatim tools file with the program names rewritten for the image
-	local name_sed=(-e 's|/bin/atril-wl|/usr/bin/atril|g' -e 's|/bin/labwc-2|/bin/labwc|g')
+	local name_sed=(-e 's|/bin/atril-wl|/usr/bin/atril|g')
 	_st_img() {  # mode source target-path
 		mkdir -p "$(dirname "${ST}/$3")"
 		sed "${name_sed[@]}" "$2" >"${ST}/$3"
 		chmod "$1" "${ST}/$3"
 	}
 	_st 755 "${BIN}/atril-stripped" usr/bin/atril
-	_st_img 755 "${F}/pi/xfce-desktop-atril.sh" bin/xfce-desktop-atril.sh
 	_st_img 644 "${F}/conf/atril.desktop" usr/share/applications/atril.desktop
 	_st 644 "${D}/schemas/gschemas.compiled" "${SCHEMAS_DIR#/}/gschemas.compiled"
 	_st 644 "${D}/sample.pdf" usr/share/doc/phoenix/sample.pdf
@@ -432,7 +430,7 @@ EOF
 	for sz in 16x16 22x22 24x24 48x48; do
 		_st 644 "${P}/share/icons/hicolor/${sz}/apps/atril.png" "usr/share/atril/icons/hicolor/${sz}/apps/atril.png"
 	done
-	if grep -nE '/bin/(atril-wl|labwc-2)' "${ST}/bin/xfce-desktop-atril.sh" "${ST}/usr/share/applications/atril.desktop"; then
+	if grep -nE '/bin/atril-wl' "${ST}/usr/share/applications/atril.desktop"; then
 		b_die "atril_wayland: a staged file still names a program this image does not have (above)"
 	fi
 	grep -q '^Exec=/usr/bin/atril %U$' "${ST}/usr/share/applications/atril.desktop" ||

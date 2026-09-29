@@ -6,7 +6,7 @@
 
 	name="video_player"
 	version="6.1"
-	desc="Video players on the new GPU lane: ffplay (FFmpeg 6.1) on SDL KMSDRM and SDL Wayland, /bin/video-play, gtk-video (GTK 3)"
+	desc="Video players on the new GPU lane: ffplay (FFmpeg 6.1, SDL KMSDRM + Wayland), /bin/video-play, gtk-video (GTK 3)"
 
 	# The ffmpeg port's release tarball (same archive, same sha256). This port builds its
 	# own copy with the PLAYER component set (+ libavfilter, libswscale, libswresample):
@@ -26,44 +26,44 @@
 
 	# NEW GPU LANE: private prefix (nothing here reaches the shared ports prefix).
 	conflicts="video_player!=${version}"
-	depends="libdrm_phoenix mesa_drm[opengl] sdl2_kmsdrm zlib wayland? ( sdl2_kmsdrm[wayland] ) gtk? ( gtk3_wayland wayland_phoenix ) demo? ( xfce_wayland )"
+	depends="libdrm_phoenix mesa_drm[opengl] sdl2_kmsdrm zlib gtk? ( gtk3_wayland wayland_phoenix )"
 
 	# rootfs   install the staging tree (stage/) into the image rootfs
-	# wayland  also ffplay-wl: ffplay on SDL's Wayland video driver (a window on the desktop)
 	# gtk      also gtk-video, the GTK 3 player, and its XFCE menu entry
-	# demo     the M10 demo set: the synthetic test clips in /usr/share/m10 (generated at
-	#          build time by the HOST ffmpeg, ~61 MB), the m10 cycles' labwc configuration
-	#          /usr/share/m10/labwc-xfce-m10/ and (with wayland) a "Video Demo" menu entry
-	iuse="rootfs wayland gtk demo"
+	# demo     the demo set: the synthetic clips in /usr/share/video-demo (generated at build
+	#          time by the HOST ffmpeg, ~61 MB), the video desktop session's labwc configuration
+	#          /etc/xdg/labwc-xfce-video/ and a "Video Demo" menu entry
+	iuse="rootfs gtk demo"
 
 	supports="phoenix>=3.3"
 }
 
 # Ported from the coordination repo's tools/gpu-lane/video-player/ (M10,
-# docs/gpu-new-lane/M10-video-player.md): build-ffplay.sh (both --sdl variants),
-# gtk-video/build.sh and gen-clips.sh. Same configure line, patch, glue, link shapes and
-# verification; the SDL builds are sdl2_kmsdrm's (patches 0001-0011 = the tools' `--tag 2`
-# builds, whose extra sdl-patches/0011 is in the shared set now). Copies kept identical to
-# the tools files by the coordination repo's scripts/check-gpu-lane-ports-sync.sh:
+# docs/gpu-new-lane/M10-video-player.md): build-ffplay.sh (its --sdl wl link: ONE ffplay with
+# SDL's Wayland AND KMSDRM video drivers, sdl2_kmsdrm's link-inputs.txt), gtk-video/build.sh
+# and gen-clips.sh. Same configure line, patch, glue, link shape and verification. Copies kept
+# identical to the tools files by the coordination repo's scripts/check-gpu-lane-ports-sync.sh:
 #   patches/0001            ffplay's opt-in FFPLAY_STATLINE_MS / FFPLAY_AUTOKEYS knobs
 #   files/components.sh     the player's FFmpeg component set (LGPL only)
 #   files/ffplay_phoenix_glue.c   --wrap=pthread_create: 8 MiB default thread stacks
 #   files/gtk-video/gtk-video.c   the GTK 3 player (FFmpeg decode, cairo paint, /dev/audio0)
-#   files/pi/video-play2    the launcher; staged as /bin/video-play with the tools' test
-#                           names (ffplay-*2, the -low/-g8 servers) rewritten to the image's
-#   files/gen-clips.sh, files/conf/labwc-xfce-m10/autostart, files/conf/applications/gtk-video.desktop
-# files/image/video-demo.desktop is this port's own.
+#   files/gen-clips.sh, files/conf/applications/gtk-video.desktop
+# This port's own (derived from the tools' pi/video-play2 and conf/labwc-xfce-m10):
+#   files/image/video-play  /bin/video-play: a window under a compositor, else full screen
+#   files/image/labwc-xfce-video/ (the video desktop session: the XFCE session's labwc
+#   configuration + an autostart that plays a clip), files/image/video-demo.desktop
 #
 # Installs (${PREFIX_PORT_INSTALL}): bin/ (stripped), prog/ (unstripped, addr2line),
-# share/video-player/ (link maps, BUILD-INFO), stage/ + stage.MANIFEST (the rootfs files):
-#   /usr/bin/ffplay-drm                    ffplay, SDL KMSDRM (full screen from psh)
-#   /usr/bin/ffplay-wl         (wayland)   ffplay, SDL Wayland (+ KMSDRM): a desktop window
-#   /bin/video-play                        picks ffplay-wl under a compositor, else ffplay-drm
+# share/video-player/ (link maps, stage.MANIFEST), stage/ + stage.MANIFEST (the rootfs files):
+#   /usr/bin/ffplay                        ffplay: full screen on KMS from psh, a window on the
+#                                          desktop (SDL tries Wayland, then KMSDRM)
+#   /bin/video-play                        picks the mode (SDL_VIDEODRIVER, -fs) by whether a
+#                                          compositor socket exists
 #   /usr/bin/gtk-video         (gtk)       + /usr/share/applications/gtk-video.desktop
-#   /usr/share/m10/            (demo)      m10-{h264-720p30-aac,h264-1080p30-aac,hevc-720p30-aac}.mp4,
-#                                          m10-vp9-360p-opus.webm, labwc-xfce-m10/{autostart,rc.xml,
-#                                          menu.xml,environment}; + usr/share/applications/video-demo.desktop
-#                                          (demo + wayland)
+#   /usr/share/video-demo/     (demo)      h264-720p30-aac.mp4, h264-1080p30-aac.mp4,
+#                                          hevc-720p30-aac.mp4, vp9-360p-opus.webm;
+#                                          /etc/xdg/labwc-xfce-video/{autostart,rc.xml,menu.xml,
+#                                          environment}; /usr/share/applications/video-demo.desktop
 #
 # Relink (libphoenix changed): the framework default is right here -- no link step is
 # guarded: p_build compiles the fftools objects and links every program on each run, so
@@ -115,25 +115,22 @@ _vp_link() {
 	"${NL_STRIP}" -o "${bin}.stripped" "${bin}"
 }
 
-# _vp_verify_ffplay <name> <drm|wl>: tools build-ffplay.sh step 5
+# _vp_verify_ffplay <name>: tools build-ffplay.sh step 5, the checks of both its variants
 _vp_verify_ffplay() {
-	local name="$1" v="$2" bin="${VP_OUT}/$1" bad=0 s syms n
+	local name="$1" bin="${VP_OUT}/$1" bad=0 s syms n
 	nl_no_undefined "${bin}"
 	syms="$("${NL_NM}" "${bin}")"
 	local want_syms=(main video_thread audio_thread read_thread sdl_audio_callback __wrap_pthread_create __wrap_mmap
 		KMSDRM_CreateDevice SDL_EGL_LoadLibrary ff_hevc_decoder ff_h264_decoder ff_aac_decoder
-		ff_mov_demuxer ff_matroska_demuxer ff_vf_scale ff_af_aresample swr_convert sws_scale v3d_drm_screen_create_renderonly)
-	if [ "${v}" = drm ]; then
-		want_syms+=(SDL_PHOENIX_HID_Poll)
-	else
-		want_syms+=(Wayland_CreateDevice wl_display_connect wl_egl_window_create xkb_context_new __wrap_ioctl __wrap_close memfd_create)
-	fi
+		ff_mov_demuxer ff_matroska_demuxer ff_vf_scale ff_af_aresample swr_convert sws_scale v3d_drm_screen_create_renderonly
+		SDL_PHOENIX_HID_Poll Wayland_CreateDevice wl_display_connect wl_egl_window_create xkb_context_new __wrap_ioctl
+		__wrap_close memfd_create)
 	for s in "${want_syms[@]}"; do
 		grep -qE " [TtWwDdRr] ${s}\$" <<<"${syms}" || { echo "video_player: ${name}: symbol ${s}: NO"; bad=1; }
 	done
 	local want_strs=('KMS/DRM Video Driver' '/dev/dri/' 'libdrm-phoenix:' '/dev/audio0' 'EGL_KHR_platform_gbm' 'V3D 4.2'
-		'FFPLAY_THREAD_STACK' 'Simple media player' 'ffplay-stat t=' 'FFPLAY_AUTOKEYS')
-	if [ "${v}" = drm ]; then want_strs+=('/dev/kbd0'); else want_strs+=('WAYLAND_DISPLAY' 'xdg_wm_base' 'EGL_KHR_platform_wayland'); fi
+		'FFPLAY_THREAD_STACK' 'Simple media player' 'ffplay-stat t=' 'FFPLAY_AUTOKEYS' '/dev/kbd0' 'WAYLAND_DISPLAY'
+		'xdg_wm_base' 'EGL_KHR_platform_wayland' 'SDL Wayland video driver')
 	for s in "${want_strs[@]}"; do
 		n="$(nl_count_strings "${bin}.stripped" "${s}")"
 		[ "${n}" != 0 ] || { echo "video_player: ${name}: string '${s}': 0"; bad=1; }
@@ -200,36 +197,23 @@ p_build() {
 	VP_GLUE_O="${VP_OUT}/ffplay_phoenix_glue.o"
 	"${NL_CC}" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${F}/ffplay_phoenix_glue.c" -o "${VP_GLUE_O}"
 
-	# --- 3. ffplay-drm: SDL KMSDRM + Mesa GBM/EGL desktop GL (sdl2_kmsdrm; mesa_drm gl/) ---
-	local M="${PORT_DEP_mesa_drm}/gl" SP="${PORT_DEP_sdl2_kmsdrm}" gallium="" MA=() l
-	grep -qx 'opengl=true' "${M}/opengl.txt" 2>/dev/null || b_die "video_player: ${M} is not a desktop-GL Mesa build"
-	while IFS= read -r l; do
-		case "${l}" in "--whole-archive "*) gallium="${l#--whole-archive }" ;; *) MA+=("${l}") ;; esac
-	done <"${M}/link-gl.txt"
-	_vp_fftools "${SP}" "${VP_OUT}/obj-drm"
-	_vp_link ffplay-drm "${VP_OUT}/obj-drm" "${SP}/lib/libSDL2.a" "${gallium}" -Wl,--wrap=mmap -- "${MA[@]}"
-	_vp_verify_ffplay ffplay-drm drm
-	local progs=(ffplay-drm)
-
-	# --- 4. ffplay-wl: SDL Wayland + KMSDRM on Mesa's EGL wayland platform (sdl2_kmsdrm[wayland]):
-	# its wayland/link-inputs.txt, one item per line in link order (gallium, sdl, mesa-gl...,
-	# mesa-es..., tail..., flag...); ffplay links the desktop-GL set (SDL's renderer may pick
-	# its OpenGL or its GLES2 back end)
-	if b_use wayland; then
-		local WSP="${PORT_DEP_sdl2_kmsdrm}/wayland" LI wgall wsdl WG=() WF=()
-		LI="${WSP}/link-inputs.txt"
-		[ -f "${LI}" ] || b_die "video_player: no ${LI} (sdl2_kmsdrm built without USE wayland?)"
-		wgall="$(awk '$1 == "gallium" { print $2 }' "${LI}")"
-		wsdl="$(awk '$1 == "sdl" { print $2 }' "${LI}")"
-		[ -n "${wsdl}" ] && [ "${wsdl}" -ef "${WSP}/lib/libSDL2.a" ] || b_die "video_player: ${LI}: sdl is not ${WSP}/lib/libSDL2.a"
-		mapfile -t WG < <(awk '$1 == "mesa-gl" || $1 == "tail" { print $2 }' "${LI}")
-		mapfile -t WF < <(awk '$1 == "flag" { print $2 }' "${LI}")
-		[ "${#WG[@]}" -gt 10 ] && [ "${#WF[@]}" -gt 0 ] || b_die "video_player: ${LI} is incomplete"
-		_vp_fftools "${WSP}" "${VP_OUT}/obj-wl"
-		_vp_link ffplay-wl "${VP_OUT}/obj-wl" "${wsdl}" "${wgall}" "${WF[@]}" -- "${WG[@]}"
-		_vp_verify_ffplay ffplay-wl wl
-		progs+=(ffplay-wl)
-	fi
+	# --- 3. ffplay: SDL KMSDRM + Wayland on Mesa's GL build (EGL on GBM and on Wayland), the
+	# group of sdl2_kmsdrm's link-inputs.txt, one item per line in link order (gallium, sdl,
+	# mesa-gl..., mesa-es..., tail..., flag...); ffplay links the desktop-GL set (SDL's renderer
+	# may pick its OpenGL or its GLES2 back end)
+	local SP="${PORT_DEP_sdl2_kmsdrm}" LI wgall wsdl WG=() WF=()
+	LI="${SP}/link-inputs.txt"
+	[ -f "${LI}" ] || b_die "video_player: no ${LI}"
+	wgall="$(awk '$1 == "gallium" { print $2 }' "${LI}")"
+	wsdl="$(awk '$1 == "sdl" { print $2 }' "${LI}")"
+	[ -n "${wsdl}" ] && [ "${wsdl}" -ef "${SP}/lib/libSDL2.a" ] || b_die "video_player: ${LI}: sdl is not ${SP}/lib/libSDL2.a"
+	mapfile -t WG < <(awk '$1 == "mesa-gl" || $1 == "tail" { print $2 }' "${LI}")
+	mapfile -t WF < <(awk '$1 == "flag" { print $2 }' "${LI}")
+	[ "${#WG[@]}" -gt 10 ] && [ "${#WF[@]}" -gt 0 ] || b_die "video_player: ${LI} is incomplete"
+	_vp_fftools "${SP}" "${VP_OUT}/obj"
+	_vp_link ffplay "${VP_OUT}/obj" "${wsdl}" "${wgall}" "${WF[@]}" -- "${WG[@]}"
+	_vp_verify_ffplay ffplay
+	local progs=(ffplay)
 
 	# --- 5. gtk-video: GTK 3 Wayland (gtk3_wayland, linked as its gtk3-hello) + the player's
 	# FFmpeg libraries + the glue; painted with cairo (no Mesa in this binary) --------------
@@ -311,61 +295,29 @@ p_build() {
 	# --- the staging tree (the rootfs files, final names) ------------------------------------
 	local ST="${I}/stage" f
 	rm -rf "${ST}"
-	install -D -m 755 "${I}/bin/ffplay-drm" "${ST}/usr/bin/ffplay-drm"
-	if b_use wayland; then install -D -m 755 "${I}/bin/ffplay-wl" "${ST}/usr/bin/ffplay-wl"; fi
-	# /bin/video-play = the tools' video-play2 on the image's names: the players, the servers
-	# started at boot (/sbin; the -f boot servers make these defaults the fallback only) and
-	# the session command
-	mkdir -p "${ST}/bin"
-	sed -e '1a # Generated by the video_player port: the tools launcher with the image'"'"'s program names.' \
-		-e 's|/usr/bin/ffplay-wl2|/usr/bin/ffplay-wl|g' -e 's|/usr/bin/ffplay-drm2|/usr/bin/ffplay-drm|g' \
-		-e 's|ffplay-wl2|ffplay-wl|g' -e 's|ffplay-drm2|ffplay-drm|g' \
-		-e 's|/bin/rpi4-v3d-async-low |/sbin/rpi4-v3d-async |g' -e 's|/bin/rpi4-kms-g8 |/sbin/rpi4-kms |g' \
-		-e 's|/bin/xfce-session-2|/bin/xfce-session|g' -e 's|video-play2|video-play|g' \
-		"${F}/pi/video-play2" >"${ST}/bin/video-play"
-	chmod 755 "${ST}/bin/video-play"
-	if grep -nE 'ffplay-(wl|drm)2|rpi4-v3d-async-low|rpi4-kms-g[0-9]|xfce-session-2|video-play2' "${ST}/bin/video-play"; then
-		b_die "video_player: /bin/video-play still names a program this image does not have (above)"
-	fi
-	grep -qxF 'FFPLAY_WL=${FFPLAY_WL:-/usr/bin/ffplay-wl}' "${ST}/bin/video-play" &&
-		grep -qxF 'FFPLAY_DRM=${FFPLAY_DRM:-/usr/bin/ffplay-drm}' "${ST}/bin/video-play" &&
-		grep -qxF 'V3DA_CMD=${V3DA_CMD:-/sbin/rpi4-v3d-async -r 1 -m serial -i}' "${ST}/bin/video-play" &&
-		grep -qxF 'KMS_CMD=${KMS_CMD:-/sbin/rpi4-kms -G -p 96}' "${ST}/bin/video-play" ||
-		b_die "video_player: the /bin/video-play rewrite did not produce the expected defaults"
+	install -D -m 755 "${I}/bin/ffplay" "${ST}/usr/bin/ffplay"
+	install -D -m 755 "${F}/image/video-play" "${ST}/bin/video-play"
 	if b_use gtk; then
 		install -D -m 755 "${I}/bin/gtk-video" "${ST}/usr/bin/gtk-video"
 		mkdir -p "${ST}/usr/share/applications"
-		sed -e 's|^Exec=gtk-video |Exec=/usr/bin/gtk-video |' "${F}/conf/applications/gtk-video.desktop" \
+		sed -e 's|^Exec=gtk-video |Exec=/usr/bin/gtk-video |' -e 's|, Phoenix-RTOS M10)|)|' "${F}/conf/applications/gtk-video.desktop" \
 			>"${ST}/usr/share/applications/gtk-video.desktop"
 		grep -qx 'Exec=/usr/bin/gtk-video %f' "${ST}/usr/share/applications/gtk-video.desktop" ||
 			b_die "video_player: gtk-video.desktop: Exec rewrite failed"
 	fi
 	if b_use demo; then
-		for f in "${CL}"/m10-*; do install -D -m 644 "${f}" "${ST}/usr/share/m10/$(basename "${f}")"; done
-		# the m10 cycles' labwc configuration (CONF_DIR=/usr/share/m10/labwc-xfce-m10): this
-		# autostart + the XFCE demo session's rc.xml, menu.xml and environment from
-		# xfce_wayland's staging tree, every program path rewritten as xfce_wayland rewrites
-		# its demo configs (a no-op on its already rewritten files).
-		# TODO(TD-26): the demo's path names (/usr/lib/xfce-demo, the -demo configs) go when P4
-		# names the session's files for the image.
-		local XD XS M10C="${ST}/usr/share/m10/labwc-xfce-m10"
-		local demo_sed=(-e 's|/usr/lib/xfce-demo/bin/thunar|/bin/thunar-wl|g' -e 's|/usr/lib/xfce-demo/bin/xfce4-|/bin/xfce4-|g'
-			-e 's|/usr/lib/xfce-demo/bin/xfdesktop|/bin/xfdesktop|g' -e 's|/bin/foot-2|/bin/foot|g' -e 's|/bin/fuzzel-2|/bin/fuzzel|g')
-		XD="$(b_dependency_dir xfce_wayland)"
-		XS="${XD%/}/stage/etc/xdg/labwc-xfce-demo"
-		mkdir -p "${M10C}"
-		for f in rc.xml menu.xml environment; do
-			[ -f "${XS}/${f}" ] || b_die "video_player: missing ${XS}/${f} (xfce_wayland's staging tree)"
-			sed "${demo_sed[@]}" "${XS}/${f}" >"${M10C}/${f}"
+		# the clips under their plain names (gen-clips.sh writes m10-<name>)
+		for f in "${CL}"/m10-*; do install -D -m 644 "${f}" "${ST}/usr/share/video-demo/$(basename "${f#"${CL}"/m10-}")"; done
+		# the video desktop session (CONF_DIR=/etc/xdg/labwc-xfce-video)
+		for f in rc.xml menu.xml autostart environment; do
+			install -D -m 644 "${F}/image/labwc-xfce-video/${f}" "${ST}/etc/xdg/labwc-xfce-video/${f}"
 		done
-		sed "${demo_sed[@]}" "${F}/conf/labwc-xfce-m10/autostart" >"${M10C}/autostart"
-		chmod 644 "${M10C}"/*
-		if grep -rnE '/bin/(foot|fuzzel|labwc)-2|xfce-demo/bin/(thunar|xfce4-|xfdesktop)' "${M10C}"; then
-			b_die "video_player: the m10 labwc configuration still names a program this image does not have (above)"
-		fi
-		if b_use wayland; then
-			install -D -m 644 "${F}/image/video-demo.desktop" "${ST}/usr/share/applications/video-demo.desktop"
-		fi
+		install -D -m 644 "${F}/image/video-demo.desktop" "${ST}/usr/share/applications/video-demo.desktop"
+	fi
+	# nothing installed may name a program of the tools' hand-staged sessions
+	if grep -rnE '(ffplay-(wl|drm)|video-play)2|-low\b|rpi4-kms-g[0-9]|(xfce-session|foot|fuzzel|labwc)-2|xfce-demo/bin/(thunar|xfce4-|xfdesktop)|/usr/share/m10' \
+			"${ST}/bin" "${ST}/etc" "${ST}/usr/share/applications" 2>/dev/null; then
+		b_die "video_player: an installed file names a program or path this image does not have (above)"
 	fi
 	(cd "${ST}" && find . -type f -printf '%P\n' | sort | xargs sha256sum) >"${I}/stage.MANIFEST"
 	cp "${I}/stage.MANIFEST" "${I}/share/video-player/"

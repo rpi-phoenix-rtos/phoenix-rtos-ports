@@ -1,0 +1,15 @@
+# labwc autostart of the video desktop session on Phoenix-RTOS (XFCE + a video playing in a
+# window): /etc/xdg/labwc-xfce-video/autostart, used with
+# `export CONF_DIR=/etc/xdg/labwc-xfce-video` before /bin/xfce-session. rc.xml, menu.xml and
+# environment are the XFCE session's own (labwc-xfce-demo). labwc runs this with `sh`
+# (busybox); the player's output goes to labwc's stdout, the console.
+#   VIDEO_CLIP    the file (default /usr/share/video-demo/h264-720p30-aac.mp4)
+#   VIDEO_DELAY   seconds before it starts (default 45: the panel and Thunar first)
+#   VIDEO_PLAYER  ffplay (default: /bin/video-play, a window) | gtk (/usr/bin/gtk-video --autoexit)
+# FFPLAY_AUTOKEYS, GTK_VIDEO_AUTOKEYS, THREADS, LOOP, FS ... pass through from the session's
+# environment.
+/bin/xfdesktop > /tmp/xfce-logs/xfdesktop.log 2>&1 &
+/bin/xfce4-panel > /tmp/xfce-logs/xfce4-panel.log 2>&1 &
+( sleep "${VIDEO_DELAY:-45}"; clip="${VIDEO_CLIP:-/usr/share/video-demo/h264-720p30-aac.mp4}"
+  if [ "${VIDEO_PLAYER:-ffplay}" = gtk ]; then exec /usr/bin/gtk-video --autoexit "${clip}"; fi
+  exec /bin/bash /bin/video-play "${clip}" ) &

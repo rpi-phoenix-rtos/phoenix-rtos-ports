@@ -27,14 +27,14 @@
 	# USE flags select EXTRA builds of the same patched source, each in its own meson build
 	# directory and install prefix (a static program links exactly one of them):
 	#   (always)  gles/     GBM + EGL (drm, surfaceless) + GLES2/3          tools: mesa-drm/build-out
-	#   opengl    gl/       the same + desktop GL + libglapi_bridge.a       tools: sdl2-drm/build-out/mesa-gl
+	#   opengl    gl/       the same + desktop GL + libglapi_bridge.a + the EGL wayland platform
+	#                       (EGL on GBM for full screen AND on Wayland for a desktop window: the
+	#                       SDL games and players, sdl2_kmsdrm)       tools: mesa-drm/build-out-wayland-gl
 	#   wayland   wayland/  GLES + EGL wayland platform (dma-buf import)    tools: mesa-drm/build-out-wayland
-	#   waylandgl waylandgl/ the same + desktop GL + libglapi_bridge.a       tools: mesa-drm/build-out-wayland-gl
-	#                       (--wayland --opengl: SDL's Wayland driver for the windowed games, M8)
 	#   x11       x11/      GLES + EGL X11 platform (DRI3/Present)          tools: mesa-drm/build-out-x11
 	#   vulkan    vulkan/   v3dv as a static ICD (no GL)                    tools: mesa-drm/build-out-vulkan
-	iuse="opengl wayland waylandgl x11 vulkan"
-	depends="libdrm_phoenix zlib wayland? ( wayland ) waylandgl? ( wayland ) x11? ( xorg_libs libxshmfence_phoenix )"
+	iuse="opengl wayland x11 vulkan"
+	depends="libdrm_phoenix zlib opengl? ( wayland ) wayland? ( wayland ) x11? ( xorg_libs libxshmfence_phoenix )"
 
 	supports="phoenix>=3.3"
 }
@@ -53,8 +53,9 @@
 #   <v>/link-gles.txt    the archives a GLES program links, in order; the first line is
 #                        "--whole-archive <libgallium-*.a>"; libdrm.a, libmesadrm-compat.a and
 #                        libz.a are listed at the end (wayland/x11: + their platform archives)
-#   gl/link-gl.txt       the same for desktop GL (libglapi_bridge.a instead of libGLESv2.a)
-#                        (waylandgl/ has both lists, each with libwayland_drm.a)
+#   gl/link-gl.txt       the same for desktop GL (libglapi_bridge.a instead of libGLESv2.a);
+#                        gl/ has both lists, each with libwayland_drm.a; a gl/ program also links
+#                        the Wayland client libraries (sdl2_kmsdrm's link-inputs.txt names them)
 #   vulkan/link.txt      "--whole-archive <libvulkan_broadcom.a>", libdrm, compat, zlib
 #   vulkan/phxvk/        phxvk_loader.{c,h}: the static Vulkan-loader stand-in (glue/phxvk/,
 #                        = tools/gpu-lane/vulkan-drm/phxvk/), compiled into each Vulkan program
@@ -85,16 +86,17 @@ _mesa_drm_gl_archives() {
 	done
 }
 
-# _mesa_drm_variant <gles|gl|wayland|waylandgl|x11|vulkan>
+# _mesa_drm_variant <gles|gl|wayland|x11|vulkan>
 _mesa_drm_variant() {
 	local v="$1" out="${PREFIX_PORT_INSTALL}/$1" mb="${PREFIX_PORT_BUILD}/$1-build"
 	local ldpc="${PORT_DEP_libdrm_phoenix}/lib/pkgconfig" zp="${PREFIX_PORT_INSTALL}/zlib-prefix"
 	local libdir="${ldpc}:${zp}/lib/pkgconfig" opengl=false platforms="" api_opts=() extra_targets=()
 	case "${v}" in
-		gl) opengl=true ;;
-		wayland | waylandgl)
+		gl | wayland)
+			# gl: desktop GL + GLES, EGL on GBM (drm, surfaceless) and on Wayland -- one build
+			# for an SDL program full screen on KMS and in a window of the desktop
 			platforms=wayland
-			[ "${v}" = waylandgl ] && opengl=true
+			[ "${v}" = gl ] && opengl=true
 			local wo="${PORT_DEP_wayland:?}"
 			libdir="${libdir}:${wo}/lib/pkgconfig:${wo}/share/pkgconfig:${wo}/deps/libffi/lib/pkgconfig" ;;
 		x11)
@@ -167,7 +169,7 @@ _mesa_drm_variant() {
 	# (whose gl* would clash; quakespasm-drm, quake3-drm). wayland/x11 add their platform
 	# archives (+ the xcb/X11 archives and xshmfence for x11) to the GLES list.
 	local extra=() gallium lists=(gles)
-	case "${v}" in wayland | waylandgl) extra=(src/egl/wayland/wayland-drm/libwayland_drm.a) ;; esac
+	case "${v}" in gl | wayland) extra=(src/egl/wayland/wayland-drm/libwayland_drm.a) ;; esac
 	[ "${v}" = x11 ] && extra=(src/x11/libloader_x11.a)
 	[ "${opengl}" = true ] && lists+=(gl)
 	gallium="$(ls "${mb}"/src/gallium/targets/dri/libgallium-*.a)"
@@ -199,7 +201,7 @@ _mesa_drm_variant() {
 		[ -f "${mb}/src/mesa/glapi/glapi/libglapi_bridge.a" ] || b_die "gl: libglapi_bridge.a not built"
 	fi
 	case "${v}" in
-		wayland | waylandgl) nl_has_sym "${mb}/src/egl/libEGL.a" dri2_initialize_wayland || b_die "${v}: no dri2_initialize_wayland" ;;
+		gl | wayland) nl_has_sym "${mb}/src/egl/libEGL.a" dri2_initialize_wayland || b_die "${v}: no dri2_initialize_wayland" ;;
 		x11) nl_has_sym "${mb}/src/egl/libEGL.a" dri2_initialize_x11 || b_die "x11: no dri2_initialize_x11" ;;
 	esac
 }
@@ -263,7 +265,6 @@ p_build() {
 	_mesa_drm_variant gles
 	if b_use opengl; then _mesa_drm_variant gl; fi
 	if b_use wayland; then _mesa_drm_variant wayland; fi
-	if b_use waylandgl; then _mesa_drm_variant waylandgl; fi
 	if b_use x11; then _mesa_drm_variant x11; fi
 	if b_use vulkan; then _mesa_drm_variant vulkan; fi
 }
