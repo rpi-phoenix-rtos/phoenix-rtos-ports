@@ -152,6 +152,15 @@ _labwcd_extract() {
 	rm -f "${out}/${name}.built" "${out}/${name}.configured"   # a changed source rebuilds the package
 }
 
+# The link inputs every port links implicitly (libphoenix.a, libgcc.a, libstdc++.a) changed.
+# Each package here builds under an out/<name>.built stamp, so the framework's default --
+# delete the linked programs and let the build relink them -- would leave them deleted: the
+# stamp says "up to date" and nothing relinks (gtk3-demo, P1 build 2026-09-29). Drop the
+# stamps instead: every package is set up and built again from its unpacked sources.
+p_relink() {
+	rm -f "${PREFIX_PORT_BUILD}/out"/*.built "${PREFIX_PORT_BUILD}/out"/*.configured
+}
+
 p_prepare() {
 	local t
 	for t in meson ninja wayland-scanner bison glib-mkenums python3 git curl; do
