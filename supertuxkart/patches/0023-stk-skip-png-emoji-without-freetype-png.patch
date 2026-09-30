@@ -1,0 +1,48 @@
+Skip a PNG bitmap colour-emoji font when FreeType has no PNG support.
+
+stk_config.xml names data/ttf/NotoColorEmoji.ttf (10 MB) as the colour emoji
+font. Its glyphs are PNG images in CBDT tables, and the FreeType STK links
+(xorg_fonts, configured --without-png) cannot decode them, so every start
+logged
+
+  [error] FontManager: Something wrong when loading a glyph! The error code was 7.
+  [error] FontManager: .../data/ttf/NotoColorEmoji.ttf doesn't have color, ignored.
+
+Error 7 is FT_Err_Unimplemented_Feature; loadColorEmoji() then found no BGRA
+bitmap and dropped the font -- the right outcome, reached through two errors
+(and a colour emoji font that is fine, reported as having no colour).
+
+Under FT_CONFIG_OPTION_USE_PNG unset (freetype/config/ftoption.h), a font
+with fixed sizes (a bitmap font) is now released straight after
+FT_New_Face() with one [info] line saying why. Scalable COLR/CPAL colour
+fonts need no PNG and take the unchanged path, and so does everything if
+FreeType is ever built with libpng.
+
+Why not build FreeType --with-png: xorg_fonts' libfreetype.a is linked
+statically by harfbuzz, fontconfig's tools, cairo, libXft, xorg_server_drm,
+windowmaker, xterm, gtk3/xfce/labwc/atril and STK; each link would need
+-lpng16 -lz after -lfreetype, for colour emoji that nothing offline displays.
+
+--- a/src/font/font_manager.cpp
++++ b/src/font/font_manager.cpp
+@@ -726,6 +726,20 @@
+         checkFTError(FT_Done_Face(face), "removing faces for emoji");
+         return NULL;
+     }
++#ifndef FT_CONFIG_OPTION_USE_PNG
++    // PHOENIX: a bitmap colour font (CBDT/sbix, e.g. NotoColorEmoji) stores
++    // its glyphs as PNG, which a FreeType built without libpng cannot decode:
++    // FT_Load_Glyph fails with Unimplemented_Feature and the font is dropped
++    // below anyway. Say why once, instead of an error per failed step.
++    if (face->num_fixed_sizes != 0)
++    {
++        Log::info("FontManager", "%s is a PNG bitmap font and FreeType was "
++            "built without PNG support, colour emoji disabled.",
++            GUIEngine::getSkin()->getColorEmojiTTF().c_str());
++        checkFTError(FT_Done_Face(face), "removing faces for emoji");
++        return NULL;
++    }
++#endif
+     if (face->num_fixed_sizes != 0)
+     {
+         // Use the largest size available, it will be scaled to regular face ttf
