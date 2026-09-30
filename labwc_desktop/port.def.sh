@@ -11,7 +11,6 @@
 	# Aggregate port: a lightweight Wayland desktop cross-built STATIC, as the coordination
 	# repo's tools/gpu-lane/labwc-drm/build.sh builds it (M7 stage 1 and 1b):
 	#
-	#   libwayland 1.24.0 (+ the M6 patch), wayland-protocols 1.49, libxkbcommon 1.13.2,
 	#   pixman 0.46.4, libdisplay-info 0.2.0, libseat (seatd 0.9.1, noop backend, M6
 	#   patches), libxml2 2.15.4, fribidi 1.0.16, pango 1.44.7 (over the ports cairo 1.16,
 	#   harfbuzz and GLib 2.56), tllist 1.1.0, fcft 3.3.3,
@@ -29,9 +28,12 @@
 	#                      "--whole-archive <libgallium-*.a>", libdrm.a / compat / libz.a
 	#                      at the end (the tools build's mesa-drm --wayland egl-link.txt)
 	#   libdrm_phoenix     ${PORT_DEP_libdrm_phoenix}/lib/libdrm.a + include/
-	#   wayland_phoenix    the M6 compat/shim sources and patch sets it recompiles with
-	#                      this port's flags (share/wayland-phoenix/), the evdev codes and
-	#                      libinput.h
+	#   wayland_phoenix    libwayland 1.24.0, wayland-protocols 1.49 and libxkbcommon 1.13.2
+	#                      (its libwayland/ and xkbcommon/ views: nothing else of its
+	#                      prefix on a compile line), the baked US keymap (keymap-us.xkb),
+	#                      and the M6 compat/shim sources and seatd patch set it recompiles
+	#                      with this port's flags (share/wayland-phoenix/), the evdev codes
+	#                      and libinput.h
 	source="https://github.com/labwc/labwc/archive/refs/tags/"
 	archive_filename=("labwc-${version}.tar.gz" "${version}.tar.gz")
 	src_path="labwc-${version}/"
@@ -73,9 +75,6 @@
 # name|file|url|sha256 (the anchor, labwc, is fetched by the framework)
 _labwcd_pkgs() {
 	cat <<'EOF'
-wayland|wayland-1.24.0.tar.xz|https://gitlab.freedesktop.org/wayland/wayland/-/releases/1.24.0/downloads/wayland-1.24.0.tar.xz|82892487a01ad67b334eca83b54317a7c86a03a89cfadacfef5211f11a5d0536
-wayland-protocols|wayland-protocols-1.49.tar.xz|https://gitlab.freedesktop.org/-/project/2891/uploads/7ed597f0cad076a17fe36f8860596f8c/wayland-protocols-1.49.tar.xz|ec4c8f74942d6dff7ace8b4ce4764f0ef9ff618a935d974ea77edee2ad240b14
-libxkbcommon|xkbcommon-1.13.2.tar.gz|https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz|acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528
 pixman|pixman-0.46.4.tar.xz|https://www.cairographics.org/releases/pixman-0.46.4.tar.xz|a098c33924754ad43f981b740f6d576c70f9ed1006e12221b1845431ebce1239
 libdisplay-info|libdisplay-info-0.2.0.tar.xz|https://gitlab.freedesktop.org/emersion/libdisplay-info/-/releases/0.2.0/downloads/libdisplay-info-0.2.0.tar.xz|5a2f002a16f42dd3540c8846f80a90b8f4bdcd067a94b9d2087bc2feae974176
 seatd|seatd-0.9.1.tar.gz|https://git.sr.ht/~kennylevinsen/seatd/archive/0.9.1.tar.gz|819979c922a0be258aed133d93920bce6a3d3565a60588d6d372ce9db2712cd3
@@ -91,11 +90,11 @@ swaybg|swaybg-1.2.2.tar.gz|https://github.com/swaywm/swaybg/releases/download/v1
 EOF
 }
 
-# The M6 patch sets (wayland, seatd) come from wayland_phoenix, as the tools build takes
-# them from weston-drm; every other patches/<name>/ is this port's.
+# The M6 seatd patch set comes from wayland_phoenix, as the tools build takes it from
+# weston-drm; every other patches/<name>/ is this port's.
 _labwcd_patch_dir() {
 	case "$1" in
-		wayland | seatd) echo "${PORT_DEP_wayland_phoenix%/}/prefix/share/wayland-phoenix/patches/$1" ;;
+		seatd) echo "${PORT_DEP_wayland_phoenix%/}/prefix/share/wayland-phoenix/patches/$1" ;;
 		*) echo "${PREFIX_PORT}/patches/$1" ;;
 	esac
 }
@@ -180,13 +179,16 @@ p_prepare() {
 p_build() {
 	local out="${PREFIX_PORT_BUILD}/out"
 	local I="${PREFIX_PORT_INSTALL%/}"
-	local B S TC WLP
+	local B S TC WLR WLP WLV WXK
 	B="${PREFIX_BUILD%/}"   # the shared ports prefix (the dependencies above)
 	S="${PREFIX_BUILD%/}/sysroot"
 	# shellcheck disable=SC2153 # CROSS: the framework environment (aarch64-phoenix-)
 	TC="$(dirname "$(command -v "${CROSS}gcc")")/${CROSS%-}"
-	WLP="$(b_dependency_dir wayland_phoenix)"
-	WLP="${WLP%/}/prefix"
+	WLR="$(b_dependency_dir wayland_phoenix)"
+	WLR="${WLR%/}"
+	WLP="${WLR}/prefix"
+	WLV="${WLR}/libwayland"   # libwayland + wayland-protocols (+ wlphx-compat, not linked here)
+	WXK="${WLR}/xkbcommon"    # libxkbcommon
 	local WG="${WLP}/share/wayland-phoenix"   # the M6 glue sources (tools/gpu-lane/weston-drm)
 	local F="${PREFIX_PORT}/files"
 	local LCOMPAT_INC="${F}/compat/include"          # this port's gaps (shm_open, uchar.h...)
@@ -212,7 +214,9 @@ p_build() {
 		"${B}/lib/libfontconfig.a" "${B}/lib/libharfbuzz.a" "${B}/lib/libcairo.a" "${B}/lib/libglib-2.0.a" \
 		"${B}/lib/libgobject-2.0.a" "${B}/lib/libiconv.a" "${B}/lib/glib-2.0/include/glibconfig.h" \
 		"${libdrm_src_prefix}/lib/libdrm.a" "${mesa_link}" "${mesa_out}/prefix/lib/pkgconfig/egl.pc" \
-		"${WG}/compat/src/wlphx_epoll.c" "${WLP}/include/evdev/input-event-codes.h" "${WLP}/include/libinput.h"; do
+		"${WG}/compat/src/wlphx_epoll.c" "${WLP}/include/evdev/input-event-codes.h" "${WLP}/include/libinput.h" \
+		"${WLV}/lib/libwayland-server.a" "${WLV}/lib/pkgconfig/wayland-server.pc" "${WLV}/share/pkgconfig/wayland-protocols.pc" \
+		"${WXK}/lib/libxkbcommon.a" "${WXK}/lib/pkgconfig/xkbcommon.pc" "${WLR}/keymap-us.xkb"; do
 		[ -e "${p}" ] || b_die "labwc_desktop: missing ${p}"
 	done
 	local libphx_syms
@@ -293,9 +297,11 @@ EOF
 		for v in "${D}"/*/lib/pkgconfig; do libdir="${libdir}:${v}"; done
 		cat >"${pkgc}" <<EOF
 #!/bin/sh
-# pkg-config restricted to this build's prefix, the private ports views, the libdrm
-# snapshot and the mesa_drm wayland prefix.
-export PKG_CONFIG_LIBDIR=${P}/lib/pkgconfig:${P}/share/pkgconfig${libdir}:${LD_PREFIX}/lib/pkgconfig:${mesa_out}/prefix/lib/pkgconfig
+# pkg-config restricted to this build's prefix, the private ports views, wayland_phoenix's
+# libwayland and xkbcommon views, the libdrm snapshot and the mesa_drm wayland prefix.
+# (${P} first: its wlphx-compat.pc, the one wayland-server/-client.pc require, adds this
+# port's lwphx-compat.)
+export PKG_CONFIG_LIBDIR=${P}/lib/pkgconfig:${P}/share/pkgconfig${libdir}:${WLV}/lib/pkgconfig:${WLV}/share/pkgconfig:${WXK}/lib/pkgconfig:${LD_PREFIX}/lib/pkgconfig:${mesa_out}/prefix/lib/pkgconfig
 unset PKG_CONFIG_PATH
 exec /usr/bin/pkg-config --static "\$@"
 EOF
@@ -392,13 +398,6 @@ EOF
 		ninja -C "${bd}" -j"${jobs}" "${objs[@]}" >"${out}/${bname}-ninja.log" 2>&1 ||
 			{ grep -E -A6 'error|FAILED' "${out}/${bname}-ninja.log" | head -80; b_die "labwc_desktop: ${name}: build failed"; }
 		echo "labwc_desktop: ${name}: objects built ($(grep -c 'warning:' "${out}/${bname}-ninja.log" || true) warning line(s))"
-	}
-
-	_pc_require_compat() {
-		local pc
-		for pc in "$@"; do
-			grep -q 'wlphx-compat' "${pc}" || printf 'Requires.private: wlphx-compat\n' >>"${pc}"
-		done
 	}
 
 	# --- dependency views (ports prefix) + libdrm-phoenix snapshot ---
@@ -500,14 +499,7 @@ Cflags:
 EOF
 	_write_cross
 
-	# --- libraries ---
-	_meson_pkg wayland wayland-build -Dlibraries=true -Dscanner=false -Dtests=false -Ddocumentation=false \
-		-Ddtd_validation=false
-	_pc_require_compat "${P}/lib/pkgconfig/wayland-server.pc" "${P}/lib/pkgconfig/wayland-client.pc"
-	_meson_pkg wayland-protocols wayland-protocols-build -Dtests=false
-	MESON_TARGETS=libxkbcommon.a _meson_pkg libxkbcommon xkbcommon-build -Denable-x11=false -Denable-wayland=false -Denable-docs=false \
-		-Denable-tools=false -Denable-xkbregistry=false -Denable-bash-completion=false \
-		-Dxkb-config-root=/usr/share/X11/xkb -Dx-locale-root=/usr/share/X11/locale
+	# --- libraries (libwayland, wayland-protocols, libxkbcommon: wayland_phoenix) ---
 	# wlroots' pixman renderer needs >= 0.46
 	_meson_pkg pixman pixman-build -Dtests=disabled -Ddemos=disabled -Dgtk=disabled -Dlibpng=disabled \
 		-Dopenmp=disabled -Dtimers=false
@@ -545,12 +537,9 @@ EOF
 	_shim_pc libinput 1.26.2 "-linput -ludev" "weston-drm shim: libinput-phoenix (usbkbd, usbmouse)"
 	_shim_pc libevdev 1.13.0 -levdev "weston-drm shim: libevdev_event_code_from_name"
 
-	# --- the baked keymap (Phoenix has no xkeyboard-config) ---
-	# files/keymap-us.xkb = `xkbcli-compile-keymap --rules evdev --model pc105 --layout us`
-	# of a native libxkbcommon 1.13.2 over the build host's xkeyboard-config (MIT): what the
-	# tools build compiled; committed so the port does not depend on the host's
-	# xkeyboard-config. Regenerate with that command if the layout must change.
-	local km="${F}/keymap-us.xkb"
+	# --- the baked keymap (Phoenix has no xkeyboard-config): wayland_phoenix's keymap-us.xkb,
+	# `xkbcli-compile-keymap --rules evdev --model pc105 --layout us` of libxkbcommon 1.13.2 ---
+	local km="${WLR}/keymap-us.xkb"
 	grep -q 'xkb_keymap' "${km}" || b_die "labwc_desktop: ${km} is not a keymap"
 	python3 - "${km}" "${out}/labwc_keymap.h" <<'PY'
 import sys
@@ -627,12 +616,9 @@ PY
 	# shellcheck disable=SC2054
 	local LINK_DRM=("${LINK_BASE[@]}" -Wl,--wrap=mmap -Wl,--wrap=ioctl)
 	local COMPAT_LIBS=("${P}/lib/liblwphx-compat.a" "${P}/lib/libwlphx-compat.a")
-	local WLR_LIBS=("${P}/lib/libwlroots-0.20.a" "${P}/lib/libwayland-server.a" "${P}/lib/libwayland-client.a"
-		"${P}/lib/libxkbcommon.a" "${P}/lib/libdisplay-info.a" "${P}/lib/libseat.a" "${P}/lib/libinput.a"
+	local WLR_LIBS=("${P}/lib/libwlroots-0.20.a" "${WLV}/lib/libwayland-server.a" "${WLV}/lib/libwayland-client.a"
+		"${WXK}/lib/libxkbcommon.a" "${P}/lib/libdisplay-info.a" "${P}/lib/libseat.a" "${P}/lib/libinput.a"
 		"${P}/lib/libudev.a" "${P}/lib/libevdev.a" "${P}/lib/libpixman-1.a" "${D}/libffi/lib/libffi.a" "${COMPAT_LIBS[@]}")
-	local WLR_CFLAGS=(-I"${P}/include/wlroots-0.20" -I"${P}/include" -I"${P}/include/pixman-1" -I"${LD_PREFIX}/include"
-		-I"${LD_PREFIX}/include/libdrm" -I"${mesa_out}/prefix/include" -I"${LCOMPAT_INC}" -I"${COMPAT_INC}" -I"${MESA_COMPAT_INC}"
-		-DWLR_USE_UNSTABLE)
 	local BIN="${I}/bin"
 
 	_link_prog() {  # base|drm output link-arguments...
@@ -669,8 +655,8 @@ PY
 	mapfile -t FOOT_OBJS < <(_ninja_objs "${out}/foot-build" foot)
 	[ "${#FOOT_OBJS[@]}" -gt 30 ] || b_die "labwc_desktop: foot objects not found"
 	FOOT_OBJS=("${FOOT_OBJS[@]/#/${out}/foot-build/}")
-	_link_prog base foot -Wl,--start-group "${FOOT_OBJS[@]}" "${P}/lib/libfcft.a" "${P}/lib/libwayland-client.a" "${P}/lib/libwayland-cursor.a" \
-		"${P}/lib/libxkbcommon.a" "${P}/lib/libpixman-1.a" "${D}/harfbuzz/lib/libharfbuzz.a" "${D}/fontconfig/lib/libfontconfig.a" \
+	_link_prog base foot -Wl,--start-group "${FOOT_OBJS[@]}" "${P}/lib/libfcft.a" "${WLV}/lib/libwayland-client.a" "${WLV}/lib/libwayland-cursor.a" \
+		"${WXK}/lib/libxkbcommon.a" "${P}/lib/libpixman-1.a" "${D}/harfbuzz/lib/libharfbuzz.a" "${D}/fontconfig/lib/libfontconfig.a" \
 		"${D}/freetype2/lib/libfreetype.a" "${D}/expat/lib/libexpat.a" "${D}/libpng16/lib/libpng16.a" "${D}/zlib/lib/libz.a" \
 		"${D}/libffi/lib/libffi.a" "${COMPAT_LIBS[@]}" -Wl,--end-group "${S}/lib/libm.a"
 
@@ -678,8 +664,8 @@ PY
 	mapfile -t FUZZEL_OBJS < <(_ninja_objs "${out}/fuzzel-build" fuzzel)
 	[ "${#FUZZEL_OBJS[@]}" -gt 10 ] || b_die "labwc_desktop: fuzzel objects not found"
 	FUZZEL_OBJS=("${FUZZEL_OBJS[@]/#/${out}/fuzzel-build/}")
-	_link_prog base fuzzel -Wl,--start-group "${FUZZEL_OBJS[@]}" "${P}/lib/libfcft.a" "${P}/lib/libwayland-client.a" \
-		"${P}/lib/libwayland-cursor.a" "${P}/lib/libxkbcommon.a" "${P}/lib/libpixman-1.a" "${D}/harfbuzz/lib/libharfbuzz.a" \
+	_link_prog base fuzzel -Wl,--start-group "${FUZZEL_OBJS[@]}" "${P}/lib/libfcft.a" "${WLV}/lib/libwayland-client.a" \
+		"${WLV}/lib/libwayland-cursor.a" "${WXK}/lib/libxkbcommon.a" "${P}/lib/libpixman-1.a" "${D}/harfbuzz/lib/libharfbuzz.a" \
 		"${D}/fontconfig/lib/libfontconfig.a" "${D}/freetype2/lib/libfreetype.a" "${D}/expat/lib/libexpat.a" \
 		"${D}/libpng16/lib/libpng16.a" "${D}/zlib/lib/libz.a" "${D}/libffi/lib/libffi.a" "${COMPAT_LIBS[@]}" \
 		-Wl,--end-group "${S}/lib/libm.a"
@@ -688,7 +674,7 @@ PY
 	mapfile -t SWAYBG_OBJS < <(_ninja_objs "${out}/swaybg-build" swaybg)
 	[ "${#SWAYBG_OBJS[@]}" -gt 3 ] || b_die "labwc_desktop: swaybg objects not found"
 	SWAYBG_OBJS=("${SWAYBG_OBJS[@]/#/${out}/swaybg-build/}")
-	_link_prog base swaybg -Wl,--start-group "${SWAYBG_OBJS[@]}" "${P}/lib/libwayland-client.a" "${D}/cairo/lib/libcairo.a" \
+	_link_prog base swaybg -Wl,--start-group "${SWAYBG_OBJS[@]}" "${WLV}/lib/libwayland-client.a" "${D}/cairo/lib/libcairo.a" \
 		"${P}/lib/libpixman-1.a" "${D}/fontconfig/lib/libfontconfig.a" "${D}/freetype2/lib/libfreetype.a" \
 		"${D}/expat/lib/libexpat.a" "${D}/libpng16/lib/libpng16.a" "${D}/zlib/lib/libz.a" "${D}/libffi/lib/libffi.a" \
 		"${COMPAT_LIBS[@]}" -Wl,--end-group "${S}/lib/libm.a"

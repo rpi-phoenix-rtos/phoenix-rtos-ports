@@ -28,14 +28,13 @@
 	#   keymap-us.xkb         evdev/pc105/us, compiled once on a build host
 	#                         (files/keymap-us.xkb; see below)
 	#
-	# It also installs those glue SOURCES and the M6 patch sets (wayland, seatd)
-	# under share/wayland-phoenix/, for ports that must recompile them with their
-	# own flags (labwc_desktop).
+	# It also installs those glue SOURCES and the M6 seatd patch set under
+	# share/wayland-phoenix/, for ports that must recompile them with their own
+	# flags or build seatd (labwc_desktop).
 	#
-	# The libwayland the Wayland ports link: Mesa's EGL wayland platform
-	# (mesa_drm), SDL's Wayland driver (sdl2_kmsdrm), GTK and XFCE build on it
-	# (labwc_desktop still compiles the same libwayland source itself, with its own
-	# flags and wayland-protocols 1.49). What a consumer finds in
+	# This is the ONE libwayland, wayland-protocols and libxkbcommon of the system:
+	# Mesa's EGL wayland platform (mesa_drm), SDL's Wayland driver (sdl2_kmsdrm),
+	# GTK, XFCE and labwc/wlroots all build on it. What a consumer finds in
 	# ${PORT_DEP_wayland_phoenix}:
 	#
 	#   prefix/               everything above (lib/, include/, lib/pkgconfig/,
@@ -395,12 +394,12 @@ EOF
 	grep -q 'xkb_keymap' "${F}/keymap-us.xkb" || b_die "wayland_phoenix: files/keymap-us.xkb is not a keymap"
 	cp "${F}/keymap-us.xkb" "${I}/keymap-us.xkb"
 
-	# --- the glue sources + M6 patch sets, for consumers that recompile them ---
+	# --- the glue sources + the M6 seatd patch set, for consumers that recompile them ---
 	local G="${P}/share/wayland-phoenix"
 	rm -rf "${G}"
 	mkdir -p "${G}/patches"
 	cp -a "${F}/compat" "${F}/shims" "${F}/shmsrv" "${F}/mesa-compat" "${F}/phxhid" "${G}/"
-	cp -a "${PREFIX_PORT}/patches/wayland" "${PREFIX_PORT}/patches/seatd" "${G}/patches/"
+	cp -a "${PREFIX_PORT}/patches/seatd" "${G}/patches/"
 
 	# --- verification ---
 	local l
