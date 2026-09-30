@@ -57,7 +57,9 @@
 	depends="wayland_phoenix xorg_fonts xorg_libs libpng libjpeg libffi zlib libiconv"
 
 	# rootfs: also copy the staging tree (stage/) into the image rootfs.
-	iuse="rootfs"
+	# demos:  put the test programs in the staging tree too: gtk3-hello, gtk3-demo,
+	#         gtk3-widget-factory (built and verified either way; nothing ships them).
+	iuse="rootfs demos"
 
 	supports="phoenix>=3.3"
 }
@@ -70,7 +72,8 @@
 #   phoenix-aarch64{,-wl,-gtk}.cross, pkg-config-phoenix, host-bin/phx-{gcc,g++}
 #   data/glib-2.0/schemas/       gschemas.compiled (host-compiled)
 #   bin/                         gtk3-hello, gtk3-demo, gtk3-widget-factory (+ -stripped)
-#   stage/ + stage.MANIFEST      the files for the target rootfs (new names only)
+#   stage/ + stage.MANIFEST      the files for the target rootfs (new names only; the
+#                                bin/ programs only with USE demos)
 #   SHA256SUMS
 #
 # Host tools: meson, ninja, cmake, wayland-scanner 1.24.0, python3, and GLib's host
@@ -661,12 +664,16 @@ PY
 	cat "${I}/SHA256SUMS"
 	[ "${bad}" = 0 ] || b_die "gtk3_wayland: verification failed"
 
-	# --- the staging tree: the GTK programs, the compiled schemas and the settings ---
+	# --- the staging tree: the compiled schemas, the settings and (USE demos) the GTK
+	# test programs. The programs above are the build's own link check; they are not
+	# part of the image. ---
 	local ST="${I}/stage"
 	rm -rf "${ST}"
-	for o in gtk3-hello gtk3-demo gtk3-widget-factory; do
-		install -D -m 755 "${BIN}/${o}-stripped" "${ST}/bin/${o}"
-	done
+	if b_use demos; then
+		for o in gtk3-hello gtk3-demo gtk3-widget-factory; do
+			install -D -m 755 "${BIN}/${o}-stripped" "${ST}/bin/${o}"
+		done
+	fi
 	install -D -m 644 "${I}/data/glib-2.0/schemas/gschemas.compiled" "${ST}/usr/share/glib-2.0/schemas/gschemas.compiled"
 	install -D -m 644 "${F}/conf/settings.ini" "${ST}/etc/xdg/gtk-3.0/settings.ini"
 	(cd "${ST}" && find . -type f -printf '%P\n' | sort | xargs sha256sum) >"${I}/stage.MANIFEST"
