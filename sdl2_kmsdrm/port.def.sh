@@ -24,9 +24,9 @@
 	conflicts="sdl2_kmsdrm!=${version}"
 	# SDL is configured against the desktop-GL Mesa build (SDL_OPENGL + SDL_OPENGLES), which has
 	# the EGL platforms of both SDL video drivers: GBM (KMSDRM) and Wayland. The Wayland client
-	# stack: libwayland + wlphx-compat from the `wayland` port (the one Mesa's wayland platform is
-	# built on), libxkbcommon + <linux/input.h> from wayland_phoenix.
-	depends="libdrm_phoenix mesa_drm[opengl] zlib wayland wayland_phoenix"
+	# stack is wayland_phoenix's: libwayland + wlphx-compat from its libwayland/ view (the one
+	# Mesa's wayland platform is built on), libxkbcommon + <linux/input.h> from its prefix/.
+	depends="libdrm_phoenix mesa_drm[opengl] zlib wayland_phoenix"
 
 	# vulkan: ALSO build the SDL_VULKAN=ON variant (patches/vulkan/) into vulkan/ -- SDL's
 	# stock KMSDRM Vulkan code (VK_KHR_display) for vkquake_drm (KMSDRM only: a vkQuake window
@@ -155,13 +155,13 @@ p_build() {
 	. "${PORT_DEP_libdrm_phoenix}/share/phoenix-newlane/newlane.subr"
 	nl_setup "${PREFIX_PORT_BUILD}/nl"
 
-	local M="${PORT_DEP_mesa_drm}/gl" WO="${PORT_DEP_wayland:?}" WX="${PORT_DEP_wayland_phoenix:?}/prefix"
+	local M="${PORT_DEP_mesa_drm}/gl" WO="${PORT_DEP_wayland_phoenix:?}/libwayland" WX="${PORT_DEP_wayland_phoenix:?}/prefix"
 	local LDP="${PORT_DEP_libdrm_phoenix}" nl="${PREFIX_PORT_BUILD}/nl" p
 	command -v wayland-scanner > /dev/null || b_die "host wayland-scanner not found"
 	grep -qx 'opengl=true' "${M}/opengl.txt" 2>/dev/null || b_die "${M} is not a desktop-GL Mesa build"
 	for p in "${M}/link-gl.txt" "${M}/link-gles.txt" "${WO}/lib/libwayland-client.a" "${WO}/lib/libwayland-egl.a" \
 			"${WO}/lib/libwayland-cursor.a" "${WO}/lib/libwlphx-compat.a" "${WO}/deps/libffi/lib/libffi.a" \
-			"${WO}/compat/include/sys/mman.h" "${WX}/lib/libxkbcommon.a" "${WX}/lib/pkgconfig/xkbcommon.pc" \
+			"${WX}/share/wayland-phoenix/compat/include/sys/mman.h" "${WX}/lib/libxkbcommon.a" "${WX}/lib/pkgconfig/xkbcommon.pc" \
 			"${WX}/include/xkbcommon/xkbcommon.h" "${WX}/include/linux/input.h" "${WX}/include/evdev/input-event-codes.h"; do
 		[ -e "${p}" ] || b_die "missing ${p}"
 	done
@@ -173,8 +173,8 @@ p_build() {
 	mkdir -p "${wi}/linux" "${wi}/evdev"
 	cp "${WX}/include/linux/input.h" "${wi}/linux/"
 	cp "${WX}/include/evdev/input-event-codes.h" "${wi}/evdev/"
-	# libxkbcommon through a private view (only its own headers; wayland_phoenix's include/
-	# also holds a second libwayland and the libinput/libudev shims)
+	# libxkbcommon through a private view (only its own headers; wayland_phoenix's prefix/include
+	# also holds the libinput/libudev/linux shims)
 	local xv="${PREFIX_PORT_BUILD}/xkbcommon-view" xver
 	xver="$(sed -n 's/^Version: //p' "${WX}/lib/pkgconfig/xkbcommon.pc")"
 	rm -rf "${xv}"
@@ -191,7 +191,7 @@ p_build() {
 		strip-pthread
 
 	_sdl2_kmsdrm_cmake "${PREFIX_PORT_WORKDIR}" "${PREFIX_PORT_BUILD}/sdl-build" "${PREFIX_PORT_INSTALL}" OFF \
-		"${nl}/pkg-config-sdl" "-I${WO}/compat/include -I${wi}" ON
+		"${nl}/pkg-config-sdl" "-I${WX}/share/wayland-phoenix/compat/include -I${wi}" ON
 
 	# The configuration must be what this port is about -- fail loudly otherwise.
 	local cfg="${PREFIX_PORT_INSTALL}/include/SDL2/SDL_config.h" d
@@ -236,7 +236,7 @@ p_build() {
 
 # link-inputs.txt (see the header), from Mesa's gl/ lists and the Wayland client stack
 _sdl2_kmsdrm_link_inputs() {
-	local M="${PORT_DEP_mesa_drm}/gl" WO="${PORT_DEP_wayland}" WX="${PORT_DEP_wayland_phoenix}/prefix"
+	local M="${PORT_DEP_mesa_drm}/gl" WO="${PORT_DEP_wayland_phoenix}/libwayland" WX="${PORT_DEP_wayland_phoenix}/prefix"
 	local LDP="${PORT_DEP_libdrm_phoenix}"
 	# libwayland-cursor with its os_create_anonymous_file() renamed (see the header)
 	local cur="${PREFIX_PORT_INSTALL}/lib/libwayland-cursor-phx.a"
