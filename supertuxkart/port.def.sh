@@ -58,8 +58,9 @@ p_prepare() {
 	#       rounding fallback (SIMDE_HAVE_FENV_H left undefined).
 	#  0005 vk_mem_alloc.h — Phoenix libc has no aligned_alloc/posix_memalign; add
 	#       a __phoenix__ vma_aligned_alloc/free using a base-stashing malloc.
-	#  0006 irrlicht/irrTypes.h — libphoenix ships no wide-char printf; add a
-	#       self-contained swprintf() shim (numeric + wide-%s) for Irrlicht/STK.
+	#  0006 irrlicht/irrTypes.h — Irrlicht passes wchar_t* to swprintf's %s, which
+	#       the standard (and libphoenix's swprintf) reads as a multibyte string;
+	#       redirect swprintf by macro to a shim (numeric + wide-%s) for Irrlicht/STK.
 	#  0007 glslang glslang/CMakeLists.txt — add Generic to the OSDependent/Unix
 	#       gate, else libOSDependent.a is never built and the link degrades to a
 	#       bare, unprovided -lOSDependent.
