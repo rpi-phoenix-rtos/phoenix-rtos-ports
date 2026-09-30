@@ -33,7 +33,7 @@
  *
  * UART-visible lines (ErrorF, graded by the M4 pre-registered cycle):
  *   PHXHID dev=<path> type=<t> open=ok fd=<n> raw=<0|1>      opened at once
- *   PHXHID dev=<path> type=<t> open=pending (<errno>) ...    not yet; retried from the timer
+ *   PHXHID dev=<path> type=<t> open=pending errno=<n> ...    not yet; retried from the timer
  *   PHXHID dev=<path> type=<t> opened after <ms> ms ...      opened by a retry
  *   PHXHID dev=<path> type=<t> open=<errno> after <ms> ms -- no events until it opens ...
  *                                                            still not open after 30 s (once)
@@ -367,8 +367,9 @@ open_device(InputInfoPtr pInfo)
 		ErrorF("PHXHID dev=%s type=%s open=ok fd=%d raw=%d\n", p->path, type_name(p), pInfo->fd, raw);
 		return;
 	}
-	ErrorF("PHXHID dev=%s type=%s open=pending (%s): retrying every %d ms\n", p->path, type_name(p),
-		strerror(errno), PHXHID_RETRY_MS);
+	/* (errno as a number: the error text stays for a device that really never opens) */
+	ErrorF("PHXHID dev=%s type=%s open=pending errno=%d: retrying every %d ms\n", p->path, type_name(p),
+		errno, PHXHID_RETRY_MS);
 	p->pending = 1;
 	p->since = p->last_try = GetTimeInMillis();
 }
