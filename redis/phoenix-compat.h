@@ -55,19 +55,4 @@ static inline int phoenix_setitimer(int which, const struct phoenix_itimerval *n
 }
 #define setitimer phoenix_setitimer
 
-/* dladdr / Dl_info — Phoenix dlfcn has dlopen/dlsym/dlclose but not address->symbol
- * lookup; used only to symbolize crash-report backtraces. Stub = "no symbol found". */
-typedef struct {
-    const char *dli_fname;
-    void       *dli_fbase;
-    const char *dli_sname;
-    void       *dli_saddr;
-} Dl_info;
-static inline int phoenix_dladdr(const void *addr, Dl_info *info) {
-    (void)addr;
-    if (info) { info->dli_fname = 0; info->dli_fbase = 0; info->dli_sname = 0; info->dli_saddr = 0; }
-    return 0; /* glibc: 0 = failure (no symbol) — Redis handles this */
-}
-#define dladdr phoenix_dladdr
-
 #endif /* REDIS_PHOENIX_COMPAT_H */
