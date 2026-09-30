@@ -6,7 +6,7 @@
 
 	name="vkcube_drm"
 	version="1.4.350"
-	desc="vkcube-drm: upstream vkcube (Vulkan-Tools) on the new GPU lane -- Mesa v3dv static ICD + phxvk, VK_KHR_display"
+	desc="vkcube: upstream vkcube (Vulkan-Tools) on the GPU stack -- Mesa v3dv static ICD + phxvk, VK_KHR_display"
 
 	# Vulkan-Tools tag vulkan-sdk-1.4.350.0 = 1cb3a319969cf0d3e2315b0a87a27447f55b4167 (checked
 	# identical to `git archive` of that commit); Vulkan headers 1.4.350 <= Mesa 26.2's 1.4.354
@@ -24,7 +24,7 @@
 	conflicts="vkcube_drm!=${version}"
 	depends="mesa_drm[vulkan] libdrm_phoenix zlib"
 
-	# rootfs: install /bin/vkcube-drm into the image
+	# rootfs: install /bin/vkcube into the image
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -104,8 +104,8 @@ p_build() {
 	local p="${PREFIX_PORT_INSTALL}"
 	mkdir -p "${p}/bin" "${p}/prog"
 	install -m 755 "${out}/vkcube-drm" "${p}/prog/vkcube-drm"
-	install -m 755 "${out}/vkcube-drm.stripped" "${p}/bin/vkcube-drm"
+	install -m 755 "${out}/vkcube-drm.stripped" "${p}/bin/vkcube"
 	if b_use rootfs; then
-		b_install "${p}/bin/vkcube-drm" /bin
+		b_install "${p}/bin/vkcube" /bin
 	fi
 }

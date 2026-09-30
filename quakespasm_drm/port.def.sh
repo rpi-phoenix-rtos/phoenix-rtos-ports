@@ -6,7 +6,7 @@
 
 	name="quakespasm_drm"
 	version="0.97.0"
-	desc="quakespasm-drm: QuakeSpasm on the new GPU lane (SDL KMSDRM + Mesa GBM/EGL desktop GL + libdrm-phoenix)"
+	desc="quakespasm-drm + the quakespasm launcher: QuakeSpasm on the GPU stack (SDL KMSDRM + Wayland, Mesa GBM/EGL desktop GL, libdrm-phoenix)"
 
 	# the quakespasm port's pinned upstream commit (same archive, same sha256)
 	commit="f5fe17864918239d443fe4c0d6bfb980e44d19e6"
@@ -20,13 +20,11 @@
 	license="GPL-2.0-or-later"
 	license_file="LICENSE.txt"
 
-	# NEW GPU LANE clone of the quakespasm port: private prefix; /usr/bin/quakespasm and the
-	# quakespasm port are untouched.
+	# Private prefix.
 	conflicts="quakespasm_drm!=${version}"
 	depends="sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/quakespasm-drm and its launcher /bin/qs-drm into the image,
-	# the launcher also as /usr/bin/quakespasm
+	# rootfs: install /usr/bin/quakespasm-drm and its launcher /usr/bin/quakespasm into the image
 	# (the XFCE menu entry "Quake" = /bin/game-window.sh quakespasm: the same program in a
 	# window of the desktop)
 	iuse="rootfs"
@@ -186,14 +184,11 @@ p_build() {
 	mkdir -p "${p}/bin" "${p}/prog" "${p}/share/quakespasm-drm"
 	install -m 755 "${QS}" "${p}/prog/${qs_name}"
 	install -m 755 "${QS}.stripped" "${p}/bin/${qs_name}"
-	install -m 755 "${out}/qs-drm" "${p}/bin/qs-drm"
+	install -m 755 "${out}/qs-drm" "${p}/bin/quakespasm"
 	install -m 644 "${QS}.map" "${p}/share/quakespasm-drm/"
 	if b_use rootfs; then
 		b_install "${p}/bin/${qs_name}" /usr/bin
-		b_install "${p}/bin/qs-drm" /bin
-		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
-		# image). P4 gives the programs the plain names themselves.
-		install -m 755 "${p}/bin/qs-drm" "${PREFIX_FS}/root/usr/bin/quakespasm"
+		b_install "${p}/bin/quakespasm" /usr/bin
 	fi
 
 	# shellcheck disable=SC1091

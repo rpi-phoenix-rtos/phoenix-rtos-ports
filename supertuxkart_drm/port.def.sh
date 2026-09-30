@@ -6,7 +6,7 @@
 
 	name="supertuxkart_drm"
 	version="1.4"
-	desc="supertuxkart-drm + stk-drm launcher: the supertuxkart port's build linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL/GLES)"
+	desc="supertuxkart-drm + the stk launcher: the supertuxkart port's build linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL/GLES)"
 
 	# The supertuxkart port's archive. This clone RELINKS the supertuxkart port's CMake build
 	# (it compiles nothing of the game); the archive is extracted only because every framework
@@ -27,8 +27,7 @@
 	conflicts="supertuxkart_drm!=${version}"
 	depends="supertuxkart sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib libogg libvorbis mbedtls"
 
-	# rootfs: install /usr/bin/supertuxkart-drm and its launcher /bin/stk-drm into the image,
-	# the launcher also as /bin/stk
+	# rootfs: install /usr/bin/supertuxkart-drm and its launcher /bin/stk into the image
 	# (the XFCE menu entry "SuperTuxKart" = /bin/game-window.sh stk: the same program in a
 	# window of the desktop)
 	iuse="rootfs"
@@ -273,14 +272,11 @@ p_build() {
 	mkdir -p "${p}/bin" "${p}/prog" "${p}/share/stk-drm"
 	install -m 755 "$elf" "${p}/prog/supertuxkart-$name"
 	install -m 755 "$elf.stripped" "${p}/bin/supertuxkart-$name"
-	install -m 755 "$out/stk-$name" "${p}/bin/stk-$name"
+	install -m 755 "$out/stk-$name" "${p}/bin/stk"
 	install -m 644 "${elf}.map" "$out/link-cmd.txt" "$out/call-sites.txt" "$out/BUILD-INFO.txt" "${p}/share/stk-drm/"
 	if b_use rootfs; then
 		b_install "${p}/bin/supertuxkart-$name" /usr/bin
-		b_install "${p}/bin/stk-$name" /bin
-		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
-		# image). P4 gives the programs the plain names themselves.
-		install -m 755 "${p}/bin/stk-$name" "${PREFIX_FS}/root/bin/stk"
+		b_install "${p}/bin/stk" /bin
 	fi
 
 	# shellcheck disable=SC1091

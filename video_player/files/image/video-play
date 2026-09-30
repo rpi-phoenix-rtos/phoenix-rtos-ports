@@ -10,9 +10,8 @@
 #   wl   a Wayland desktop is up (a wayland-N socket in $XDG_RUNTIME_DIR, default /tmp/xdg:
 #        /bin/xfce-session or labwc): ffplay in a window, SDL_VIDEODRIVER=wayland, the
 #        session's environment.
-#   drm  no desktop (the psh prompt): ffplay full screen, SDL_VIDEODRIVER=KMSDRM. The render
-#        server and rpi4-kms (started at boot) are started first when they are not running;
-#        they stay up afterwards.
+#   drm  no desktop (the psh prompt): ffplay full screen, SDL_VIDEODRIVER=KMSDRM, on the render
+#        server and rpi4-kms (both started at boot).
 #
 # Keys (ffplay's own): space/p pause, left/right seek -/+10 s, down/up -/+60 s, f fullscreen
 # toggle, s step one frame, 9/0 volume, m mute, q/Esc quit; a window resize scales the video
@@ -29,8 +28,7 @@
 #                (0 = stay on the last frame until q, for interactive use)
 #   STATLINE_MS  the "ffplay-stat" line period (default 2000; 0 = ffplay's own \r status line)
 #   FFPLAY_AUTOKEYS  scripted key presses "<s>:<key>,..." (keys: pause fs left right up down
-#                step quit), for unattended control tests
-#   V3DA_CMD KMS_CMD   drm mode's server commands (the boot servers' options, without -C)
+#                step quit), for unattended recordings and control tests
 #
 # Every line of ours starts with "VIDEO-PLAY " (grading); ffplay's with "ffplay-stat",
 # "ffplay-auto" or its own log text.
@@ -57,8 +55,6 @@ fi
 
 MODE=${VIDEO_MODE:-auto}
 FFPLAY=${FFPLAY:-/usr/bin/ffplay}
-V3DA_CMD=${V3DA_CMD:-/sbin/rpi4-v3d-async -r 1 -m serial -i}
-KMS_CMD=${KMS_CMD:-/sbin/rpi4-kms -G -p 96}
 LOOP=${LOOP:-1}
 AUTOEXIT=${AUTOEXIT:-1}
 export FFPLAY_STATLINE_MS=${STATLINE_MS:-2000}
@@ -96,10 +92,6 @@ case "${MODE}" in
 		;;
 	drm)
 		player="${FFPLAY}"
-		# order matters: rpi4-kms -G connects to the render server at start-up. Each server
-		# daemonizes and refuses a second instance by itself.
-		if [ ! -e /dev/v3d-async ]; then echo "VIDEO-PLAY server start: ${V3DA_CMD}"; ${V3DA_CMD}; fi
-		if [ ! -e /dev/kms ]; then echo "VIDEO-PLAY server start: ${KMS_CMD}"; ${KMS_CMD}; fi
 		if [ ! -e /dev/v3d-async ] || [ ! -e /dev/kms ]; then
 			echo "VIDEO-PLAY FAIL mode=drm: a server is missing (v3d-async=$([ -e /dev/v3d-async ] && echo up || echo missing)" \
 				"kms=$([ -e /dev/kms ] && echo up || echo missing))"

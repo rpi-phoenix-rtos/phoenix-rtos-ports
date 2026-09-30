@@ -1,43 +1,36 @@
 #!/bin/bash
 #
-# startx-drm -- the X desktop on the new GPU lane. Run ON THE Pi at the psh prompt:
+# startx -- the X desktop: X.Org (modesetting + glamor) with Window Maker. Run ON THE Pi at
+# the psh prompt:
 #
-#     /bin/bash /bin/startx-drm [--servers] [action|wmaker]
+#     /bin/bash /bin/startx [action|wmaker|browse [url]]
 #
-# The new-lane counterpart of the old lane's `startx_gpu <mode>` (pl_phoenix_xlaunch:
-# tools/x11-port/launcher/pl_phoenix_xlaunch.c), docs/gpu-new-lane/MIGRATION.md §3 blocker 3.
-# The old launcher started the old GPU daemon (rpi4-v3d) and the kdrive Xphoenix-glamor-daemon;
-# this one starts Xorg-drm :1 (X.Org modesetting + glamor on rpi4-kms / rpi4-v3d-async, phxhid
-# input on /dev/kbd0 + /dev/mouse0 -- M4-xorg-modesetting.md) and then the same clients.
-# psh has no '&', no ';' and no quoting, so this script does the job control.
+# Starts /bin/Xorg-drm :1 (X.Org modesetting + glamor on rpi4-kms / rpi4-v3d-async, phxhid
+# input on /dev/kbd0 + /dev/mouse0) and then the clients of the mode. psh has no '&', no ';'
+# and no quoting, so this script does the job control.
 #
 # Modes:
-#   action (default)  the showcase desktop, xlaunch's `action` layout on 1920x1080:
-#                       Window Maker (dock + clip), the GL window "Phoenix V3D GL" (eglx11-demo:
-#                       EGL on X11 through DRI3/Present, in place of the old gl-x11-window-daemon),
-#                       xterm running Conway's Life in CPython, xclock, xbill, xterm running top.
-#                       Every client animates by itself; no input is needed.
-#   wmaker            Window Maker alone (the default `startx` session).
+#   action (default)  the showcase desktop on 1920x1080: Window Maker (dock + clip), the GL
+#                     window "Phoenix V3D GL" (eglx11-demo: EGL on X11 through DRI3/Present),
+#                     xterm running Conway's Life in CPython, xclock, xbill, xterm running top.
+#                     Every client animates by itself; no input is needed.
+#   wmaker            Window Maker alone: right click on the root window for its menu (XTerm,
+#                     the applications, Exit).
+#   browse [url]      Window Maker + the Dillo web browser, 1780x980 at (40,40), on <url>
+#                     (default: Dillo's start page). For https:// set the clock first
+#                     (`ntpclient -s pool.ntp.org` at psh): certificates are checked by date.
 #
-# Servers. By default the three new-lane servers are expected to run already (earlier psh
-# commands, or the boot config once MIGRATION.md §4 item 7 lands):
-#   /bin/rpi4-v3d-async-low -r 1 -m serial -i   (render; -m serial orders client renders before
-#                                                the server's Present copy, M4 §P2.1 step 7)
-#   /bin/rpi4-kms-g7 -G -p 96 -C                 (display; -C hands the HDMI console over, which
-#                                                frees /dev/kbd0 for phxhid)
-#   /bin/shmsrv                                  (/shm: the xshmfence pages of DRI3 clients)
-# `--servers` starts whichever of them is not running (same commands; V3DA_CMD, KMS_CMD,
-# SHMSRV override), so a single psh command brings the whole desktop up.
+# The render server (rpi4-v3d-async), the display server (rpi4-kms) and shmsrv start at
+# boot; startx checks that they are up and stops if one is missing.
 #
 # Environment knobs (psh `export NAME=value` before the command):
-#   HOLD        seconds the desktop stays up, then the clean teardown (default 200: startup +
-#               hold + teardown fit the showcase gate's 300 s per command). 0 = until the window
-#               manager exits (interactive use; xlaunch's behaviour).
+#   HOLD        0 (default) = until Window Maker exits (its root menu's Exit); N = the clean
+#               teardown after N seconds (unattended recordings and test cycles)
 #   XSRV CONF   server binary / config (default /bin/Xorg-drm, /etc/X11/xorg-drm.conf)
 #   XVERB       Xorg -verbose level on the UART (default 3); DRMPHX_TRACE libdrm-phoenix ioctl
 #               trace in the server (default 0)
-#   GLDEMO      the GL client (default /bin/eglx11-demo-x); GLGEOM (default 640x480+300+180,
-#               where the old lane's GL window is on screen); GLINTERVAL swap interval (default 1)
+#   GLDEMO      the GL client of `action` (default /bin/eglx11-demo-x); GLGEOM (default
+#               640x480+300+180); GLINTERVAL swap interval (default 1)
 #   WM_SETTLE   seconds between Window Maker and the first managed client (default 3)
 #   CLIENT_GAP  seconds between the other clients (default 1)
 #
@@ -50,60 +43,51 @@
 # %LICENSE%
 
 # psh wires a program's stdout to the console but not always its stderr: send the server's
-# and the clients' diagnostics to the UART too (as xlaunch's dup2).
+# and the clients' diagnostics to the UART too (as xfce-session).
 exec 2>&1
 
-start_servers=0
 mode=action
-while [ $# -gt 0 ]; do
-	case "$1" in
-		--servers) start_servers=1 ;;
-		action|wmaker) mode=$1 ;;
-		*) echo "XDRM usage: startx-drm [--servers] [action|wmaker] (got '$1')"; echo "XDRM done rc=2"; exit 2 ;;
-	esac
-	shift
-done
+url=""
+case "${1:-action}" in
+	action|wmaker) mode=$1 ;;
+	browse) mode=browse; url=${2:-} ;;
+	*) echo "XDRM usage: startx [action|wmaker|browse [url]] (got '$1')"; echo "XDRM done rc=2"; exit 2 ;;
+esac
 
 XSRV=${XSRV:-/bin/Xorg-drm}
 CONF=${CONF:-/etc/X11/xorg-drm.conf}
-HOLD=${HOLD:-200}
+HOLD=${HOLD:-0}
 XVERB=${XVERB:-3}
 GLDEMO=${GLDEMO:-/bin/eglx11-demo-x}
 GLGEOM=${GLGEOM:-640x480+300+180}
 GLINTERVAL=${GLINTERVAL:-1}
 WM_SETTLE=${WM_SETTLE:-3}
 CLIENT_GAP=${CLIENT_GAP:-1}
-V3DA_CMD=${V3DA_CMD:-/bin/rpi4-v3d-async-low -r 1 -m serial -i}
-KMS_CMD=${KMS_CMD:-/bin/rpi4-kms-g7 -G -p 96 -C}
-SHMSRV=${SHMSRV:-/bin/shmsrv}
 DISP=:1
 SOCK=/tmp/.X11-unix/X1
 
-# What pl_phoenix_xlaunch gives the old lane's clients (psh exports neither HOME nor PATH;
-# libXt/libX11's compiled-in data paths point at the host build prefix).
+# The clients' environment (psh exports neither HOME nor PATH; libXt/libX11's compiled-in
+# data paths point at the host build prefix).
 export HOME=/root
 export PATH=/bin
 export XFILESEARCHPATH=/usr/share/X11/app-defaults/%N
 export XLOCALEDIR=/usr/share/X11/locale
 
-echo "XDRM start mode=${mode} server=${XSRV} conf=${CONF} hold=${HOLD} servers=$([ "${start_servers}" = 1 ] && echo start-missing || echo expect-running)"
+echo "XDRM start mode=${mode} server=${XSRV} conf=${CONF} hold=${HOLD}${url:+ url=${url}}"
 
 # --- servers --------------------------------------------------------------------------------
 # /dev/v3d-async and /dev/kms are devfs nodes (stat works); /shm is a port name, asked with
-# shmsrv's own stats request (rc 0 = a server answered). Names outlive a dead server within a
-# boot, so "up" means "was started"; each server refuses a second instance by itself.
+# shmsrv's own stats request (rc 0 = a server answered). All three start at boot.
 v3da_up() { [ -e /dev/v3d-async ]; }
 kms_up() { [ -e /dev/kms ]; }
-shm_up() { "${SHMSRV}" -s > /dev/null 2>&1; }
+shm_up() { /bin/shmsrv -s > /dev/null 2>&1; }
 state() { "$1" && echo up || echo missing; }
 
-if [ "${start_servers}" = 1 ]; then
-	# Order matters: rpi4-kms -G connects to the render server at start-up.
-	if ! v3da_up; then echo "XDRM server start: ${V3DA_CMD}"; ${V3DA_CMD}; fi
-	if ! kms_up; then echo "XDRM server start: ${KMS_CMD}"; ${KMS_CMD}; fi
-	if ! shm_up; then echo "XDRM server start: ${SHMSRV}"; "${SHMSRV}"; fi
-fi
 echo "XDRM precheck v3d-async=$(state v3da_up) kms=$(state kms_up) shm=$(state shm_up)"
+if ! v3da_up || ! kms_up || ! shm_up; then
+	echo "XDRM done rc=1 (a GPU server is missing: they start at boot, see the boot log)"
+	exit 1
+fi
 
 # --- job helpers (bash's own job table: the image has no ps/pkill, and no kill -0 probe) -----
 alive() {
@@ -167,16 +151,14 @@ if [ ! -e "${SOCK}" ]; then
 	exit 1
 fi
 echo "XDRM socket=up wait_s=${i} t=${SECONDS}"
-# xlaunch's settle after the server starts accepting: the first client (the WM) then wins the
+# A settle after the server starts accepting: the first client (the WM) then wins the
 # handshake with a single XOpenDisplay attempt.
 sleep 1
 
 # --- clients --------------------------------------------------------------------------------
 # The window manager first, so it reparents and decorates the others as they map. Geometries
-# are xlaunch's `action` ones (WM decorations: ~24 px title bar). The GL window: the old
-# gl-x11-window-daemon ignored -geometry and hinted 640x480 at (300,180) itself -- that is
-# where it is in every old-lane gate frame, so GLGEOM defaults to it; eglx11-demo sets the
-# geometry as USPosition|USSize hints, which Window Maker honours.
+# are the showcase layout's (WM decorations: ~24 px title bar); eglx11-demo sets its geometry
+# as USPosition|USSize hints, which Window Maker honours.
 launch wmaker /bin/wmaker
 sleep "${WM_SETTLE}"
 if [ "${mode}" = action ]; then
@@ -190,10 +172,14 @@ if [ "${mode}" = action ]; then
 	launch xclock /bin/xclock -geometry 190x190+1500+30
 	sleep "${CLIENT_GAP}"
 	# xbill applies the size but not the position (Xt sets PPosition; Window Maker auto-places
-	# it at about (945,0)); the request matches where it lands, as in xlaunch.
+	# it at about (945,0)); the request matches where it lands.
 	launch xbill /bin/xbill -geometry 400x460+945+30
 	sleep "${CLIENT_GAP}"
 	launch xterm-top /bin/xterm -geometry 96x24+690+560 -e /bin/top
+elif [ "${mode}" = browse ]; then
+	# Dillo takes the geometry as USPosition|USSize hints and an optional URL
+	# shellcheck disable=SC2086 # ${url} is one word or none
+	launch dillo /bin/dillo -g 1780x980+40+40 ${url}
 fi
 echo "XDRM desktop up mode=${mode} clients=${#pids[@]} live=$(live_clients) t=${SECONDS}"
 

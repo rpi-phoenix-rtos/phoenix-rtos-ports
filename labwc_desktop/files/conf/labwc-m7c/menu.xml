@@ -28,7 +28,7 @@
   </item>
   <item label="File Manager (GUI)">
     <!-- Thunar on GTK3 Wayland: built by the gtk3-wayland port (not yet staged) -->
-    <action name="Execute" command="/bin/thunar-wl" />
+    <action name="Execute" command="/bin/thunar" />
   </item>
   <separator />
   <item label="Reconfigure"><action name="Reconfigure" /></item>

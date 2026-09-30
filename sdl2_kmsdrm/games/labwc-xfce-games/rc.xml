@@ -37,7 +37,7 @@
       <action name="Execute" command="/bin/foot" />
     </keybind>
     <keybind key="W-e">
-      <action name="Execute" command="/bin/thunar-wl" />
+      <action name="Execute" command="/bin/thunar" />
     </keybind>
     <keybind key="W-d">
       <action name="Execute" command="/bin/xfce4-appfinder" />
@@ -78,6 +78,13 @@
       <action name="MoveTo" x="636" y="40" />
     </windowRule>
     <windowRule identifier="stk">
+      <action name="MoveTo" x="636" y="40" />
+    </windowRule>
+    <!-- the video players too (XFCE_AUTOSTART=...,video): video-play's ffplay, gtk-video -->
+    <windowRule identifier="ffplay">
+      <action name="MoveTo" x="636" y="40" />
+    </windowRule>
+    <windowRule identifier="*gtk-video*">
       <action name="MoveTo" x="636" y="40" />
     </windowRule>
   </windowRules>

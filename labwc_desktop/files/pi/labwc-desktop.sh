@@ -20,17 +20,16 @@
 #                                  none: the compositor only
 #   input     input (default: libinput-phoenix opens /dev/kbd0 + /dev/mouse0) | noinput
 #
-# The M7 desktop on the new GPU lane (docs/gpu-new-lane/M7-wayland-desktop.md): labwc
+# The M7 desktop (docs/gpu-new-lane/M7-wayland-desktop.md in the coordination repo): labwc
 # (wlroots 0.20) with the DRM + libinput backends. psh has no '&' and no ';', so this
 # script does the job control, as weston-drm/pi/weston-m6a.sh does for Weston: it starts
 # labwc in the background, waits for its socket, runs one client, holds, then ends the
 # client and sends labwc SIGTERM (a clean exit exercises the emulated signalfd and the KMS
 # restore).
 #
-# Preconditions (earlier psh commands of the same cycle):
-#   /bin/rpi4-v3d-async-g6 -r 1 -m serial -i
-#   /bin/rpi4-kms-g7 -G -p 96        (add -C to hand the console keyboard to labwc)
-#   /bin/shmsrv -v                   (memfd_create/shm_open backing: wl_shm pools, keymaps)
+# Preconditions: the GPU servers, started at boot: rpi4-v3d-async (render), rpi4-kms (display;
+# its -C hands the console keyboard to labwc), shmsrv (memfd_create/shm_open backing: wl_shm
+# pools, keymaps).
 #
 # FOOT, FUZZEL, SWAYBG (client binaries, default /bin/foot, /bin/fuzzel, /bin/swaybg; with
 # another value the configuration copy in /tmp/labwc-conf has /bin/foot etc. replaced in

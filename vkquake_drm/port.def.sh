@@ -6,7 +6,7 @@
 
 	name="vkquake_drm"
 	version="1.34"
-	desc="vkquake-drm + vkq-drm launcher: UPSTREAM vkQuake on the new GPU lane (SDL KMSDRM Vulkan + Mesa v3dv static ICD via phxvk)"
+	desc="vkquake-drm + the vkquake launcher: upstream vkQuake on the GPU stack (SDL KMSDRM Vulkan + Mesa v3dv static ICD via phxvk)"
 
 	# upstream vkQuake at the commit our fork (external/vkquake, phoenix-rpi4-port) is based on
 	commit="1aa13a56cdf1b8c18a556e8e48a71a559b925d5a"
@@ -25,8 +25,7 @@
 	conflicts="vkquake_drm!=${version}"
 	depends="sdl2_kmsdrm[vulkan] mesa_drm[vulkan] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/vkquake-drm and its launcher /bin/vkq-drm into the image,
-	# the launcher also as /usr/bin/vkquake
+	# rootfs: install /usr/bin/vkquake-drm and its launcher /usr/bin/vkquake into the image
 	iuse="rootfs"
 
 	supports="phoenix>=3.3"
@@ -219,13 +218,6 @@ EOF
 	done
 	nl_forbid_old_lane "${elf}.stripped" V3DV_PHOENIX /dev/fb0 RPI4FB_GETMODE pl_phoenix PL_VkHostAllocator vkvid: \
 		phoenix-map.cfg vktramp:
-	# inverse control, when the image build installed the old-lane vkquake
-	local shipped="${PREFIX_FS%/}/root/usr/bin/vkquake"
-	if [ -f "${shipped}" ]; then
-		for s in 'vkquake-drm: new GPU lane' 'KMS/DRM Video Driver' 'libdrm-phoenix:' 'phxvk: new GPU lane'; do
-			if grep -aqF -- "${s}" "${shipped}"; then echo "the shipped vkquake carries '${s}'"; bad=1; fi
-		done
-	fi
 	[ "${bad}" = 0 ] || b_die "vkquake-drm: verification failed (see above)"
 
 	# --- launcher ---------------------------------------------------------------------------------
@@ -238,14 +230,11 @@ EOF
 	mkdir -p "${pp}/bin" "${pp}/prog" "${pp}/share/vkquake-drm"
 	install -m 755 "${elf}" "${pp}/prog/vkquake-drm"
 	install -m 755 "${elf}.stripped" "${pp}/bin/vkquake-drm"
-	install -m 755 "${out}/vkq-drm" "${pp}/bin/vkq-drm"
+	install -m 755 "${out}/vkq-drm" "${pp}/bin/vkquake"
 	install -m 644 "${elf}.map" "${out}/call-sites.txt" "${gen}/vk-direct-calls.txt" "${gen}/gl-stub-names.txt" \
 		"${pp}/share/vkquake-drm/"
 	if b_use rootfs; then
 		b_install "${pp}/bin/vkquake-drm" /usr/bin
-		b_install "${pp}/bin/vkq-drm" /bin
-		# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
-		# image). P4 gives the programs the plain names themselves.
-		install -m 755 "${pp}/bin/vkq-drm" "${PREFIX_FS}/root/usr/bin/vkquake"
+		b_install "${pp}/bin/vkquake" /usr/bin
 	fi
 }
