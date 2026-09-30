@@ -1,20 +1,21 @@
 --- a/lib/irrlicht/include/irrTypes.h
 +++ b/lib/irrlicht/include/irrTypes.h
-@@ -260,5 +260,114 @@
+@@ -260,5 +260,115 @@
  #define _strcmpi(a,b) strcmpi(a,b)
  #endif
  
 +// ---------------------------------------------------------------------------
-+// Phoenix-RTOS: libphoenix ships no wide-char printf family (wchar.h declares
-+// none of swprintf/vswprintf/fwprintf, and libc.a exports no such symbol).
-+// Irrlicht — and STK src, which includes Irrlicht headers everywhere — calls
-+// swprintf() to format small strings. Provide a self-contained shim covering
-+// the conversions Irrlicht actually uses: integers (d i u o x X c), floating
-+// (f F e E g G a A), pointer (p) and wide strings (s / ls, treated as
-+// wchar_t*, matching Irrlicht's usage of passing wchar_t* to %s). Numeric
-+// conversions are rendered via the narrow snprintf and widened; wide strings
-+// are copied through. This is a portability shim, not a full C99 wide printf.
-+// TODO(TD-STK-SWPRINTF): drop when libphoenix gains swprintf/vswprintf.
++// Phoenix-RTOS: Irrlicht — and STK src, which includes Irrlicht headers
++// everywhere — calls swprintf() with a wchar_t* argument for %s. libphoenix
++// has a standard swprintf/vswprintf, where %s takes a MULTIBYTE string (%ls
++// is the wide one), so these call sites need non-standard semantics. Provide
++// a self-contained shim covering the conversions Irrlicht actually uses:
++// integers (d i u o x X c), floating (f F e E g G a A), pointer (p) and wide
++// strings (s / ls, both treated as wchar_t*). Numeric conversions are rendered
++// via the narrow snprintf and widened; wide strings are copied through. This
++// is a portability shim, not a full C99 wide printf.
++// TODO(TD-STK-SWPRINTF): drop once Irrlicht's %s-with-wchar_t* call sites
++// use %ls, so the standard libphoenix swprintf can serve them.
 +// ---------------------------------------------------------------------------
 +#if defined(__phoenix__) && defined(__cplusplus)
 +#include <cstdarg>
