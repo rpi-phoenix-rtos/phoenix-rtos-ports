@@ -25,7 +25,9 @@
 #      requested (the file $XFCE_LOGOUT_FLAG appears: the panel's Log Out through the
 #      xfce-demo `loginctl` stand-in) or labwc exits
 #   6  stop: `thunar --quit`; `xfce4-panel --quit` and `xfdesktop --quit` (over the bus: the
-#      panel saves its layout); SIGTERM to labwc, xfconfd (if started here), the bus;
+#      panel saves its layout); SIGTERM to an autostarted foot (its pid in
+#      $XDG_RUNTIME_DIR/foot.pid), labwc, xfconfd (its pid from the bus, however it was
+#      started: it saves its channels and leaves quietly while the bus is still up), the bus;
 #      then the programs' own logs (the autostarted ones write to /tmp/xfce-logs/)
 #
 # Preconditions: the GPU servers, started at boot: rpi4-v3d-async (render), rpi4-kms -C (display;
@@ -163,6 +165,19 @@ has_name() {
 	return 1
 }
 
+# the pid of the process owning bus name $1 (GetConnectionUnixProcessID: the daemon's
+# SO_PEERCRED), or nothing
+bus_pid() {
+	local out line
+	out="$("${SEND}" --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+		org.freedesktop.DBus.GetConnectionUnixProcessID "string:$1" 2>/dev/null)" || return 0
+	while IFS= read -r line; do
+		case "${line}" in
+			*'uint32 '*) line="${line##*uint32 }"; echo "${line%% *}"; return 0 ;;
+		esac
+	done <<< "${out}"
+}
+
 # bounded LOG SECS CMD...: run CMD (stdout+stderr to LOG), at most SECS seconds; its exit
 # status, or 124 when it had to be killed. (The remote-instance calls below wait for a bus
 # reply with no timeout of their own.)
@@ -185,7 +200,7 @@ bounded() {
 
 mkdir -p "${XDG_RUNTIME_DIR}" "${XDG_CONFIG_HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}" "${LOGS}" 2>/dev/null
 chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null
-rm -f "${XDG_RUNTIME_DIR}"/wayland-* "${SOCK}" "${LOGS}"/*.log "${XFCE_LOGOUT_FLAG}" 2>/dev/null
+rm -f "${XDG_RUNTIME_DIR}"/wayland-* "${XDG_RUNTIME_DIR}/foot.pid" "${SOCK}" "${LOGS}"/*.log "${XFCE_LOGOUT_FLAG}" 2>/dev/null
 
 staged=""
 progs="${THUNAR}"
@@ -422,6 +437,20 @@ elif [ "${SESSION}" = xfce ] && [ -n "${sock}" ]; then
 	done
 	echo "XFCE quit panel_rc=${rc_p} xfdesktop_rc=${rc_d} wait_s=${i} names=$(bus_names) t=${SECONDS}"
 fi
+# A terminal the autostart opened (labwc's child, not ours: its pid file): before labwc, or
+# it logs Broken-pipe errors when its display goes away
+if [ -f "${XDG_RUNTIME_DIR}/foot.pid" ]; then
+	fpid="$(cat "${XDG_RUNTIME_DIR}/foot.pid" 2>/dev/null)"
+	rm -f "${XDG_RUNTIME_DIR}/foot.pid"
+	if [ -n "${fpid}" ] && kill -TERM "${fpid}" 2>/dev/null; then
+		i=0
+		while kill -0 "${fpid}" 2>/dev/null && [ "${i}" -lt 10 ]; do
+			sleep 1
+			i=$((i + 1))
+		done
+		echo "XFCE foot stopped pid=${fpid} after_term_s=${i} t=${SECONDS}"
+	fi
+fi
 if alive "${lpid}"; then
 	kill -TERM "${lpid}" 2>/dev/null
 	i=0
@@ -445,10 +474,27 @@ else
 fi
 sleep 3   # autostarted programs notice the display is gone
 echo "XFCE after labwc names=$(bus_names) t=${SECONDS}"
-if [ -n "${xpid}" ]; then
-	kill -TERM "${xpid}" 2>/dev/null
-	wait "${xpid}" 2>/dev/null
-	echo "XFCE xfconfd exited rc=$? t=${SECONDS}"
+# xfconfd before the bus: TERM makes it save and exit; losing the bus first makes it warn
+# ("Name org.xfce.Xfconf lost on the message dbus"). Started by activation, it is the
+# daemon's child: its pid comes from the bus, and the name going away says it is gone.
+xfpid="${xpid}"
+[ -n "${xfpid}" ] || xfpid="$(bus_pid org.xfce.Xfconf)"
+if [ -n "${xfpid}" ]; then
+	kill -TERM "${xfpid}" 2>/dev/null
+	i=0
+	while has_name org.xfce.Xfconf && [ "${i}" -lt 10 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	rc=-
+	if [ -n "${xpid}" ]; then
+		wait "${xpid}" 2>/dev/null
+		rc=$?
+	fi
+	has_name org.xfce.Xfconf && name=left || name=released
+	echo "XFCE xfconfd exited pid=${xfpid} via=${via} rc=${rc} after_term_s=${i} name=${name} t=${SECONDS}"
+elif has_name org.xfce.Xfconf; then
+	echo "XFCE xfconfd pid=unknown (GetConnectionUnixProcessID failed): it stops with the bus t=${SECONDS}"
 fi
 kill -TERM "${dpid}" 2>/dev/null
 i=0

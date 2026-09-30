@@ -1,0 +1,31 @@
+From 8d33073851987d702d135519e2d4d7d763d94a88 Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Wed, 30 Sep 2026 18:43:03 +0200
+Subject: [PATCH] shm: do not seal the pool memfd on Phoenix-RTOS
+
+Phoenix-RTOS memfds (memfd_create() over shmsrv) have no file seals, and
+fcntl() answers F_ADD_SEALS with EINVAL. foot treats that as the non-fatal
+error it is, but logs "failed to seal SHM backing memory file: Invalid
+argument" for every buffer pool it creates -- on every start and resize.
+Skip the call where it cannot succeed.
+---
+ shm.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/shm.c b/shm.c
+index 4f43536..6831cc9 100644
+--- a/shm.c
++++ b/shm.c
+@@ -459,7 +459,8 @@ get_new_buffers(struct buffer_chain *chain, size_t count,
+         goto err;
+     }
+ 
+-#if defined(MEMFD_CREATE)
++    /* Phoenix-RTOS: memfds have no seals (fcntl() rejects F_ADD_SEALS) */
++#if defined(MEMFD_CREATE) && !defined(__phoenix__)
+     /* Seal file - we no longer allow any kind of resizing */
+     /* TODO: wayland mmaps(PROT_WRITE), for some unknown reason, hence we cannot use F_SEAL_FUTURE_WRITE */
+     if (fcntl(pool_fd, F_ADD_SEALS,
+-- 
+2.53.0
+

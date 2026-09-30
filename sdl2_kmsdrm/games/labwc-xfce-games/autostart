@@ -4,8 +4,11 @@
 # labwc-xfce-demo/autostart (the desktop and the panel), plus a foot terminal and the games of
 # GAME_LIST (default quakespasm) in a window, one after another, after GAME_LIST_DELAY seconds
 # (/bin/game-window-autostart.sh). The games' output goes to labwc's (the console): their
-# banner, fps counter and exit lines are graded on the UART.
+# banner, fps counter and exit lines are graded on the UART. foot's pid goes to
+# $XDG_RUNTIME_DIR/foot.pid: /bin/xfce-desktop.sh stops it before labwc (a terminal that
+# loses its display logs Broken-pipe errors).
 /bin/xfdesktop > /tmp/xfce-logs/xfdesktop.log 2>&1 &
 /bin/xfce4-panel > /tmp/xfce-logs/xfce4-panel.log 2>&1 &
 /bin/foot > /tmp/xfce-logs/foot.log 2>&1 &
+echo $! > "${XDG_RUNTIME_DIR:-/tmp/xdg}/foot.pid"
 /bin/bash /bin/game-window-autostart.sh &

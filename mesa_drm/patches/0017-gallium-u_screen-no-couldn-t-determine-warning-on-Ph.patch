@@ -1,0 +1,44 @@
+From a4df8586ef01b327cbf4322404100f025c9535c1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Wed, 30 Sep 2026 19:48:12 +0200
+Subject: [PATCH] gallium/u_screen: no "couldn't determine" warning on
+ Phoenix-RTOS
+
+equal_file_description() compares two DRM fds with
+os_same_file_description() and, when that cannot tell, warns once and
+falls back to comparing st_dev/st_ino/st_rdev. Phoenix-RTOS has neither
+kcmp nor F_DUPFD_QUERY, so os_same_file_description() can never tell
+there, and every GPU process printed the four-line
+"os_same_file_description couldn't determine if two DRM fds reference
+the same file description" warning. The same-file comparison is the
+answer on Phoenix, not a fallback: skip the warning there.
+---
+ src/gallium/auxiliary/util/u_screen.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/gallium/auxiliary/util/u_screen.c b/src/gallium/auxiliary/util/u_screen.c
+index 5aa33fb..1854be4 100644
+--- a/src/gallium/auxiliary/util/u_screen.c
++++ b/src/gallium/auxiliary/util/u_screen.c
+@@ -234,6 +234,10 @@ equal_file_description(const void *key1, const void *key2)
+    if (ret >= 0)
+       return (ret == 0);
+ 
++   /* Phoenix-RTOS has no way to compare file descriptions (no kcmp, no
++    * F_DUPFD_QUERY): the same-file check below is the answer there, always,
++    * not a fallback worth a warning. */
++#if !DETECT_OS_PHOENIX
+    {
+       static bool has_warned;
+       if (!has_warned)
+@@ -244,6 +248,7 @@ equal_file_description(const void *key1, const void *key2)
+                  "that isn't the case.\n", strerror(errno));
+       has_warned = true;
+    }
++#endif
+ 
+    // Let's at least check that it's the same file, different files can't
+    // have the same file descriptions
+-- 
+2.53.0
+
