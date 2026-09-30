@@ -2,14 +2,14 @@
 {
 	ports_api=1
 	name="redis"
-	version="7.2.4"
+	version="7.2.16"
 	desc="In-memory data structure store (server + CLI)"
 	cpe23="cpe:2.3:a:redis:redis:${version}:*:*:*:*:*:*:*"
 	source="https://download.redis.io/releases/"
 	archive_filename="redis-${version}.tar.gz"
 	src_path="redis-${version}/"
-	size="3386861"
-	sha256="8d104c26a154b29fd67d6568b4f375212212ad41e0c2caa3d66480e78dbd3b59"
+	size="3410977"
+	sha256="960a8ec15e34ff40e57ff16837b26b33bd81f2da6d24497bb63de532a323a18e"
 	license="BSD-3-Clause"
 	license_file="COPYING"
 	conflicts=""
@@ -17,9 +17,11 @@
 	supports="phoenix>=3.3"
 }
 
-# Redis 7.2.4 is BSD-3-Clause (pre-SSPL). Built with the bundled deps and its own
-# make, with two Phoenix accommodations:
-#   1. patches/7.2.4/ drops the Linux link flags (-rdynamic/-ldl/-pthread/-lrt) --
+# Redis 7.2.x is BSD-3-Clause (pre-SSPL; 7.4 changed the license, so this port
+# follows the 7.2 patch releases -- 7.2.11+ fixes CVE-2025-49844, the Lua
+# use-after-free RCE). Built with the bundled deps and its own make, with two
+# Phoenix accommodations:
+#   1. patches/${version}/ drops the Linux link flags (-rdynamic/-ldl/-pthread/-lrt) --
 #      pthread/dl/rt live in libphoenix and -rdynamic is meaningless for a static
 #      link. (uname -s runs on the Linux BUILD host, so Redis picks its Linux branch.)
 #   2. phoenix-compat.h (-include'd) shims a handful of Linux/glibc divergences that
