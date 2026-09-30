@@ -354,8 +354,10 @@ EOF
 	}
 
 	# --- libraries ---
+	# icon_directory: libwayland-cursor's last cursor-theme directory (default:
+	# prefix/share/icons, a build path in every program that links it)
 	_meson_pkg --cross "${out}/phoenix-aarch64-compat.cross" wayland wayland-build -Dlibraries=true -Dscanner=false \
-		-Dtests=false -Ddocumentation=false -Ddtd_validation=false
+		-Dtests=false -Ddocumentation=false -Ddtd_validation=false -Dicon_directory=/usr/share/icons
 	_pc_require_compat "${P}/lib/pkgconfig/wayland-server.pc" "${P}/lib/pkgconfig/wayland-client.pc"
 	_meson_pkg wayland-protocols wayland-protocols-build -Dtests=false
 	# libxkbcommon 1.13's tests cannot be switched off (and do not link on Phoenix).
@@ -422,12 +424,16 @@ EOF
 		[ -f "${P}/lib/${l}" ] || b_die "wayland_phoenix: ${l} not installed"
 	done
 	[ -f "${P}/share/pkgconfig/wayland-protocols.pc" ] || b_die "wayland_phoenix: wayland-protocols.pc not installed"
-	# no build path in what the programs link (the debug info, stripped from the shipped
+	# no build path compiled into the libraries (libxkbcommon's and libwayland-cursor's
+	# lookup paths are configured above; the debug info, stripped from the shipped
 	# programs, names the work tree by design)
-	"${TC}-strip" --strip-debug -o "${out}/libxkbcommon.nodebug.a" "${P}/lib/libxkbcommon.a"
-	if grep -qaF "${B}" "${out}/libxkbcommon.nodebug.a"; then
-		b_die "wayland_phoenix: libxkbcommon.a compiles in a build path ($(grep -aoF "${B}" "${out}/libxkbcommon.nodebug.a" | head -1)...)"
-	fi
+	for l in libwayland-server libwayland-client libwayland-cursor libwayland-egl libxkbcommon \
+		libwlphx-compat libudev libinput libevdev; do
+		"${TC}-strip" --strip-debug -o "${out}/${l}.nodebug.a" "${P}/lib/${l}.a"
+		if grep -qaF "${B}" "${out}/${l}.nodebug.a"; then
+			b_die "wayland_phoenix: ${l}.a compiles in a build path: $(grep -ao -- "${B}[[:print:]]*" "${out}/${l}.nodebug.a" | head -1)"
+		fi
+	done
 	local syms
 	syms="$("${TC}-nm" -g --defined-only "${P}/lib/libwayland-server.a" 2>/dev/null || true)"
 	grep -qE ' T wl_display_create$' <<<"${syms}" || b_die "wayland_phoenix: libwayland-server.a has no wl_display_create"
