@@ -6,7 +6,7 @@
 
 	name="wayland"
 	version="1.24.0"
-	desc="libwayland 1.24 + wayland-protocols 1.45 + the wlphx-compat libphoenix-gap library + shmsrv"
+	desc="libwayland 1.24 + wayland-protocols 1.45 + the wlphx-compat libphoenix-gap library"
 
 	source="https://gitlab.freedesktop.org/wayland/wayland/-/releases/${version}/downloads"
 	archive_filename="wayland-${version}.tar.xz"
@@ -15,8 +15,8 @@
 	size="241764"
 	sha256="82892487a01ad67b334eca83b54317a7c86a03a89cfadacfef5211f11a5d0536"
 
-	# libwayland and wayland-protocols are MIT; wlphx-compat (glue/compat/) and shmsrv
-	# (glue/shmsrv/) are our code, BSD-3-Clause.
+	# libwayland and wayland-protocols are MIT; wlphx-compat (glue/compat/) and shmsrv's
+	# wire header (glue/shmsrv/shm_proto.h) are our code, BSD-3-Clause.
 	license="MIT AND BSD-3-Clause"
 	license_file="COPYING"
 
@@ -24,9 +24,6 @@
 	conflicts="wayland!=${version}"
 	# libdrm_phoenix: only the build helpers (newlane.subr); libdrm itself is not linked here.
 	depends="libdrm_phoenix libffi"
-
-	# rootfs: also install /bin/shmsrv into the image (opt-in)
-	iuse="rootfs"
 
 	supports="phoenix>=3.3"
 }
@@ -48,12 +45,11 @@
 #                          wayland platform needs it), so a copy of mesa_drm glue/compat/include
 #   deps/libffi/           a private view of the ports prefix's libffi (header poisoning: the
 #                          ports include/ also holds the old lane's GL/ and X11/ headers)
-#   include/shm_proto.h, bin/shmsrv (+ prog/shmsrv unstripped)   the /shm server: memfd_create's
-#                          backing (wl_shm pools, keymaps, xshmfence pages); a server, it moves to
-#                          phoenix-rtos-devices with rpi4-kms / rpi4-v3d-async (MIGRATION.md 4.7)
-#
-# shmsrv lives here, not in a port of its own: a port needs an upstream archive and shmsrv has
-# none; this is the lowest port that needs its wire header (glue/compat/src/wlphx_memfd.c).
+#   include/shm_proto.h    the wire protocol of shmsrv, the /shm server that backs memfd_create
+#                          (wl_shm pools, keymaps, xshmfence pages; libxshmfence_phoenix reads it
+#                          here). The server itself is phoenix-rtos-devices misc/shmsrv, whose
+#                          shm_proto.h this copy must match (scripts/check-gpu-lane-ports-sync.sh
+#                          in the coordination repo compares them).
 #
 # Host tools: meson, ninja and wayland-scanner, which must be exactly 1.24.0 (it generates
 # the protocol code compiled into libwayland).
@@ -131,7 +127,7 @@ p_build() {
 	done
 	echo "wayland: compat stand-ins: ${defs[*]:-none}"
 	rm -f "${P}/lib/libwlphx-compat.a"
-	# exactly the three objects: shmsrv.o (below, with its main()) must never land in the library
+	# exactly the three objects (an old shmsrv.o carried a main() and must never land here)
 	"${NL_AR}" rcs "${P}/lib/libwlphx-compat.a" "${objs[@]}"
 	cat > "${P}/lib/pkgconfig/wlphx-compat.pc" <<EOF
 prefix=${P}
@@ -179,18 +175,6 @@ EOF
 	done
 	[ -f "${P}/share/pkgconfig/wayland-protocols.pc" ] || b_die "wayland-protocols.pc not installed"
 
-	# --- shmsrv: the /shm server (memfd_create backing) -----------------------------------------
-	local so="${PREFIX_PORT_BUILD}/shmsrv-obj"
-	mkdir -p "${P}/bin" "${P}/prog" "${so}"
+	# --- shmsrv's wire header, for the ports that talk to /shm (libxshmfence_phoenix) -----------
 	cp "${PREFIX_PORT}/glue/shmsrv/shm_proto.h" "${P}/include/"
-	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${PREFIX_PORT}/glue/shmsrv/shmsrv.c" \
-		-o "${so}/shmsrv.o"
-	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -o "${P}/prog/shmsrv" "${so}/shmsrv.o"
-	"${NL_STRIP}" -o "${P}/bin/shmsrv" "${P}/prog/shmsrv"
-	nl_no_undefined "${P}/prog/shmsrv"
-	nl_forbid_old_lane "${P}/bin/shmsrv" /dev/v3d-srv Xphoenix '[fbdev]' glamor_phoenix phxgl
-
-	if b_use rootfs; then
-		b_install "${P}/bin/shmsrv" /bin
-	fi
 }

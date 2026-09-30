@@ -29,7 +29,7 @@
 	#
 	# It also installs those glue SOURCES and the M6 patch sets (wayland, seatd)
 	# under share/wayland-phoenix/, for ports that must recompile them with their
-	# own flags (labwc_desktop; Weston).
+	# own flags (labwc_desktop).
 	source="https://gitlab.freedesktop.org/wayland/wayland/-/releases/${version}/downloads/"
 	archive_filename="wayland-${version}.tar.xz"
 	src_path="wayland-${version}/"
