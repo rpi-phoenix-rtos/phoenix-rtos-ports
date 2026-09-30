@@ -34,7 +34,7 @@
 	#   x11       x11/      GLES + EGL X11 platform (DRI3/Present)          tools: mesa-drm/build-out-x11
 	#   vulkan    vulkan/   v3dv as a static ICD (no GL)                    tools: mesa-drm/build-out-vulkan
 	iuse="opengl wayland x11 vulkan"
-	depends="libdrm_phoenix zlib opengl? ( wayland ) wayland? ( wayland ) x11? ( xorg_libs libxshmfence_phoenix )"
+	depends="libdrm_phoenix zlib opengl? ( wayland_phoenix ) wayland? ( wayland_phoenix ) x11? ( xorg_libs libxshmfence_phoenix )"
 
 	supports="phoenix>=3.3"
 }
@@ -97,7 +97,10 @@ _mesa_drm_variant() {
 			# for an SDL program full screen on KMS and in a window of the desktop
 			platforms=wayland
 			[ "${v}" = gl ] && opengl=true
-			local wo="${PORT_DEP_wayland:?}"
+			# wayland_phoenix's libwayland/ view: libwayland alone (its prefix/ has libudev.pc,
+			# which would turn on Mesa's HAVE_LIBUDEV)
+			local wo="${PORT_DEP_wayland_phoenix:?}"
+			wo="${wo%/}/libwayland"
 			libdir="${libdir}:${wo}/lib/pkgconfig:${wo}/share/pkgconfig:${wo}/deps/libffi/lib/pkgconfig" ;;
 		x11)
 			# EGL on X11 through DRI3/Present (loader_dri3); GLX stays off, and so does
