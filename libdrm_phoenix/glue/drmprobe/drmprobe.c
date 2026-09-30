@@ -84,7 +84,7 @@ static struct {
 	int pass, fail, gap;
 	char failed[512];
 	int card, render, card1;
-	char render_path[64];
+	char card_path[64], render_path[64];
 	uint32_t crtc, conn, primary;
 	drmModeModeInfo mode;
 	uint32_t fmt;
@@ -2000,6 +2000,7 @@ static void t_g6_probe(void)
 typedef struct {
 	int fd;
 	uint32_t w, h, words;
+	int rt_borrowed;                 /* rt is the caller's buffer: not freed with the chain */
 	rbo_t rt, bcl[2], rcl[2], ta, ts;
 	struct drm_v3d_submit_cl s[2];
 	uint32_t sync;
@@ -2019,7 +2020,9 @@ static void g6_dims(uint32_t *w, uint32_t *h)
 }
 
 
-static int g6_chain_setup(int fd, g6_chain_t *ch)
+/* rt == NULL: the chain renders into a scan-out BO of its own; else into the
+ * caller's (mapped) buffer, which must hold the whole mode-sized frame. */
+static int g6_chain_setup_rt(int fd, g6_chain_t *ch, const rbo_t *rt)
 {
 	uint32_t bsz, rsz, tasz, tssz, i;
 	v3da_clgen_buf_t gb, gr;
@@ -2033,9 +2036,16 @@ static int g6_chain_setup(int fd, g6_chain_t *ch)
 		return -EINVAL;   /* the scan-out pitch must be the clear's stride (1920 * 4 is 64-aligned) */
 	}
 	rc = v3da_clgen_clear_sizes(ch->w, ch->h, &bsz, &rsz, &tasz, &tssz);
+	if ((rc == 0) && (rt != NULL)) {
+		ch->rt = *rt;
+		ch->rt_borrowed = 1;
+		rc = ((rt->cpu != NULL) && (rt->size >= V3DA_CLGEN_CLEAR_RT_SIZE(ch->w, ch->h))) ? 0 : -EINVAL;
+	}
 	/* the render target is the buffer that is scanned out: ask for the scan-out
 	 * placement, as Mesa does (proto 5 places it below 1 GiB; older servers never see the hint) */
-	if (rc == 0) rc = rbo_new_flags_fd(fd, &ch->rt, g6_page(V3DA_CLGEN_CLEAR_RT_SIZE(ch->w, ch->h)), PROBE_V3D_CREATE_BO_SCANOUT);
+	else if (rc == 0) {
+		rc = rbo_new_flags_fd(fd, &ch->rt, g6_page(V3DA_CLGEN_CLEAR_RT_SIZE(ch->w, ch->h)), PROBE_V3D_CREATE_BO_SCANOUT);
+	}
 	for (i = 0; (rc == 0) && (i < 2u); i++) {
 		rc = rbo_new_fd(fd, &ch->bcl[i], g6_page(bsz));
 		if (rc == 0) rc = rbo_new_fd(fd, &ch->rcl[i], g6_page(rsz));
@@ -2054,6 +2064,12 @@ static int g6_chain_setup(int fd, g6_chain_t *ch)
 	}
 	if (rc == 0) rc = drmSyncobjCreate(fd, DRM_SYNCOBJ_CREATE_SIGNALED, &ch->sync);
 	return rc;
+}
+
+
+static int g6_chain_setup(int fd, g6_chain_t *ch)
+{
+	return g6_chain_setup_rt(fd, ch, NULL);
 }
 
 
@@ -2103,7 +2119,9 @@ static void g6_chain_free(g6_chain_t *ch)
 	if (ch->sync != 0u) {
 		(void)drmSyncobjDestroy(ch->fd, ch->sync);
 	}
-	rbo_free_fd(ch->fd, &ch->rt);
+	if (!ch->rt_borrowed) {
+		rbo_free_fd(ch->fd, &ch->rt);
+	}
 	for (i = 0; i < 2u; i++) {
 		rbo_free_fd(ch->fd, &ch->bcl[i]);
 		rbo_free_fd(ch->fd, &ch->rcl[i]);
@@ -2493,6 +2511,138 @@ static void t_g6_xproc(void)
 #endif /* DRMPROBE_NO_FORK */
 
 
+/* A wlroots compositor's own output (labwc, sway; G5): the swapchain buffer is a
+ * dumb buffer of ANOTHER card0 descriptor (Mesa's kmsro allocates on the card0 open
+ * of its GBM device), imported on the render node to be composited into, exported
+ * from there (gbm_bo_get_fd) and imported on the backend's card0 descriptor, where it
+ * is an alias of the other client's buffer. The backend adds the framebuffer and
+ * closes its handle at once (wlroots backend/drm/fb.c close_all_bo_handles: in DRM
+ * the framebuffer holds the buffer). The composite is submitted and not waited for,
+ * and the atomic flip carries no in-fence (wlroots without explicit sync glFlush()es
+ * and commits): the flip must still wait for the composite (G13). Before the G5 fix
+ * the closed handle took the framebuffer's buffer name with it, and every such flip
+ * went ungated: windowed SuperTuxKart showed the frame from two flips ago. */
+static void t_compositor_flip(void)
+{
+	drmModeObjectPropertiesPtr props;
+	drmModeAtomicReqPtr req = NULL;
+	struct drm_v3d_get_bo_offset go;
+	g6_chain_t ch;
+	rbo_t rt;
+	uint32_t w, h, dh = 0, pitch = 0, ah = 0, fb = 0, fb_prop = 0, bad = ~0u;
+	uint32_t handles[4] = { 0 }, pitches[4] = { 0 }, offsets[4] = { 0 };
+	uint64_t size = 0, moff = 0, t0, flip_us = 0;
+	int gfd, fd = -1, sfd = -1, rc, closed = -1, st_commit = -1, st_flip = -1, flipped = 0, back = 0, rmfb = -1, j, ok, pend;
+	char nb[40];
+
+	memset(&ch, 0, sizeof(ch));
+	memset(&rt, 0, sizeof(rt));
+	g6_dims(&w, &h);
+	gfd = open(P.card_path, O_RDWR | O_CLOEXEC);   /* the GBM device's card0: another client */
+	rc = (gfd >= 0) ? 0 : -errno;
+	if (rc == 0) rc = drmModeCreateDumbBuffer(gfd, w, h, 32, 0, &dh, &pitch, &size);
+	if ((rc == 0) && (pitch != V3DA_CLGEN_CLEAR_RT_STRIDE(w))) {
+		rc = -EINVAL;   /* the composite (a full-screen clear) writes exactly the clear's layout */
+	}
+	if (rc == 0) rc = drmModeMapDumbBuffer(gfd, dh, &moff);
+	if (rc == 0) {
+		rt.cpu = mmap(NULL, (size_t)size, PROT_READ | PROT_WRITE, MAP_SHARED, gfd, (off_t)moff);
+		rc = (rt.cpu != MAP_FAILED) ? 0 : -errno;
+		rt.cpu = (rc == 0) ? rt.cpu : NULL;
+		rt.size = (uint32_t)size;
+	}
+	/* kmsro: the render node's view of the scan-out buffer */
+	if (rc == 0) rc = drmPrimeHandleToFD(gfd, dh, DRM_CLOEXEC | DRM_RDWR, &fd);
+	if (rc == 0) rc = drmPrimeFDToHandle(P.render, fd, &rt.handle);
+	if (fd >= 0) {
+		close(fd);
+		fd = -1;
+	}
+	if (rc == 0) {
+		memset(&go, 0, sizeof(go));
+		go.handle = rt.handle;
+		rc = (drmIoctl(P.render, DRM_IOCTL_V3D_GET_BO_OFFSET, &go) == 0) ? 0 : -errno;
+		rt.offset = go.offset;
+	}
+	/* the backend: gbm_bo_get_fd, import on its own card0, ADDFB2, close the handle */
+	if (rc == 0) rc = drmPrimeHandleToFD(P.render, rt.handle, DRM_CLOEXEC | DRM_RDWR, &fd);
+	if (rc == 0) rc = drmPrimeFDToHandle(P.card, fd, &ah);
+	if (fd >= 0) {
+		close(fd);
+	}
+	if (rc == 0) {
+		handles[0] = ah;
+		pitches[0] = pitch;
+		rc = drmModeAddFB2(P.card, w, h, DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb, 0);
+		rc = (rc == 0) ? 0 : -errno;
+	}
+	if (rc == 0) {
+		closed = drmCloseBufferHandle(P.card, ah);
+	}
+
+	/* the composite: pending, not waited for */
+	if (rc == 0) rc = g6_chain_setup_rt(P.render, &ch, &rt);
+	if (rc == 0) rc = g6_chain_submit(&ch, P.g6_jobs);
+	if (rc == 0) rc = drmSyncobjExportSyncFile(P.render, ch.sync, &sfd);
+	if (rc == 0) {
+		props = drmModeObjectGetProperties(P.card, P.primary, DRM_MODE_OBJECT_PLANE);
+		for (j = 0; (props != NULL) && (j < (int)props->count_props); j++) {
+			if (strcmp(prop_name_of(P.card, props->props[j], nb, sizeof(nb)), "FB_ID") == 0) {
+				fb_prop = props->props[j];
+			}
+		}
+		drmModeFreeObjectProperties(props);
+		req = drmModeAtomicAlloc();
+		(void)drmModeAtomicAddProperty(req, P.primary, fb_prop, fb);
+		st_commit = g6_status(sfd, NULL);   /* 0: the composite still runs as the flip is asked for */
+		P.flips_done = 0;
+		t0 = now_us();
+		flipped = (drmModeAtomicCommit(P.card, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0) &&
+			(wait_flips(1, 5000) == 0);
+		flip_us = now_us() - t0;
+		st_flip = g6_status(sfd, NULL);     /* 1: the composite was done when the buffer went on screen */
+		if (flipped) {
+			bad = g6_count_not_step(rt.cpu, ch.words, G6_Y, 61u);
+		}
+		drmModeAtomicFree(req);
+		P.flips_done = 0;
+		back = (drmModePageFlip(P.card, P.crtc, P.buf[0].fb, DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0) &&
+			(wait_flips(1, 3000) == 0);
+	}
+	if (fb != 0u) {
+		rmfb = drmModeRmFB(P.card, fb);
+	}
+	if (sfd >= 0) {
+		(void)g6_wait(sfd);   /* nothing in flight before the buffers go */
+		close(sfd);
+	}
+	g6_chain_free(&ch);
+	if (rt.handle != 0u) {
+		gem_close(P.render, rt.handle);
+	}
+	if (rt.cpu != NULL) {
+		(void)munmap(rt.cpu, (size_t)size);
+	}
+	if (dh != 0u) {
+		(void)drmModeDestroyDumbBuffer(gfd, dh);
+	}
+	if (gfd >= 0) {
+		close(gfd);
+	}
+
+	ok = (rc == 0) && (closed == 0) && flipped && (st_flip == 1) && back && (rmfb == 0);
+#ifndef DRMPROBE_NO_FORK
+	ok = ok && (bad == 0u);   /* the fake GPU of the host harness draws nothing */
+#endif
+	pend = (st_commit == 0);
+	printf(TAG "compositor_flip setup=%d alias_handle=%u handle_closed=%d jobs=%u pending_at_commit=%d flipped=%d "
+		"flip_us=%llu done_at_flip=%d bad_at_flip=%u flipped_back=%d rmfb=%d%s ok=%d\n", rc, ah, closed == 0, P.g6_jobs, pend,
+		flipped, (unsigned long long)flip_us, st_flip == 1, bad, back, rmfb, (ok && !pend) ? G6_INCONCLUSIVE : "",
+		ok && pend);
+	verdict("compositor_flip", ok && pend);
+}
+
+
 static void t_g6(void)
 {
 	t_g6_probe();
@@ -2540,6 +2690,7 @@ int main(int argc, char **argv)
 	}
 	P.card = t_open("card", card_path);
 	P.render = t_open("render", render_path);
+	(void)snprintf(P.card_path, sizeof(P.card_path), "%s", card_path);
 	(void)snprintf(P.render_path, sizeof(P.render_path), "%s", render_path);
 	if ((P.card < 0) || (P.render < 0)) {
 		printf(TAG "RESULT pass=%d fail=%d gap=%d failed=%s verdict=FAIL\n", P.pass, P.fail, P.gap, P.failed);
@@ -2585,6 +2736,9 @@ int main(int argc, char **argv)
 	printf(TAG "prime_export_xproc skipped=1 (DRMPROBE_NO_FORK: host harness)\n");
 #endif
 	t_g6();
+	if ((P.buf[0].handle != 0u) && (P.primary != 0u)) {
+		t_compositor_flip();
+	}
 
 	if (!keep && (P.crtc != 0u)) {
 		(void)drmModeSetCrtc(P.card, P.crtc, 0, 0, 0, NULL, 0, NULL);   /* planes off: the console comes back */

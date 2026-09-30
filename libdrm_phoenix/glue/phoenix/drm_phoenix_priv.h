@@ -85,6 +85,7 @@ typedef struct {
 typedef struct {
 	uint32_t fb_id;           /* 0 = free */
 	uint32_t handle;          /* the dumb handle ADDFB2 named */
+	kms_memref_t mem;         /* its buffer, resolved at ADDFB2: the framebuffer outlives the handle */
 } drmphx_kms_fb_t;
 
 typedef struct drmphx_conn {

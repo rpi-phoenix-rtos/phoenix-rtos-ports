@@ -240,6 +240,7 @@ static struct {
 
 static void implicit_note(drmphx_conn_t *c, uint32_t port, uint64_t id, uint32_t handle)
 {
+	static int warned;
 	uint32_t i, k = DRMPHX_MAX_IMPLICIT;
 
 	(void)pthread_mutex_lock(&IMP.lock);
@@ -259,6 +260,11 @@ static void implicit_note(drmphx_conn_t *c, uint32_t port, uint64_t id, uint32_t
 		IMP.e[k].handle = handle;
 	}
 	(void)pthread_mutex_unlock(&IMP.lock);
+	if ((k == DRMPHX_MAX_IMPLICIT) && (warned == 0)) {
+		warned = 1;
+		(void)fprintf(stderr, "libdrm-phoenix: more than %u shared render buffers: flips of buffer %llu go without "
+			"implicit sync\n", DRMPHX_MAX_IMPLICIT, (unsigned long long)id);
+	}
 }
 
 
