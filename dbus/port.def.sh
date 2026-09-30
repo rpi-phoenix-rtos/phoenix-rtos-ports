@@ -273,16 +273,14 @@ EOF
 	(cd "${I}/bin" && sha256sum "${PROGS[@]/%/-stripped}") >"${I}/SHA256SUMS"
 	cat "${I}/SHA256SUMS"
 
-	# --- the staging tree: stage/ mirrors the target rootfs; new names only, as the
-	# m7f-dbus staging (docs/gpu-new-lane/M7-wayland-desktop.md in the coordination repo)
+	# --- the staging tree: stage/ mirrors the target rootfs. The session bus configuration
+	# the XFCE session starts dbus-daemon with (xfce_wayland's xfce-desktop.sh); the EXTERNAL
+	# variant (files/conf/session-phoenix-external.conf) is the tools host test's, not the image's
 	local ST="${I}/stage"
 	for o in "${PROGS[@]}"; do
 		install -D -m 755 "${out}/bin/${o}-stripped" "${ST}/bin/${o}"
 	done
-	install -D -m 755 "${PREFIX_PORT}/files/pi/dbus-m7f.sh" "${ST}/bin/dbus-m7f.sh"
-	install -D -m 755 "${PREFIX_PORT}/files/pi/dbus-m7m.sh" "${ST}/bin/dbus-m7m.sh"
 	install -D -m 644 "${PREFIX_PORT}/files/conf/session-phoenix.conf" "${ST}/etc/dbus-1/session-phoenix.conf"
-	install -D -m 644 "${PREFIX_PORT}/files/conf/session-phoenix-external.conf" "${ST}/etc/dbus-1/session-phoenix-external.conf"
 	# activatable services directory (xfconfd's .service file comes with xfce_wayland)
 	mkdir -p "${ST}/usr/share/dbus-1/services"
 	(cd "${ST}" && find . -type f -printf '%P\n' | sort | xargs sha256sum) >"${I}/stage.MANIFEST"
