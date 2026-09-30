@@ -155,8 +155,18 @@ p_build() {
 	# (its defined symbols: configure probes libc functions) change.
 	# shellcheck source=files/components.sh
 	. "${F}/components.sh"
+	# zlib (FF_COMMON --enable-zlib) comes from the zlib port, seen through a private view:
+	# NL_TFLAGS name only the sysroot, and -I/-L on the whole shared prefix would put every
+	# port's headers in front of FFmpeg's own. The programs link libz.a from their own
+	# inputs (sdl2_kmsdrm's link-inputs.txt tail; gtk3_wayland's pkg-config).
+	local ZV="${VP_OUT}/zlib-view" ZD
+	ZD="$(b_dependency_dir zlib)"
+	ZD="${ZD%/}"
+	mkdir -p "${ZV}/include" "${ZV}/lib"
+	cp -a "${ZD}/include/zlib.h" "${ZD}/include/zconf.h" "${ZV}/include/"
+	cp -a "${ZD}/lib/libz.a" "${ZV}/lib/"
 	local cfg_args=(--enable-cross-compile --arch=aarch64 --target-os=none --cross-prefix="${NL_CC%gcc}"
-		--cc="${NL_CC}" --extra-cflags="${NL_TFLAGS[*]} -O2 -g" --extra-ldflags="${NL_TFLAGS[*]}"
+		--cc="${NL_CC}" --extra-cflags="${NL_TFLAGS[*]} -O2 -g -I${ZV}/include" --extra-ldflags="${NL_TFLAGS[*]} -L${ZV}/lib"
 		"${FF_COMMON[@]}" --enable-asm --disable-programs --disable-shared --enable-static)
 	local stamp
 	stamp="$( { printf '%s\n' "${cfg_args[@]}"; awk '{ print $3 }' <<<"${NL_LIBC_SYMS}" | LC_ALL=C sort -u; } |
@@ -178,7 +188,8 @@ p_build() {
 	fi
 	local d
 	for d in HAVE_PTHREADS HAVE_NEON CONFIG_AVFILTER CONFIG_SWSCALE CONFIG_SWRESAMPLE CONFIG_HEVC_DECODER CONFIG_H264_DECODER \
-			CONFIG_AAC_DECODER CONFIG_MOV_DEMUXER CONFIG_SCALE_FILTER CONFIG_ARESAMPLE_FILTER; do
+			CONFIG_AAC_DECODER CONFIG_MOV_DEMUXER CONFIG_SCALE_FILTER CONFIG_ARESAMPLE_FILTER CONFIG_ZLIB \
+			CONFIG_MPEG2VIDEO_DECODER CONFIG_AC3_DECODER CONFIG_DCA_DECODER CONFIG_MPEGPS_DEMUXER CONFIG_YADIF_FILTER; do
 		cat "${VP_FS}/config.h" "${VP_FS}/config_components.h" | grep -qE "^#define ${d} 1$" ||
 			b_die "video_player: config: ${d} is not 1"
 	done
