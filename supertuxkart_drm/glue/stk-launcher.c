@@ -7,6 +7,11 @@
  *   - SUPERTUXKART_DATADIR    -> /usr/share/supertuxkart  (STK reads $DATADIR/data/)
  *   - SUPERTUXKART_SAVEDIR    -> /tmp/stk                 (writable config dir; RAM)
  *   - SUPERTUXKART_ASSETS_DIR -> /usr/share/supertuxkart/stk-assets  (art root)
+ *   - XDG_DATA_HOME           -> /tmp/stk/data   (addons, screenshots, replays, grand prix)
+ *   - XDG_CACHE_HOME          -> /tmp/stk/cache  (cached textures)
+ * STK looks for its data/cache dirs in $XDG_*_HOME, then $HOME; with neither set (the
+ * image has no HOME) it logged `FileManager: Falling back to use '.'` five times and put
+ * those directories under the working directory -- "/" when started from psh.
  * The art assets (karts/tracks/textures/models/music/sfx/library) live in a
  * separate stk-assets root, not in data/. STK's file_manager adds both DATADIR/
  * data/ and ASSETS_DIR as root dirs and resolves each subdir from the first root
@@ -216,6 +221,13 @@ int main(int argc, char **argv)
 	seed_file("/tmp/stk/config-0.10/players.xml", SEED_PLAYERS_XML);
 	seed_file("/tmp/stk/config-0.10/config.xml", SEED_CONFIG_XML);
 
+	/* The XDG data and cache roots (see the header). Not fatal: STK creates them itself
+	 * when it can, and falls back to '.' when it cannot. */
+	if ((mkdir("/tmp/stk/data", 0777) != 0 && errno != EEXIST) ||
+			(mkdir("/tmp/stk/cache", 0777) != 0 && errno != EEXIST)) {
+		fprintf(stderr, "stk: mkdir /tmp/stk/{data,cache}: %s\n", strerror(errno));
+	}
+
 	/* overwrite=0: these are DEFAULTS, not mandates. Anything already exported by
 	 * the caller wins, so assets can be staged somewhere else -- e.g. copied to
 	 * the RAM-backed /tmp, which loads markedly faster than NFS and is what
@@ -224,7 +236,9 @@ int main(int argc, char **argv)
 	 * measurements that looked like the variable had never arrived at all. */
 	if (setenv("SUPERTUXKART_DATADIR", "/usr/share/supertuxkart", 0) != 0 ||
 			setenv("SUPERTUXKART_SAVEDIR", "/tmp/stk", 0) != 0 ||
-			setenv("SUPERTUXKART_ASSETS_DIR", "/usr/share/supertuxkart/stk-assets", 0) != 0) {
+			setenv("SUPERTUXKART_ASSETS_DIR", "/usr/share/supertuxkart/stk-assets", 0) != 0 ||
+			setenv("XDG_DATA_HOME", "/tmp/stk/data", 0) != 0 ||
+			setenv("XDG_CACHE_HOME", "/tmp/stk/cache", 0) != 0) {
 		fprintf(stderr, "stk: setenv failed: %s\n", strerror(errno));
 		return 1;
 	}

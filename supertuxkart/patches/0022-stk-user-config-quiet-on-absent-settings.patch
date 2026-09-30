@@ -1,0 +1,59 @@
+Keep a user-config default silently when the setting is simply absent.
+
+STK logs an [error] for every setting config.xml does not name:
+
+  User Config: Unknown value for fullscreen; expected true or false
+  User Config: Couldn't find parameter group ipv4-stun-servers
+
+The stk launcher seeds a minimal config.xml (enable_internet plus two
+attributes of <Video>), so every boot printed ~20 of these -- 12 500 across
+the UART archive -- and a genuinely malformed value would drown among them.
+An absent setting is the normal state of a fresh or older config: the default
+stands and STK writes the full file back on exit.
+
+- BoolUserConfigParam::findYourDataInAnAttributeOf / findYourDataInAChildOf:
+  return quietly when XMLNode::get() finds no attribute (it returns 0); a value
+  that is present and neither "true" nor "false" is still reported.
+- MapUserConfigParam::findYourDataInAChildOf: an absent group returns
+  quietly, as GroupUserConfigParam::findYourDataInAChildOf already does
+  (upstream commented its message out). "Invalid name" / "Invalid key name"
+  for a malformed entry stay.
+
+--- a/src/config/user_config.cpp
++++ b/src/config/user_config.cpp
+@@ -252,8 +252,10 @@
+     const XMLNode* child = node->getNode(m_param_name);
+     if (child == NULL)
+     {
+-        Log::error("User Config", "Couldn't find parameter group %s",
+-          m_param_name.c_str());
++        // PHOENIX: an absent group is not an error -- keep the default
++        // silently, as GroupUserConfigParam does (upstream commented its
++        // message out). A config.xml that names only a few settings, like the
++        // one the stk launcher seeds, otherwise logs every group it omits.
+         return;
+     }
+     for (unsigned i = 0; i < child->getNumNodes(); i++)
+@@ -539,7 +541,9 @@
+     if(child == NULL) return;
+ 
+     std::string text_value = "";
+-    child->get( "value", &text_value );
++    // PHOENIX: no value attribute = keep the default silently; only a value
++    // that is present and neither "true" nor "false" is reported.
++    if (!child->get( "value", &text_value )) return;
+ 
+     if(text_value == "true")
+     {
+@@ -559,7 +563,10 @@
+ void BoolUserConfigParam::findYourDataInAnAttributeOf(const XMLNode* node)
+ {
+     std::string text_value = "";
+-    node->get( m_param_name, &text_value );
++    // PHOENIX: an absent attribute = keep the default silently (a group
++    // element that names only some of its members, e.g. the launcher's
++    // <Video show_fps=... />); a present, malformed value is still reported.
++    if (!node->get( m_param_name, &text_value )) return;
+ 
+     if (text_value == "true")
+     {
