@@ -16,7 +16,7 @@
 	#   GLib 2.88.3 (LGPL) + GIO     ports glib2 is 2.56.4 without GIO
 	#   fribidi 1.0.16 (LGPL)        pango, GTK
 	#   atk 2.38.0 (LGPL)            GTK 3 still links ATK (no at-spi bridge)
-	#   gdk-pixbuf 2.42.12 (LGPL)    PNG + JPEG loaders built in (no loader modules)
+	#   gdk-pixbuf 2.42.12 (LGPL)    PNG + JPEG + GIF loaders built in (no loader modules)
 	#   harfbuzz 14.4.0 (MIT)        = the ports release, rebuilt with meson: no C++ runtime
 	#   pango 1.54.0 (LGPL)          the last pango that accepts the ports fontconfig 2.14
 	#   cairo 1.18.4 (LGPL/MPL)      ports cairo 1.16 lacks PDF/PS surfaces and cairo-gobject
@@ -559,9 +559,13 @@ PY
 
 	_meson_pkg fribidi fribidi-build -Ddocs=false -Dbin=false -Dtests=false
 	_meson_pkg atk atk-build -Dintrospection=false -Ddocs=false
-	# PNG + JPEG loaders built in; sniffing by loader signatures, not GIO
-	_meson_pkg gdk-pixbuf gdk-pixbuf-build -Dpng=enabled -Djpeg=enabled -Dtiff=disabled -Dgif=disabled \
-		-Dothers=disabled -Dbuiltin_loaders=png,jpeg -Dintrospection=disabled -Dman=false -Dgtk_doc=false \
+	# PNG + JPEG + GIF (animated too) loaders built in; sniffing by loader signatures,
+	# not GIO. GIF is in-tree C with no library. TIFF needs a libtiff port (none).
+	# -Dothers (bmp/ico/ani/pnm/tga/xpm/xbm/icns/qtif) stays off: upstream turned it
+	# off by default as "weakly maintained", and these parsers would read every
+	# untrusted file Thunar thumbnails.
+	_meson_pkg gdk-pixbuf gdk-pixbuf-build -Dpng=enabled -Djpeg=enabled -Dtiff=disabled -Dgif=enabled \
+		-Dothers=disabled -Dbuiltin_loaders=png,jpeg,gif -Dintrospection=disabled -Dman=false -Dgtk_doc=false \
 		-Ddocs=false -Dtests=false -Dinstalled_tests=false -Dgio_sniffing=false -Drelocatable=false
 
 	# The same release as the ports HarfBuzz, rebuilt: the ports (CMake) objects reference
@@ -638,7 +642,7 @@ PY
 		if [ "${n}" != 0 ] || [ "${interp}" != 0 ] || [ "${x11}" != 0 ]; then head -10 <<<"${und}"; bad=1; fi
 		for s in gdk_wayland_display_get_type _gdk_wayland_display_open memfd_create __wrap_close eglGetProcAddress \
 			wl_display_connect xkb_keymap_new_from_string g_vfs_get_local pango_cairo_font_map_get_default \
-			gdk_pixbuf_new_from_file; do
+			gdk_pixbuf_new_from_file _gdk_pixbuf__gif_fill_vtable; do
 			grep -qE " [TtWw] ${s}\$" <<<"${syms}" || { echo "gtk3_wayland: ${o}: symbol ${s} missing"; bad=1; }
 		done
 	done

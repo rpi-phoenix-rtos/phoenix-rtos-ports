@@ -28,9 +28,14 @@ MICROPY_PY_FFI = 0
 MICROPY_PY_SSL = 1
 # axTLS has minimal size but implements only a subset of modern TLS
 # functionality, so may have problems with some servers.
-MICROPY_SSL_AXTLS = 1
+# PHOENIX: off. extmod.mk tests AXTLS first, so with both set to 1 the tls
+# module was built on axTLS, which is unmaintained (TLS 1.2 only, old cipher
+# suites, no working certificate verification).
+MICROPY_SSL_AXTLS = 0
 # mbedTLS is more up to date and complete implementation, but also
 # more bloated.
+# PHOENIX: the copy bundled in lib/mbedtls (3.6), built with MicroPython's own
+# config; its entropy comes from /dev/urandom (mbedtls platform entropy).
 MICROPY_SSL_MBEDTLS = 1
 
 # jni module requires JVM/JNI

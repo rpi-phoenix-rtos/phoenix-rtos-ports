@@ -22,3 +22,19 @@ _socket socketmodule.c
 mmap mmapmodule.c
 _posixsubprocess _posixsubprocess.c
 binascii binascii.c
+# asyncio's C accelerator (Task/Future/event-loop helpers; without it asyncio runs
+# its pure-Python fallback), cProfile's profiler core, termios (tty, getpass and
+# the PyREPL console need it), and syslog: pure libc (libphoenix has the full
+# tc*/cf* and openlog/syslog sets).
+_asyncio _asynciomodule.c
+_lsprof _lsprof.c rotatingtree.c
+termios termios.c
+syslog syslogmodule.c
+# xml.parsers.expat / xml.etree / xml.dom.minidom / plistlib / xmlrpc. No flags on
+# purpose: makesetup then uses configure's MODULE_PYEXPAT_* / MODULE__ELEMENTTREE_*
+# variables, i.e. the expat BUNDLED in Modules/expat (-IModules/expat, which comes
+# before the port's -I<prefix>/include and so wins over the xorg_fonts expat.h, and
+# Modules/expat/libexpat.a, built by the Makefile's own rule). _elementtree reaches
+# expat through pyexpat's capsule, so it needs no libexpat of its own.
+pyexpat pyexpat.c
+_elementtree _elementtree.c

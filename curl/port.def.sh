@@ -43,9 +43,18 @@ p_prepare() {
 	# `/* #undef CURL_CA_BUNDLE */`) and every https:// transfer failed to verify
 	# with no default trust store at all. Point it at the path the ca_certificates
 	# port installs, which is also dillo's first-choice bundle.
+	#
+	# Protocols: http, https, ftp, ftps and file only. The rest (dict, gopher,
+	# telnet, tftp, smb, rtsp, ldap, imap, pop3, smtp) have no user in the image --
+	# the only libcurl consumer, SuperTuxKart, fetches its addons over http(s) --
+	# and they are where most of this 2019 release's CVEs live (TFTP heap overflow
+	# CVE-2019-5482, the IMAP/POP3/SMTP STARTTLS injections CVE-2021-22946/22947,
+	# the TELNET and SMB leaks). Less code reachable from a URL an attacker picks.
 	CONFIGURE_PARAMS=(--host="${HOST}" --sbindir="$PREFIX_PROG" --disable-pthreads --disable-threaded-resolver
 		--disable-ipv6 --prefix="$PREFIX_CURL_INSTALL" --disable-ntlm-wb --with-zlib
-		--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt)
+		--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt
+		--disable-dict --disable-gopher --disable-telnet --disable-tftp --disable-smb --disable-rtsp
+		--disable-ldap --disable-ldaps --disable-imap --disable-pop3 --disable-smtp)
 
 	b_use "mbedtls" && CONFIGURE_PARAMS+=(--without-ssl --with-mbedtls)
 

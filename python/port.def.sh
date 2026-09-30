@@ -94,7 +94,11 @@ p_prepare() {
 	#    configure's own rules for the external-lib modules we link statically in
 	#    step 4 (else they collide with the Setup.local lines). --without-mimalloc:
 	#    mimalloc needs madvise/rusage Phoenix lacks -> pymalloc. --disable-shared:
-	#    static interpreter.
+	#    static interpreter. --with-computed-gotos: the eval loop's "threaded code"
+	#    dispatch. Its probe is a run test, so a cross build answers "no" and
+	#    silently falls back to the switch dispatch; naming the option makes
+	#    configure define both HAVE_COMPUTED_GOTOS and USE_COMPUTED_GOTOS (GCC has
+	#    supported labels-as-values forever).
 	if [ ! -f "${cfg}/config.status" ]; then
 		# LDFLAGS is passed EXPLICITLY with --gc-sections stripped. configure
 		# otherwise inherits the framework's LDFLAGS from the environment, and
@@ -123,7 +127,7 @@ p_prepare() {
 			--with-build-python="${HOST_PYTHON}" \
 			--prefix=/usr/local \
 			--disable-ipv6 --without-ensurepip --disable-shared --disable-test-modules \
-			--without-mimalloc \
+			--without-mimalloc --with-computed-gotos \
 			CC="${CROSS}gcc" CXX="${CROSS}g++" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
 			READELF="${CROSS}readelf" \
 			CFLAGS="${PY_CFLAGS}" LDFLAGS="${py_ldflags}")
@@ -227,6 +231,18 @@ p_build() {
 	make -C "${PREFIX_PORT_WORKDIR}" python LDFLAGS="${LDFLAGS//-Wl,--gc-sections/}"
 
 	"${CROSS}readelf" -h "${PREFIX_PORT_WORKDIR}/python" | grep Machine
+
+	# --with-computed-gotos took effect (without it the cross probe answers "no").
+	grep -q '^#define USE_COMPUTED_GOTOS 1$' "${PREFIX_PORT_WORKDIR}/pyconfig.h" ||
+		b_die "python: pyconfig.h: USE_COMPUTED_GOTOS is not 1"
+
+	# The Setup.local modules that need nothing but the bundled sources are linked
+	# in, not merely listed (a makesetup "previous rule" or a typo only warns).
+	local m pysyms
+	pysyms="$("${CROSS}nm" "${PREFIX_PORT_WORKDIR}/python")"
+	for m in _asyncio _lsprof termios syslog pyexpat _elementtree; do
+		grep -qE " T PyInit_${m}\$" <<<"${pysyms}" || b_die "python: PyInit_${m} is not in the interpreter"
+	done
 
 	# Install the interpreter as /bin/python3. Keep the NON-stripped binary: the
 	# dlopen C-extension recipe (README) resolves the Py C-API + libc against the

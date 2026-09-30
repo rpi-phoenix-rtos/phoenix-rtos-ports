@@ -21,12 +21,28 @@
 # (shell.c). We compile it directly with the cross toolchain and skip the bundled
 # ./configure entirely: no autoconf on-target, and Phoenix needs none of the
 # feature probes (the flags below are the curated, HW-verified set).
+#
+# Without configure nothing defines the HAVE_* macros, and the amalgamation only
+# guesses them for __linux__/__APPLE__. So they are named here, for functions
+# libphoenix really has: HAVE_PREAD/HAVE_PWRITE make the unix VFS read and write
+# a page with ONE positional syscall (libphoenix pread/pwrite pass the offset to
+# sys_read/sys_write) instead of lseek()+read(); HAVE_LOCALTIME_R makes
+# date('now','localtime') thread-safe. SQLITE_ENABLE_MATH_FUNCTIONS adds the SQL
+# math functions (sqrt, pow, log, ln, exp, trig, ceil, floor, pi, ...; libphoenix
+# libm has every one, including acosh/asinh/atanh). SQLITE_DEFAULT_MEMSTATUS=0
+# drops the global memory-statistics mutex from every malloc (the documented
+# speed-up; sqlite3_memory_used() then reports 0).
 SQLITE_FEATURES="\
 	-DSQLITE_THREADSAFE=1 \
 	-DSQLITE_OMIT_LOAD_EXTENSION \
 	-DSQLITE_ENABLE_FTS5 \
 	-DSQLITE_ENABLE_JSON1 \
 	-DSQLITE_ENABLE_RTREE \
+	-DSQLITE_ENABLE_MATH_FUNCTIONS \
+	-DSQLITE_DEFAULT_MEMSTATUS=0 \
+	-DHAVE_PREAD=1 \
+	-DHAVE_PWRITE=1 \
+	-DHAVE_LOCALTIME_R=1 \
 	-DHAVE_READLINE=0"
 
 p_prepare() {
