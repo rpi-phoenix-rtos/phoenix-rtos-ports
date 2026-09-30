@@ -39,10 +39,16 @@ p_build() {
 	# compiler probes carry the sysroot / -mcpu flags on their link steps.
 	#
 	# Static libjpeg.a with the classic IJG API (jpeglib.h) — what WRaster / Dillo
-	# / fltk link against. TurboJPEG API + SIMD are off: WITH_SIMD needs the
-	# aarch64 NEON asm path wired for the cross toolchain (perf-only; TODO revisit
-	# to accelerate JPEG decode); WITH_TURBOJPEG pulls extra libs/programs no
-	# current consumer needs.
+	# / fltk / gdk-pixbuf / SuperTuxKart link against.
+	#
+	# WITH_SIMD=1: on aarch64 libjpeg-turbo 3.0 builds its Neon code from C
+	# INTRINSICS (cmake reports "NEON_INTRINSICS = ON" with GCC >= 12), so there is
+	# no assembler to wire for the cross toolchain, and init_simd() in
+	# simd/arm/aarch64/jsimd.c turns Neon on unconditionally (Neon is mandatory in
+	# ARMv8-A; the /proc/cpuinfo probe is Linux-only and not needed). The jsimd_*_neon
+	# IDCT/colour-convert/upsample/Huffman kernels land in libjpeg.a. At run time
+	# JSIMD_FORCENONE=1 in the environment falls back to the C paths (A/B switch).
+	# WITH_TURBOJPEG stays off: it pulls extra libs/programs no consumer needs.
 	LDFLAGS="${CFLAGS} $LDFLAGS"
 
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/build/Makefile" ]; then
@@ -59,10 +65,14 @@ p_build() {
 			-DCMAKE_C_FLAGS="${CFLAGS}" \
 			-DENABLE_SHARED=0 \
 			-DENABLE_STATIC=1 \
-			-DWITH_SIMD=0 \
+			-DWITH_SIMD=1 \
 			-DWITH_TURBOJPEG=0 \
 			.. && make install)
 	fi
 
 	(cd "${PREFIX_PORT_WORKDIR}/build" && make install)
+
+	# A configure that quietly fell back to the C paths would still build.
+	"${CROSS}nm" "${PREFIX_PORT_INSTALL}/lib/libjpeg.a" | grep ' T jsimd_idct_islow_neon$' >/dev/null ||
+		b_die "libjpeg: libjpeg.a has no Neon kernels (WITH_SIMD did not take effect)"
 }
