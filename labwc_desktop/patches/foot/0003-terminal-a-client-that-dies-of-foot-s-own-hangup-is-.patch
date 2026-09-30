@@ -1,0 +1,36 @@
+From d39869ef884b842e9f9ea40de7813e4882eaa5df Mon Sep 17 00:00:00 2001
+From: Phoenix new GPU lane <noreply@phoenix-rtos.invalid>
+Date: Wed, 30 Sep 2026 19:45:09 +0200
+Subject: [PATCH] terminal: a client that dies of foot's own hangup is not a
+ warning
+
+When a terminal closes -- foot is told to exit (SIGTERM), or its window
+goes away -- foot sends the client application SIGHUP, as a hardware
+terminal would. A shell exits of that signal, so every closed foot logged
+"slave exited with signal 1 (Hangup)" as a warning, for the normal way a
+terminal ends. Log a SIGHUP death at debug level; any other signal is
+still a warning.
+---
+ terminal.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/terminal.c b/terminal.c
+index beee1f9..f783d87 100644
+--- a/terminal.c
++++ b/terminal.c
+@@ -2031,7 +2031,11 @@ term_destroy(struct terminal *term)
+             LOG_DBG("slave exited with code %d", ret);
+         } else if (WIFSIGNALED(exit_status)) {
+             ret = WTERMSIG(exit_status);
+-            LOG_WARN("slave exited with signal %d (%s)", ret, strsignal(ret));
++            if (ret == SIGHUP) {
++                /* The hangup foot itself sends the client when it closes */
++                LOG_DBG("slave exited with signal %d (%s)", ret, strsignal(ret));
++            } else
++                LOG_WARN("slave exited with signal %d (%s)", ret, strsignal(ret));
+         } else {
+             LOG_WARN("slave exited for unknown reason (status = 0x%08x)",
+                      exit_status);
+-- 
+2.53.0
+
