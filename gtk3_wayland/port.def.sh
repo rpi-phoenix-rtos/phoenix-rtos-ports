@@ -6,7 +6,7 @@
 
 	name="gtk3_wayland"
 	version="3.24.52"
-	desc="GTK 3.24 (Wayland backend only) + GLib 2.88/GIO, pango 1.54, cairo 1.18, gdk-pixbuf, atk, gtk-layer-shell (new GPU lane)"
+	desc="GTK 3.24 (Wayland backend only) + GLib 2.88/GIO, pango 1.54, cairo 1.18, gdk-pixbuf, atk, gtk-layer-shell"
 
 	# Aggregate port: GTK 3 with ONLY the Wayland GDK backend and the libraries it
 	# needs that the ports prefix lacks or has too old, as the coordination repo's
@@ -661,13 +661,12 @@ PY
 	cat "${I}/SHA256SUMS"
 	[ "${bad}" = 0 ] || b_die "gtk3_wayland: verification failed"
 
-	# --- the staging tree (new names only; the m7e-gtk3 staging) ---
+	# --- the staging tree: the GTK programs, the compiled schemas and the settings ---
 	local ST="${I}/stage"
 	rm -rf "${ST}"
 	for o in gtk3-hello gtk3-demo gtk3-widget-factory; do
 		install -D -m 755 "${BIN}/${o}-stripped" "${ST}/bin/${o}"
 	done
-	install -D -m 755 "${F}/pi/weston-gtk3.sh" "${ST}/bin/weston-gtk3.sh"
 	install -D -m 644 "${I}/data/glib-2.0/schemas/gschemas.compiled" "${ST}/usr/share/glib-2.0/schemas/gschemas.compiled"
 	install -D -m 644 "${F}/conf/settings.ini" "${ST}/etc/xdg/gtk-3.0/settings.ini"
 	(cd "${ST}" && find . -type f -printf '%P\n' | sort | xargs sha256sum) >"${I}/stage.MANIFEST"

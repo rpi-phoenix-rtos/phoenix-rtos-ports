@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  labwc under XFCE on Phoenix-RTOS (new GPU lane, M7 m7h-xfce): stage as
+  labwc under XFCE on Phoenix-RTOS (M7 m7h-xfce): stage as
   /etc/xdg/labwc-xfce/rc.xml. As the m7c configuration (built-in theme, DejaVu Sans,
   server-side decorations, Openbox-style default bindings) with the XFCE programs on
   the keys: Super+Return foot, Super+E Thunar, Alt+F2 / Super+D the XFCE app finder.
@@ -27,7 +27,7 @@
       <action name="Execute" command="/bin/foot" />
     </keybind>
     <keybind key="W-e">
-      <action name="Execute" command="/bin/thunar-wl" />
+      <action name="Execute" command="/bin/thunar" />
     </keybind>
     <keybind key="W-d">
       <action name="Execute" command="/bin/xfce4-appfinder" />

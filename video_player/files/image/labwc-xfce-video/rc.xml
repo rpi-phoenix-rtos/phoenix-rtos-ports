@@ -36,7 +36,7 @@
       <action name="Execute" command="/bin/foot" />
     </keybind>
     <keybind key="W-e">
-      <action name="Execute" command="/bin/thunar-wl" />
+      <action name="Execute" command="/bin/thunar" />
     </keybind>
     <keybind key="W-d">
       <action name="Execute" command="/bin/xfce4-appfinder" />

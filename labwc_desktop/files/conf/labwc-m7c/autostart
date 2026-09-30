@@ -1,5 +1,0 @@
-# labwc autostart on Phoenix-RTOS (M7 m7c-desktop): stage as /etc/xdg/labwc-m7c/autostart.
-# labwc runs it with `sh` (busybox) once the compositor is up: the wallpaper on the
-# layer-shell background, then one terminal.
-/bin/swaybg -i /usr/share/backgrounds/phoenix/phoenix-gradient-1920x1080.png -m fill >/dev/null 2>&1 &
-/bin/foot >/dev/null 2>&1 &

@@ -12,7 +12,7 @@
 # XFCE 4.20 on labwc, the M7 showcase (docs/gpu-new-lane/M7-wayland-desktop.md). xfwm4 is
 # X11-only, so labwc is the window manager; the XFCE programs are GTK 3 Wayland clients
 # (the panel and the desktop on wlr-layer-shell). psh has no '&' and no ';': this script
-# does the job control, in the shape of labwc-desktop.sh / weston-m6a.sh:
+# does the job control:
 #   1  dbus-daemon (session bus, /etc/dbus-1/session-phoenix.conf: ANONYMOUS on
 #      unix:path=/tmp/dbus-session) in the background, wait for its socket
 #   2  xfconfd: first by BUS ACTIVATION (/usr/share/dbus-1/services/org.xfce.Xfconf.service,
@@ -28,15 +28,14 @@
 #      panel saves its layout); SIGTERM to labwc, xfconfd (if started here), the bus;
 #      then the programs' own logs (the autostarted ones write to /tmp/xfce-logs/)
 #
-# Preconditions (earlier psh commands of the same cycle):
-#   /bin/rpi4-v3d-async-low -r 1 -m serial -i
-#   /bin/rpi4-kms-g7 -G -p 96 -C      (-C hands the console keyboard to labwc)
-#   /bin/shmsrv -v                    (memfd_create/shm_open backing: wl_shm pools, keymaps)
+# Preconditions: the GPU servers, started at boot: rpi4-v3d-async (render), rpi4-kms -C (display;
+# -C hands the console keyboard to labwc), shmsrv (memfd_create/shm_open backing: wl_shm pools,
+# keymaps). /bin/xfce-session checks them and runs this script.
 #
 # Environment knobs: RENDERER (pixman | gles2, default pixman), HOLD (seconds with the
 # session up, default 60; 0 = until Log Out or labwc exits), LABWC, CONF_DIR (default
 # /etc/xdg/labwc-xfce), XFCE_BIN (a directory of XFCE programs put first on PATH; default none),
-# THUNAR / PANEL / XFDESKTOP (default /bin/thunar-wl, /bin/xfce4-panel, /bin/xfdesktop: the
+# THUNAR / PANEL / XFDESKTOP (default /bin/thunar, /bin/xfce4-panel, /bin/xfdesktop: the
 # programs this script starts or asks to quit), THUNAR_DIR (default /), THUNAR_START (0 = no
 # Thunar window at start), THUNAR_SECOND (a directory: once the session is up, open it with a
 # SECOND `thunar <dir>`, which forwards its command line to the running Thunar over the bus),
@@ -44,7 +43,9 @@
 # /usr/share), XFCE_HOME (the root of XDG_CONFIG_HOME & co., default /tmp/xfce-home),
 # LOGOUT_CMD (run when HOLD is over, default: create $XFCE_LOGOUT_FLAG), TZ (passed through:
 # GLib's clock and dates honour it, libphoenix's localtime() does not yet),
-# XFCONFD (default /usr/lib/xfce4/xfconf/xfconfd), ACTIVATION (0 = skip bus activation, start
+# XFCE_AUTOSTART (xfce session: programs to open once the panel is up, by
+# /bin/xfce-autostart.sh, which the session's stop closes), XFCONFD (default
+# /usr/lib/xfce4/xfconf/xfconfd), ACTIVATION (0 = skip bus activation, start
 # xfconfd directly), VERBOSE (labwc -V, default 1), G_DEBUG / G_MESSAGES_DEBUG (passed
 # through), GDBUS_DEBUG (1 = G_DBUS_DEBUG=authentication for the XFCE programs).
 #
@@ -63,7 +64,7 @@ RENDERER=${RENDERER:-pixman}
 HOLD=${HOLD:-60}
 LABWC=${LABWC:-/bin/labwc}
 CONF_DIR=${CONF_DIR:-/etc/xdg/labwc-xfce}
-THUNAR=${THUNAR:-/bin/thunar-wl}
+THUNAR=${THUNAR:-/bin/thunar}
 THUNAR_DIR=${THUNAR_DIR:-/}
 THUNAR_START=${THUNAR_START:-1}
 THUNAR_SECOND=${THUNAR_SECOND:-}
@@ -299,6 +300,7 @@ fi
 
 # --- 5: the session ---------------------------------------------------------------------------
 tpid=""
+apid=""
 start_thunar() {
 	echo "XFCE thunar start: ${THUNAR} ${THUNAR_DIR} t=${SECONDS}"
 	"${THUNAR}" "${THUNAR_DIR}" &
@@ -319,6 +321,11 @@ if [ -n "${sock}" ]; then
 			done
 			echo "XFCE session up panel=$(has_name org.xfce.Panel && echo registered || echo missing) t=${SECONDS}"
 			[ "${THUNAR_START}" = 1 ] && start_thunar
+			if [ -n "${XFCE_AUTOSTART:-}" ]; then
+				/bin/bash /bin/xfce-autostart.sh &
+				apid=$!
+				echo "XFCE autostart pid=${apid} items=${XFCE_AUTOSTART} t=${SECONDS}"
+			fi
 			;;
 	esac
 fi
@@ -369,6 +376,18 @@ done
 # --- 6: stop ----------------------------------------------------------------------------------
 lup=0
 alive "${lpid}" && lup=1
+if [ -n "${apid}" ] && alive "${apid}"; then
+	# XFCE_AUTOSTART's programs first, while their display is still there
+	kill -TERM "${apid}" 2>/dev/null
+	i=0
+	while alive "${apid}" && [ "${i}" -lt 20 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	alive "${apid}" && kill -KILL "${apid}" 2>/dev/null
+	wait "${apid}" 2>/dev/null
+	echo "XFCE autostart stopped rc=$? after_term_s=${i} t=${SECONDS}"
+fi
 if [ -n "${tpid}" ]; then
 	# Thunar saves nothing on SIGTERM; --quit asks the running instance (a remote command
 	# line, as THUNAR_SECOND). Without a display the remote cannot start: TERM then.

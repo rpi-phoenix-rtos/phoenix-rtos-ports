@@ -26,7 +26,7 @@
 #   G_API_TEXT       banner text for the API ("GLES" / "desktop GL")
 #   G_LAUNCHER_SRC   the launcher's source (the calling port's glue/); it execs /usr/bin/<G_ENGINE>,
 #                    rewritten here to /usr/bin/<G_ENGINE>-drm
-#   G_LAUNCHER       the launcher's base name; installed as /usr/bin/<G_LAUNCHER>-drm
+#   G_LAUNCHER       the launcher's name, the command users type; installed as /usr/bin/<G_LAUNCHER>
 #   G_ENGINE_SYMS    engine symbols that must be present in the program (sanity)
 #
 # HOW:
@@ -212,7 +212,7 @@ g_main() {
 
 	for s in 'KMS/DRM Video Driver' '/dev/dri/' 'libdrm-phoenix:' 'DRMPHX_TRACE' 'DRMPHX sync' '/dev/kbd0' '/dev/audio0' \
 			'EGL_KHR_platform_gbm' 'EGL_KHR_platform_wayland' 'SDL Wayland video driver' 'KMS/DRM Video Driver' 'xdg_wm_base' \
-			'zxdg_decoration_manager_v1' 'zwp_linux_dmabuf_v1' 'kmsro' "${G_APP}: new GPU lane" "${G_APP} flipstat" \
+			'zxdg_decoration_manager_v1' 'zwp_linux_dmabuf_v1' 'kmsro' "${G_APP}: Phoenix-RTOS GPU stack" "${G_APP} flipstat" \
 			"${G_APP} swapstat"; do
 		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
 		log "  string '$s': $n"
@@ -279,11 +279,11 @@ g_main() {
 	install -m 755 "$elf" "${p}/prog/${engine_drm}"
 	install -m 644 "${elf}.map" "$out/link-cmd.txt" "$out/call-sites.txt" "$out/BUILD-INFO.txt" "${p}/share/${G_APP}/"
 	install -m 755 "$elf.stripped" "${p}/bin/${engine_drm}"
-	install -m 755 "$out/${launcher_drm}" "${p}/bin/${launcher_drm}"
+	install -m 755 "$out/${launcher_drm}" "${p}/bin/${G_LAUNCHER}"
 	if b_use rootfs; then
-		b_install "${p}/bin/${engine_drm}" "${p}/bin/${launcher_drm}" /usr/bin
+		b_install "${p}/bin/${engine_drm}" "${p}/bin/${G_LAUNCHER}" /usr/bin
 	fi
-	log "done: ${p}/bin/${engine_drm} (+ /usr/bin/${launcher_drm} launcher)"
+	log "done: ${p}/bin/${engine_drm} (+ /usr/bin/${G_LAUNCHER} launcher)"
 }
 
 # game_desktop_entry <game> <Name> <Comment>

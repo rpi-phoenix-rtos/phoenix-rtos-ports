@@ -6,7 +6,7 @@
 
 	name="labwc_desktop"
 	version="0.20.2"
-	desc="labwc 0.20 Wayland compositor on wlroots 0.20 + foot 1.28, fuzzel 1.15, swaybg 1.2, tinywl -- new GPU lane desktop"
+	desc="labwc 0.20 Wayland compositor on wlroots 0.20 + foot 1.28, fuzzel 1.15, swaybg 1.2 -- the Wayland desktop"
 
 	# Aggregate port: a lightweight Wayland desktop cross-built STATIC, as the coordination
 	# repo's tools/gpu-lane/labwc-drm/build.sh builds it (M7 stage 1 and 1b):
@@ -17,7 +17,7 @@
 	#   harfbuzz and GLib 2.56), tllist 1.1.0, fcft 3.3.3,
 	#   wlroots 0.20.2 (DRM + libinput + headless backends, GLES2 and pixman renderers,
 	#   GBM allocator, libseat session), labwc 0.20.2 (no Xwayland, SVG, icons, NLS; the
-	#   builtin keymap), foot 1.28.0, fuzzel 1.15.0, swaybg 1.2.2, and wlroots' tinywl.
+	#   builtin keymap), foot 1.28.0, fuzzel 1.15.0 and swaybg 1.2.2.
 	#
 	# The programs are linked by hand (meson's own links would need Mesa's static
 	# closure, which Mesa's .pc files do not describe).
@@ -61,7 +61,7 @@
 }
 
 # Install layout (${PREFIX_PORT_INSTALL}):
-#   bin/          labwc, foot, tinywl, fuzzel, swaybg: unstripped (addr2line) and -stripped
+#   bin/          labwc, foot, fuzzel, swaybg: unstripped (addr2line) and -stripped
 #   stage/ + stage.MANIFEST   the files for the target rootfs (new names only)
 #   SHA256SUMS
 # The libraries stay in the work tree (${PREFIX_PORT_BUILD}/out/prefix): nothing else
@@ -647,14 +647,6 @@ PY
 		echo "labwc_desktop: ${o}: $(stat -c %s "${BIN}/${o}") bytes, stripped $(stat -c %s "${BIN}/${o}-stripped")"
 	}
 
-	# tinywl (wlroots' own minimal compositor, MIT): the link probe of wlroots alone, and a
-	# fallback compositor
-	wayland-scanner server-header "${P}/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml" "${OBJ}/xdg-shell-protocol.h"
-	"${TC}-gcc" -O2 -g -std=c11 -D_POSIX_C_SOURCE=200809L "${TFLAGS[@]}" "${WLR_CFLAGS[@]}" -I"${OBJ}" \
-		-c "${out}/src/wlroots/tinywl/tinywl.c" -o "${OBJ}/tinywl.o"
-	_link_prog drm tinywl "${OBJ}/tinywl.o" -Wl,--whole-archive "${gallium}" -Wl,--no-whole-archive \
-		-Wl,--start-group "${WLR_LIBS[@]}" "${MESA_A[@]}" -Wl,--end-group -lm
-
 	# The text stack (labwc: pango/cairo/libxml2/GLib; foot: fcft)
 	local TEXT_LIBS=("${P}/lib/libpangocairo-1.0.a" "${P}/lib/libpangoft2-1.0.a" "${P}/lib/libpango-1.0.a"
 		"${P}/lib/libfribidi.a" "${D}/cairo/lib/libcairo.a" "${D}/harfbuzz/lib/libhbglib-phoenix.a"
@@ -703,7 +695,7 @@ PY
 
 	# --- verification (the tools build's gate) ---
 	local bad=0 o und n interp lw strs s bs
-	for o in labwc foot tinywl fuzzel swaybg; do
+	for o in labwc foot fuzzel swaybg; do
 		und="$("${TC}-nm" -u "${BIN}/${o}" || true)"
 		n=$(grep -c . <<<"${und}" || true)
 		interp=$("${TC}-readelf" -l "${BIN}/${o}" | grep -c INTERP || true)
@@ -744,29 +736,26 @@ PY
 		n=$(grep -cF -- "${s}" <<<"${strs}" || true)
 		[ "${n}" != 0 ] || { echo "labwc_desktop: foot strings '${s}': 0"; bad=1; }
 	done
-	for o in labwc-stripped foot-stripped tinywl-stripped fuzzel-stripped swaybg-stripped; do
+	for o in labwc-stripped foot-stripped fuzzel-stripped swaybg-stripped; do
 		bs="$(strings -a "${BIN}/${o}")"
 		for s in 'v3d-winsys:' phoenix_v3d_ioctl peek_next_scanout v3d-srv /dev/v3d-srv Xphoenix '[fbdev]' glamor_phoenix phxgl; do
 			n=$(grep -cF -- "${s}" <<<"${bs}" || true)
 			[ "${n}" = 0 ] || { echo "labwc_desktop: OLD-LANE string '${s}' in ${o}: ${n}"; bad=1; }
 		done
 	done
-	(cd "${BIN}" && sha256sum labwc-stripped foot-stripped tinywl-stripped fuzzel-stripped swaybg-stripped) >"${I}/SHA256SUMS"
+	(cd "${BIN}" && sha256sum labwc-stripped foot-stripped fuzzel-stripped swaybg-stripped) >"${I}/SHA256SUMS"
 	cat "${I}/SHA256SUMS"
 	[ "${bad}" = 0 ] || b_die "labwc_desktop: verification failed"
 
-	# --- the staging tree: stage/ mirrors the target rootfs (new names only; the m7a/m7b
-	# and m7c staging, docs/gpu-new-lane/M7-wayland-desktop.md in the coordination repo) ---
+	# --- the staging tree: stage/ mirrors the target rootfs. labwc's own configuration
+	# (/etc/xdg/labwc) is its XDG default; the XFCE session brings its own (xfce_wayland) ---
 	local ST="${I}/stage"
 	rm -rf "${ST}"
-	for o in labwc foot tinywl fuzzel swaybg; do
+	for o in labwc foot fuzzel swaybg; do
 		install -D -m 755 "${BIN}/${o}-stripped" "${ST}/bin/${o}"
 	done
-	install -D -m 755 "${F}/pi/labwc-desktop.sh" "${ST}/bin/labwc-desktop.sh"
-	install -D -m 755 "${F}/pi/m7b-colors.sh" "${ST}/bin/m7b-colors.sh"
 	for f in rc.xml menu.xml autostart environment; do
 		install -D -m 644 "${F}/conf/${f}" "${ST}/etc/xdg/labwc/${f}"
-		install -D -m 644 "${F}/conf/labwc-m7c/${f}" "${ST}/etc/xdg/labwc-m7c/${f}"
 	done
 	install -D -m 644 "${F}/conf/foot/foot.ini" "${ST}/etc/xdg/foot/foot.ini"
 	install -D -m 644 "${F}/conf/fuzzel/fuzzel.ini" "${ST}/etc/xdg/fuzzel/fuzzel.ini"

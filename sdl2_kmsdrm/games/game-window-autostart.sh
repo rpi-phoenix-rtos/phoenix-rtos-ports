@@ -7,7 +7,8 @@
 # Environment knobs (psh `export` before /bin/xfce-session; labwc passes them on):
 #   GAME_LIST   comma-separated list of <game>[:<seconds>] (default quakespasm): each is run
 #               through /bin/game-window.sh with GAME_SECS=<seconds> (none = until the session
-#               ends), in order; e.g. quake2:60,stk:90
+#               ends), in order; e.g. quake2:60,stk-race:150; none = no game (the session's
+#               other programs only, e.g. with XFCE_AUTOSTART)
 #   GAME_LIST_DELAY  seconds before the first one (default 15: the panel, the desktop and
 #               Thunar load first)
 # The session's LOGOUT_CMD /bin/game-window-quit.sh stops the running game and the list.
@@ -22,6 +23,10 @@ exec 2>&1
 R=${XDG_RUNTIME_DIR:-/tmp/xdg}
 rm -f "${R}/game-window.stop" "${R}/game-window.pid" "${R}/game-window.result"
 list=${GAME_LIST:-quakespasm}
+if [ "${list}" = none ]; then
+	echo "GAME-WINDOW autostart games=none"
+	exit 0
+fi
 echo "GAME-WINDOW autostart games=${list} delay=${GAME_LIST_DELAY:-15}s display=${WAYLAND_DISPLAY:-unset}"
 sleep "${GAME_LIST_DELAY:-15}"
 IFS=, read -r -a items <<< "${list}"

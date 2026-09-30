@@ -6,7 +6,7 @@
 
 	name="weston"
 	version="14.0.2"
-	desc="Weston 14 (DRM backend, GL renderer, kiosk shell; static) + libxkbcommon, libdisplay-info, libseat, the libinput/libudev/libevdev shims (new GPU lane)"
+	desc="Weston 14 (DRM backend, GL renderer, kiosk shell; static) + libxkbcommon, libdisplay-info, libseat, the libinput/libudev/libevdev shims"
 
 	# Aggregate port (as xorg_fonts): the anchor is Weston; libxkbcommon 1.7.0,
 	# libdisplay-info 0.2.0, seatd 0.9.1 and libinput 1.26.2 (its libinput.h only) are fetched

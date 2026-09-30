@@ -41,7 +41,7 @@ void __real_SDL_GL_SwapWindow(SDL_Window *window);
 void __wrap_SDL_GL_SwapWindow(SDL_Window *window);
 
 static const char stkdrm_banner[] =
-	"stk-drm: new GPU lane -- SDL 2.30.12 KMSDRM + Mesa 26.2 GBM/EGL (GLES) + libdrm-phoenix "
+	"stk-drm: Phoenix-RTOS GPU stack -- SDL 2.30.12 (KMSDRM + Wayland) + Mesa 26.2 GBM/EGL (GLES) + libdrm-phoenix "
 	"-> rpi4-kms (card0) + rpi4-v3d-async (renderD128)\n";
 
 static struct {
