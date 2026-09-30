@@ -86,7 +86,7 @@ p_build() {
 	local XCLOSURE="-Wl,--start-group ${XAW} ${XSYS} -Wl,--end-group"
 	local XCLOSURE_XKB="-Wl,--start-group ${XAW} -lxkbfile ${XSYS} -Wl,--end-group"
 
-	local CFLAGS_COMMON="--sysroot=$SYSROOT -I$PREFIX/include $APP_CFLAGS"
+	local CFLAGS_COMMON="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT -I$PREFIX/include $APP_CFLAGS"
 	local LDFLAGS_COMMON="--sysroot=$SYSROOT -static -L$PREFIX/lib -L$SYSROOT/lib"
 
 	# --- helpers ---------------------------------------------------------------

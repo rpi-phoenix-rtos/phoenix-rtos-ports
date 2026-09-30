@@ -103,7 +103,7 @@ p_build() {
 			--disable-toolbar --disable-double-buffer --disable-session-mgt \
 			--without-xpm --disable-tcap-fkeys --disable-tcap-query \
 			CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
-			CFLAGS="--sysroot=${SYSROOT} -std=gnu17 -I${XLIB_PREFIX}/include" \
+			CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=${SYSROOT} -std=gnu17 -I${XLIB_PREFIX}/include" \
 			LDFLAGS="--sysroot=${SYSROOT} -static -L${XLIB_PREFIX}/lib -L${SYSROOT}/lib")
 
 	# The no-curses termcap stub object, appended to the X link closure.
@@ -120,7 +120,7 @@ p_build() {
 	# "expected expression before '/' token"). \\\" survives one extra shell hop
 	# so gcc receives -DDEFSHELL_NAME="/bin/sh" (a real string literal).
 	make -C "${PREFIX_PORT_WORKDIR}" xterm \
-		CFLAGS="--sysroot=${SYSROOT} -std=gnu17 -include ${fdset_shim} -I${wctype_inc} -I${XLIB_PREFIX}/include -DDEFSHELL_NAME=\\\"${defshell}\\\" -DP_tmpdir=\\\"/tmp\\\"" \
+		CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=${SYSROOT} -std=gnu17 -include ${fdset_shim} -I${wctype_inc} -I${XLIB_PREFIX}/include -DDEFSHELL_NAME=\\\"${defshell}\\\" -DP_tmpdir=\\\"/tmp\\\"" \
 		LDFLAGS="--sysroot=${SYSROOT} -static -L${XLIB_PREFIX}/lib -L${SYSROOT}/lib" \
 		EXTRA_LOADFLAGS="${xclosure}"
 
