@@ -31,9 +31,11 @@
 	# under share/wayland-phoenix/, for ports that must recompile them with their
 	# own flags (labwc_desktop).
 	#
-	# This is the ONE libwayland of the system: Mesa's EGL wayland platform
-	# (mesa_drm), SDL's Wayland driver (sdl2_kmsdrm), GTK, XFCE and labwc all build
-	# on it. What a consumer finds in ${PORT_DEP_wayland_phoenix}:
+	# The libwayland the Wayland ports link: Mesa's EGL wayland platform
+	# (mesa_drm), SDL's Wayland driver (sdl2_kmsdrm), GTK and XFCE build on it
+	# (labwc_desktop still compiles the same libwayland source itself, with its own
+	# flags and wayland-protocols 1.49). What a consumer finds in
+	# ${PORT_DEP_wayland_phoenix}:
 	#
 	#   prefix/               everything above (lib/, include/, lib/pkgconfig/,
 	#                         share/pkgconfig/, share/wayland-protocols/,
