@@ -6,15 +6,16 @@
 
 	name="wayland_phoenix"
 	version="1.24.0"
-	desc="libwayland 1.24 + wayland-protocols 1.45 + libxkbcommon 1.7 + the Phoenix Wayland compat/shims"
+	desc="libwayland 1.24 + wayland-protocols 1.49 + libxkbcommon 1.13 + the Phoenix Wayland compat/shims"
 
 	# The Wayland base every new-lane Wayland program builds on, as the M6 Weston
 	# build (tools/gpu-lane/weston-drm/build.sh in the coordination repo) builds it:
 	#
 	#   libwayland 1.24.0     server, client, cursor, egl (+ patches/wayland: peer
 	#                         credentials and MSG_CMSG_CLOEXEC on Phoenix)
-	#   wayland-protocols 1.45
-	#   libxkbcommon 1.7.0    no X11/wayland tools, no registry
+	#   wayland-protocols 1.49 (+ patches/wayland-protocols: validate strictly only
+	#                         with wayland-scanner >= 1.25; the host's is 1.24)
+	#   libxkbcommon 1.13.2   no X11/wayland tools, no registry (bison >= 3.6)
 	#   libwlphx-compat.a     epoll/timerfd/signalfd/eventfd over poll, memfd_create
 	#                         over shmsrv (/shm; files/shmsrv/shm_proto.h is its wire
 	#                         protocol), msync/pipe2 stand-ins if libphoenix lacks
@@ -77,8 +78,8 @@
 # name|file|url|sha256 -- the anchor (wayland) is fetched by the framework
 _wlphx_pkgs() {
 	cat <<'EOF'
-wayland-protocols|wayland-protocols-1.45.tar.xz|https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/1.45/downloads/wayland-protocols-1.45.tar.xz|4d2b2a9e3e099d017dc8107bf1c334d27bb87d9e4aff19a0c8d856d17cd41ef0
-libxkbcommon|libxkbcommon-1.7.0.tar.xz|https://xkbcommon.org/download/libxkbcommon-1.7.0.tar.xz|65782f0a10a4b455af9c6baab7040e2f537520caa2ec2092805cdfd36863b247
+wayland-protocols|wayland-protocols-1.49.tar.xz|https://gitlab.freedesktop.org/-/project/2891/uploads/7ed597f0cad076a17fe36f8860596f8c/wayland-protocols-1.49.tar.xz|ec4c8f74942d6dff7ace8b4ce4764f0ef9ff618a935d974ea77edee2ad240b14
+libxkbcommon|xkbcommon-1.13.2.tar.gz|https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-1.13.2.tar.gz|acc4d5f7c3cbba5f9f8d08d8bdbeede84ecede46792f47929aa9321873385528
 libinput|libinput-1.26.2.tar.gz|https://gitlab.freedesktop.org/libinput/libinput/-/archive/1.26.2/libinput-1.26.2.tar.gz|5c1c4150f217fea1db2d1fd88e2607b2f1928cfde65c34da65a9f24dcfd69464
 EOF
 }
@@ -325,8 +326,15 @@ EOF
 		meson setup "${bd}" "${out}/src/${name}" --cross-file "${cf}" --prefix "${P}" \
 			--libdir lib --buildtype=debugoptimized -Db_staticpic=false --wrap-mode=nodownload "$@" \
 			>"${out}/${bname}-setup.log" 2>&1 || { tail -40 "${out}/${bname}-setup.log"; b_die "wayland_phoenix: ${name}: meson setup failed"; }
-		ninja -C "${bd}" -j"${jobs}" >"${out}/${bname}-ninja.log" 2>&1 || { grep -E -A5 'error|FAILED' "${out}/${bname}-ninja.log" | head -60; b_die "wayland_phoenix: ${name}: build failed"; }
-		ninja -C "${bd}" install >"${out}/${bname}-install.log" 2>&1 || { tail -20 "${out}/${bname}-install.log"; b_die "wayland_phoenix: ${name}: install failed"; }
+		# MESON_TARGETS: build only these (packages whose tests cannot be switched off), then
+		# install what was built
+		# shellcheck disable=SC2086
+		ninja -C "${bd}" -j"${jobs}" ${MESON_TARGETS:-} >"${out}/${bname}-ninja.log" 2>&1 || { grep -E -A5 'error|FAILED' "${out}/${bname}-ninja.log" | head -60; b_die "wayland_phoenix: ${name}: build failed"; }
+		if [ -n "${MESON_TARGETS:-}" ]; then
+			meson install -C "${bd}" --no-rebuild >"${out}/${bname}-install.log" 2>&1
+		else
+			ninja -C "${bd}" install >"${out}/${bname}-install.log" 2>&1
+		fi || { tail -20 "${out}/${bname}-install.log"; b_die "wayland_phoenix: ${name}: install failed"; }
 		echo "wayland_phoenix: ${name}: built ($(grep -c 'warning:' "${out}/${bname}-ninja.log" || true) warning line(s))"
 		touch "${out}/${name}.built"
 	}
@@ -344,7 +352,8 @@ EOF
 		-Dtests=false -Ddocumentation=false -Ddtd_validation=false
 	_pc_require_compat "${P}/lib/pkgconfig/wayland-server.pc" "${P}/lib/pkgconfig/wayland-client.pc"
 	_meson_pkg wayland-protocols wayland-protocols-build -Dtests=false
-	_meson_pkg libxkbcommon xkbcommon-build -Denable-x11=false -Denable-wayland=false -Denable-docs=false \
+	# libxkbcommon 1.13's tests cannot be switched off (and do not link on Phoenix)
+	MESON_TARGETS=libxkbcommon.a _meson_pkg libxkbcommon xkbcommon-build -Denable-x11=false -Denable-wayland=false -Denable-docs=false \
 		-Denable-tools=false -Denable-xkbregistry=false -Denable-bash-completion=false \
 		-Dxkb-config-root=/usr/share/X11/xkb -Dx-locale-root=/usr/share/X11/locale
 
