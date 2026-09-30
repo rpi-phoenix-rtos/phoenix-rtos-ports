@@ -94,13 +94,16 @@ p_build() {
 	make -k -C "${PREFIX_PORT_WORKDIR}" || true
 
 	# Install the built tools straight from src/. Filter to aarch64 ELF executables:
-	# that skips the .o/.a/scripts and the host-arch build helpers (make-prime-list).
+	# that skips the .o/.a/scripts. make-prime-list (generates primes.h) and getlimits
+	# (a test-suite helper) are cross-built too, but they are build/test helpers, not
+	# tools: never installed.
 	mkdir -p "${PREFIX_PROG}" "${PREFIX_PROG_STRIPPED}"
 	for f in "${PREFIX_PORT_WORKDIR}/src/"*; do
 		[ -f "${f}" ] || continue
 		case "${f}" in *.o | *.a | *.so | *.c | *.h | *.py | *.sh | *.x) continue ;; esac
-		"${CROSS}readelf" -h "${f}" 2>/dev/null | grep -q 'AArch64' || continue
 		name="$(basename "${f}")"
+		case "${name}" in make-prime-list | getlimits) continue ;; esac
+		"${CROSS}readelf" -h "${f}" 2>/dev/null | grep -q 'AArch64' || continue
 		cp -a "${f}" "${PREFIX_PROG}/${name}"
 		${STRIP} -o "${PREFIX_PROG_STRIPPED}/${name}" "${PREFIX_PROG}/${name}"
 		b_install "${PREFIX_PROG_TO_INSTALL}/${name}" /usr/bin
@@ -108,5 +111,5 @@ p_build() {
 	done
 
 	echo "coreutils: installed ${n} tools (full set, stty included)"
-	[ "${n}" -ge 100 ] || b_die "coreutils: only ${n} tools built (expected ~105) - build broke"
+	[ "${n}" -ge 100 ] || b_die "coreutils: only ${n} tools built (expected ~103) - build broke"
 }
