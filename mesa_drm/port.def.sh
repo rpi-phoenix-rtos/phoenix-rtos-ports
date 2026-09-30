@@ -6,7 +6,7 @@
 
 	name="mesa_drm"
 	version="26.2.0"
-	desc="Mesa 26.2 on the DRM path (new GPU lane): gallium v3d/vc4+kmsro, GBM, EGL, GLES/GL, v3dv — static"
+	desc="Mesa 26.2 on the DRM path: gallium v3d/vc4+kmsro, GBM, EGL, GLES/GL, v3dv — static"
 
 	# The release tarball (checked identical to `git archive mesa-26.2.0` = 9f0a761020b, the
 	# base of the old lane's fork).

@@ -6,7 +6,7 @@
 
 	name="quake3_drm"
 	version="1.32"
-	desc="quake3e-drm + quake3-drm launcher: the quake3 port's engine linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL desktop GL)"
+	desc="quake3e-drm + the quake3 launcher: the quake3 port's engine linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL desktop GL)"
 
 	# The quake3 port's archive (quake3e at its pinned commit). This clone RELINKS the quake3
 	# port's objects; the archive is extracted only because every framework port has one.
@@ -26,8 +26,7 @@
 	conflicts="quake3_drm!=${version}"
 	depends="quake3 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/quake3e-drm and its launcher /usr/bin/quake3-drm into the image,
-	# the launcher also as /usr/bin/quake3
+	# rootfs: install /usr/bin/quake3e-drm and its launcher /usr/bin/quake3 into the image
 	# (the XFCE menu entry "Quake III Arena" = /bin/game-window.sh quake3: the same program in a
 	# window of the desktop)
 	iuse="rootfs"
@@ -69,12 +68,6 @@ p_build() {
 	G_LAUNCHER=quake3
 	G_ENGINE_SYMS="GLimp_Init GLimp_EndFrame GetRefAPI Com_Init VM_Compile"
 	g_main
-
-	# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
-	# image). P4 gives the programs the plain names themselves.
-	if b_use rootfs; then
-		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake3-drm" "${PREFIX_FS}/root/usr/bin/quake3"
-	fi
 
 	game_desktop_entry quake3 "Quake III Arena" "Quake III Arena (quake3e) in a window on the desktop"
 }

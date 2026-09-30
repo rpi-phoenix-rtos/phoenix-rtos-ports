@@ -6,7 +6,7 @@
 
 	name="video_player"
 	version="6.1"
-	desc="Video players on the new GPU lane: ffplay (FFmpeg 6.1, SDL KMSDRM + Wayland), /bin/video-play, gtk-video (GTK 3)"
+	desc="Video players: ffplay (FFmpeg 6.1, SDL KMSDRM + Wayland), /bin/video-play, gtk-video (GTK 3)"
 
 	# The ffmpeg port's release tarball (same archive, same sha256). This port builds its
 	# own copy with the PLAYER component set (+ libavfilter, libswscale, libswresample):

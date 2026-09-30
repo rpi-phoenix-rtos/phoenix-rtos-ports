@@ -5,7 +5,10 @@
 #
 #     /bin/bash /bin/game-window.sh <game> [extra game arguments]
 #
-#   game   quakespasm (qs) | quake2 (q2) | quake3 (q3) | stk
+#   game   quakespasm (qs) | quake2 (q2) | quake3 (q3) | stk, or a preset:
+#          quake2-demo  Quake II playing the recorded demo of the pak (q2demo1.dm2)
+#          stk-race     SuperTuxKart: an AI race on hacienda (the stk launcher's `race`: four
+#                       AI karts, two laps, then the game ends by itself)
 #
 # The games are the image's only builds of them (quakespasm-drm, quake2, quake3, stk): SDL 2.30
 # programs with SDL's Wayland AND KMSDRM video drivers on Mesa's EGL (GBM + Wayland). From psh
@@ -19,7 +22,8 @@
 #   GAME_SECS       N = ask the game to quit (SIGTERM = SDL_QUIT, its own clean shutdown) after
 #                   N seconds; 0 (default) = run until the window is closed or the game is quit
 #   GAME_DELAY      seconds to wait before starting (default 0)
-#   GAME_ARGS       arguments that replace the per-game defaults below (one word per argument)
+#   GAME_ARGS       arguments that replace the per-game defaults below (one word per argument;
+#                   psh's `export` cannot give it several: use a preset or the extra arguments)
 #   WAYLAND_DISPLAY / XDG_RUNTIME_DIR   as set by labwc for its clients; otherwise the first
 #                   socket in /tmp/xdg (the session's XDG_RUNTIME_DIR) is used
 #
@@ -58,20 +62,23 @@ case "${GAME}" in
 		# first, and quakespasm takes the FIRST -width/-height
 		GAME=quakespasm; BIN=/usr/bin/quakespasm-drm; APP=quakespasm
 		DEF=(-window -width "${W}" -height "${H}") ;;
-	quake2|q2)
-		# the launcher ram-stages /usr/share/quake2 to /tmp/quake2 and plays demo1; later
-		# +set arguments win (yquake2 runs every +set before the first frame)
-		GAME=quake2; BIN=/usr/bin/quake2; APP=quake2
-		DEF=(+set vid_fullscreen 0 +set r_mode -1 +set r_customwidth "${W}" +set r_customheight "${H}") ;;
+	quake2|q2|quake2-demo)
+		# the launcher ram-stages /usr/share/quake2 to /tmp/quake2 and loads the demo1 level
+		# (or the caller's +map/+demomap instead); later +set arguments win (yquake2 runs every
+		# +set before the first frame)
+		BIN=/usr/bin/quake2; APP=quake2
+		DEF=(+set vid_fullscreen 0 +set r_mode -1 +set r_customwidth "${W}" +set r_customheight "${H}")
+		if [ "${GAME}" = quake2-demo ]; then DEF+=(+demomap q2demo1.dm2); else GAME=quake2; fi ;;
 	quake3|q3)
 		GAME=quake3; BIN=/usr/bin/quake3; APP=quake3
 		DEF=(+set r_fullscreen 0 +set r_mode -1 +set r_customWidth "${W}" +set r_customHeight "${H}" +map q3dm1) ;;
-	stk)
+	stk|stk-race)
 		# the launcher drops its --screensize default for ours; --windowed is read after --fullscreen
 		BIN=/bin/stk; APP=stk
-		DEF=(--windowed "--screensize=${W}x${H}") ;;
+		DEF=(--windowed "--screensize=${W}x${H}")
+		[ "${GAME}" = stk-race ] && DEF+=(race) ;;
 	*)
-		echo "GAME-WINDOW game=${GAME} FAIL unknown game (quakespasm|quake2|quake3|stk)"
+		echo "GAME-WINDOW game=${GAME} FAIL unknown game (quakespasm|quake2|quake2-demo|quake3|stk|stk-race)"
 		exit 2 ;;
 esac
 export SDL_VIDEO_WAYLAND_WMCLASS="${APP}"

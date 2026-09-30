@@ -6,7 +6,7 @@
 
 	name="yquake2_drm"
 	version="8.71"
-	desc="yquake2-drm + quake2-drm launcher: the yquake2 port's engine linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL/GLES)"
+	desc="yquake2-drm + the quake2 launcher: the yquake2 port's engine linked on the GPU stack (SDL KMSDRM + Mesa GBM/EGL/GLES)"
 
 	# The yquake2 port's archive. This clone RELINKS the yquake2 port's objects (it compiles
 	# nothing of the engine); the archive is extracted only because every framework port has
@@ -27,8 +27,7 @@
 	conflicts="yquake2_drm!=${version}"
 	depends="yquake2 sdl2_kmsdrm mesa_drm[opengl] libdrm_phoenix zlib"
 
-	# rootfs: install /usr/bin/yquake2-drm and its launcher /usr/bin/quake2-drm into the image,
-	# the launcher also as /usr/bin/quake2
+	# rootfs: install /usr/bin/yquake2-drm and its launcher /usr/bin/quake2 into the image
 	# (the XFCE menu entry "Quake II" = /bin/game-window.sh quake2: the same program in a
 	# window of the desktop)
 	iuse="rootfs"
@@ -70,12 +69,6 @@ p_build() {
 	G_LAUNCHER=quake2
 	G_ENGINE_SYMS="GL3_Init GL3_EndFrame gladLoadGLES2Loader GetRefAPI Qcommon_Init"
 	g_main
-
-	# TODO(TD-26): the plain command name runs this program (GPU migration P1: the default
-	# image). P4 gives the programs the plain names themselves.
-	if b_use rootfs; then
-		install -m 755 "${PREFIX_PORT_INSTALL}/bin/quake2-drm" "${PREFIX_FS}/root/usr/bin/quake2"
-	fi
 
 	game_desktop_entry quake2 "Quake II" "yQuake2 in a window on the desktop"
 }

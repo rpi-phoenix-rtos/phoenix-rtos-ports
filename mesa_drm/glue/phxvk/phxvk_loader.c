@@ -154,7 +154,7 @@ static void phxvk_start(void)
 	VkResult r;
 
 	phxvk.started = 1;
-	phxvk_say("phxvk: new GPU lane -- Mesa 26.2 v3dv (static ICD) + VK_KHR_display + libdrm-phoenix "
+	phxvk_say("phxvk: Phoenix-RTOS GPU stack -- Mesa 26.2 v3dv (static ICD) + VK_KHR_display + libdrm-phoenix "
 		"-> rpi4-kms (card0) + rpi4-v3d-async (renderD128/card1)\n");
 	r = vk_icdNegotiateLoaderICDInterfaceVersion(&v);
 	phxvk.icd_version = v;

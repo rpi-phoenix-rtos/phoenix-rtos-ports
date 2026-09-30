@@ -16,9 +16,14 @@
  * DATADIR/../../stk-assets; we set it explicitly to avoid relying on `../..`
  * path resolution over NFS.
  *
- * Video args mirror the Quake launchers: the Phoenix /dev/fb0 is 1920x1080-only,
- * so force --screensize=1920x1080 --fullscreen. Any extra user args are appended
- * after and win (e.g. `stk --disable-addons`). Install as /bin/stk.
+ * Video args mirror the Quake launchers: --screensize=1920x1080 --fullscreen, the
+ * display's native mode. Extra user args are passed on, and an option the user gives
+ * replaces the launcher's default (e.g. `stk --screensize=1280x720`). Install as /bin/stk.
+ *
+ * `race` (anywhere in the arguments) stands for an AI race with no input:
+ * --track=hacienda --numkarts=4 --profile-laps=2 (STK's profile mode: four AI karts, two
+ * laps, then STK exits). One word, so it also works where arguments cannot contain spaces
+ * (psh's `export`, /bin/game-window.sh stk-race).
  *
  * SAVEDIR is /tmp (RAM), so it is wiped every boot and STK sees a "first run"
  * each time: with no saved player profile PlayerManager::getCurrentPlayer()
@@ -182,6 +187,14 @@ static int user_overrides(const char *base_arg, int argc, char **argv)
 }
 
 
+/* The `race` preset: an AI race on hacienda that ends by itself. */
+static char *const RACE_ARGS[] = {
+	"--track=hacienda",
+	"--numkarts=4",
+	"--profile-laps=2",
+};
+
+
 int main(int argc, char **argv)
 {
 	/* STK writes its config/players/hardware-detection files into SAVEDIR; make
@@ -241,20 +254,33 @@ int main(int argc, char **argv)
 		"--disable-addon-tracks",
 	};
 	const int nbase = (int)(sizeof(base) / sizeof(base[0]));
-	char **a = calloc((size_t)(nbase + argc + 1), sizeof(char *));
-	int i, n = 0;
+	const int nrace = (int)(sizeof(RACE_ARGS) / sizeof(RACE_ARGS[0]));
+	char **uargv = calloc((size_t)(argc * nrace + 1), sizeof(char *));
+	char **a = calloc((size_t)(nbase + argc * nrace + 1), sizeof(char *));
+	int i, j, uargc = 0, n = 0;
 
-	if (a == NULL) {
+	if (a == NULL || uargv == NULL) {
 		fprintf(stderr, "stk: out of memory\n");
 		return 1;
 	}
+	/* the caller's arguments, with `race` expanded */
+	for (i = 0; i < argc; i++) {
+		if (i > 0 && strcmp(argv[i], "race") == 0) {
+			for (j = 0; j < nrace; j++) {
+				uargv[uargc++] = RACE_ARGS[j];
+			}
+		}
+		else {
+			uargv[uargc++] = argv[i];
+		}
+	}
 	for (i = 0; i < nbase; i++) {
-		if (!user_overrides(base[i], argc, argv)) {
+		if (!user_overrides(base[i], uargc, uargv)) {
 			a[n++] = base[i];
 		}
 	}
-	for (i = 1; i < argc; i++) {
-		a[n++] = argv[i]; /* caller's value is the only one passed for that option */
+	for (i = 1; i < uargc; i++) {
+		a[n++] = uargv[i]; /* caller's value is the only one passed for that option */
 	}
 	a[n] = NULL;
 

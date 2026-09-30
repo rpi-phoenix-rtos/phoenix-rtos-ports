@@ -6,7 +6,7 @@
 
 	name="libxshmfence_phoenix"
 	version="1.3.2"
-	desc="libxshmfence with the Phoenix-RTOS backend (DRI3 fences as polled words in shmsrv memory, new GPU lane G16)"
+	desc="libxshmfence with the Phoenix-RTOS backend (DRI3 fences as polled words in shmsrv memory)"
 
 	source="https://www.x.org/releases/individual/lib"
 	archive_filename="libxshmfence-${version}.tar.xz"

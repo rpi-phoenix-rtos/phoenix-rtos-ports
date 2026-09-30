@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <!--
-  labwc on Phoenix-RTOS (new GPU lane, M7 m7c-desktop): stage as /etc/xdg/labwc-m7c/rc.xml
+  labwc on Phoenix-RTOS (M7 m7c-desktop): stage as /etc/xdg/labwc-m7c/rc.xml
   (the m7a/m7b configuration in /etc/xdg/labwc/ stays as registered).
   labwc's built-in theme (no theme directory on the export), DejaVu Sans through
   fontconfig, server-side decorations, the Openbox-style default key and mouse

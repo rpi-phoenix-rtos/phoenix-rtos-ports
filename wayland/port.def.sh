@@ -6,7 +6,7 @@
 
 	name="wayland"
 	version="1.24.0"
-	desc="libwayland 1.24 + wayland-protocols 1.45 + the wlphx-compat libphoenix-gap library + shmsrv (new GPU lane)"
+	desc="libwayland 1.24 + wayland-protocols 1.45 + the wlphx-compat libphoenix-gap library + shmsrv"
 
 	source="https://gitlab.freedesktop.org/wayland/wayland/-/releases/${version}/downloads"
 	archive_filename="wayland-${version}.tar.xz"

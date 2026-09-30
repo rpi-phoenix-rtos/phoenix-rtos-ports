@@ -6,7 +6,7 @@
 
 	name="labwc_desktop"
 	version="0.20.2"
-	desc="labwc 0.20 Wayland compositor on wlroots 0.20 + foot 1.28, fuzzel 1.15, swaybg 1.2, tinywl -- new GPU lane desktop"
+	desc="labwc 0.20 Wayland compositor on wlroots 0.20 + foot 1.28, fuzzel 1.15, swaybg 1.2, tinywl -- the Wayland desktop"
 
 	# Aggregate port: a lightweight Wayland desktop cross-built STATIC, as the coordination
 	# repo's tools/gpu-lane/labwc-drm/build.sh builds it (M7 stage 1 and 1b):

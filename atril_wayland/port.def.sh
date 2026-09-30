@@ -6,7 +6,7 @@
 
 	name="atril_wayland"
 	version="1.28.7"
-	desc="Atril 1.28 PDF viewer (Poppler 26.09 backend built in) on the GTK 3 Wayland stack -- new GPU lane desktop"
+	desc="Atril 1.28 PDF viewer (Poppler 26.09 backend built in) on the GTK 3 Wayland stack"
 
 	# Aggregate port: Atril, MATE's GTK 3 document viewer, with the Poppler PDF backend,
 	# cross-built STATIC on the GTK 3 Wayland-only stack of gtk3_wayland, as the

@@ -6,7 +6,7 @@
 
 	name="dbus"
 	version="1.16.2"
-	desc="D-Bus 1.16 message bus (dbus-daemon, libdbus-1, tools) -- new GPU lane session bus"
+	desc="D-Bus 1.16 message bus (dbus-daemon, libdbus-1, tools) -- the desktop session bus"
 	cpe23="cpe:2.3:a:freedesktop:dbus:${version}:*:*:*:*:*:*:*"
 
 	source="https://dbus.freedesktop.org/releases/dbus/"

@@ -6,7 +6,7 @@
 
 	name="gtk3_wayland"
 	version="3.24.52"
-	desc="GTK 3.24 (Wayland backend only) + GLib 2.88/GIO, pango 1.54, cairo 1.18, gdk-pixbuf, atk, gtk-layer-shell (new GPU lane)"
+	desc="GTK 3.24 (Wayland backend only) + GLib 2.88/GIO, pango 1.54, cairo 1.18, gdk-pixbuf, atk, gtk-layer-shell"
 
 	# Aggregate port: GTK 3 with ONLY the Wayland GDK backend and the libraries it
 	# needs that the ports prefix lacks or has too old, as the coordination repo's
