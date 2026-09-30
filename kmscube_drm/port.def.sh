@@ -6,7 +6,7 @@
 
 	name="kmscube_drm"
 	version="0.0.1"
-	desc="kmscube (upstream, MIT) on the new GPU lane: GBM + EGL + GLES3 on rpi4-kms / rpi4-v3d-async -- the lane's smoke test"
+	desc="kmscube (upstream, MIT): GBM + EGL + GLES3 on rpi4-kms / rpi4-v3d-async -- the GPU stack's smoke test"
 
 	# GitLab commit archive (checked identical to `git archive` of the pinned commit)
 	commit="f60e50e887d3c49e91ac9b06d8199b36152632fa"

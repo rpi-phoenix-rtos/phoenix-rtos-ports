@@ -212,7 +212,7 @@ EOF
 	# the SDL lineage carries the frame-pacing order (patches/0009) -- linked, not used by vkQuake
 	GAMEDRM_OBJDUMP="${NL_OBJDUMP}" bash "${GD}/check-swap-order.sh" "${elf}" || bad=1
 	for s in 'KMS/DRM Video Driver' '/dev/dri/' 'libdrm-phoenix:' 'DRMPHX_TRACE' 'DRMPHX sync' '/dev/kbd0' '/dev/audio0' \
-			'VK_KHR_display' 'VK_KHR_swapchain' 'V3D %d.%d.%d.%d' 'phxvk: new GPU lane' 'vkquake-drm: new GPU lane' \
+			'VK_KHR_display' 'VK_KHR_swapchain' 'V3D %d.%d.%d.%d' 'phxvk: Phoenix-RTOS GPU stack' 'vkquake-drm: Phoenix-RTOS GPU stack' \
 			'vkquake-drm flipstat' 'vkquake-drm presentstat' "Vulkan couldn't find an appropriate plane" 'vkQuake'; do
 		[ "$(nl_count_strings "${elf}.stripped" "${s}")" != 0 ] || { echo "string '${s}': 0"; bad=1; }
 	done

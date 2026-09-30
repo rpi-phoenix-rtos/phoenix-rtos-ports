@@ -201,7 +201,7 @@ p_build() {
 
 	for s in 'KMS/DRM Video Driver' '/dev/dri/' 'libdrm-phoenix:' 'DRMPHX_TRACE' 'DRMPHX sync' '/dev/kbd0' '/dev/audio0' \
 			'EGL_KHR_platform_gbm' 'EGL_KHR_platform_wayland' 'SDL Wayland video driver' 'xdg_wm_base' \
-			'zxdg_decoration_manager_v1' 'zwp_linux_dmabuf_v1' 'kmsro' 'stk-drm: new GPU lane' 'stk-drm flipstat' 'stk-drm swapstat'; do
+			'zxdg_decoration_manager_v1' 'zwp_linux_dmabuf_v1' 'kmsro' 'stk-drm: Phoenix-RTOS GPU stack' 'stk-drm flipstat' 'stk-drm swapstat'; do
 		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
 		log "  string '$s': $n"
 		[ "$n" != 0 ] || bad=1

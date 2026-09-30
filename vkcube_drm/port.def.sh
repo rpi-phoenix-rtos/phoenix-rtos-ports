@@ -88,7 +88,7 @@ p_build() {
 			__wrap_mmap __wrap_ioctl drmPhoenixMmap drm_phoenix_ioctl drmModeAtomicCommit drmCrtcQueueSequence; do
 		nl_has_sym "${out}/vkcube-drm" "${s}" || { echo "symbol ${s}: NO"; bad=1; }
 	done
-	for s in 'phxvk: new GPU lane' 'V3D %d.%d.%d.%d' VK_KHR_display VK_KHR_swapchain 'libdrm-phoenix:' DRMPHX_TRACE \
+	for s in 'phxvk: Phoenix-RTOS GPU stack' 'V3D %d.%d.%d.%d' VK_KHR_display VK_KHR_swapchain 'libdrm-phoenix:' DRMPHX_TRACE \
 			/dev/dri/card0 /dev/dri/renderD128 /dev/dri/card1 /kmsbuf 'brcm,2711-v3d'; do
 		echo "vkcube-drm strings '${s}': $(nl_count_strings "${out}/vkcube-drm.stripped" "${s}")"
 	done

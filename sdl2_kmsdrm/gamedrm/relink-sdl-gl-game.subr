@@ -212,7 +212,7 @@ g_main() {
 
 	for s in 'KMS/DRM Video Driver' '/dev/dri/' 'libdrm-phoenix:' 'DRMPHX_TRACE' 'DRMPHX sync' '/dev/kbd0' '/dev/audio0' \
 			'EGL_KHR_platform_gbm' 'EGL_KHR_platform_wayland' 'SDL Wayland video driver' 'KMS/DRM Video Driver' 'xdg_wm_base' \
-			'zxdg_decoration_manager_v1' 'zwp_linux_dmabuf_v1' 'kmsro' "${G_APP}: new GPU lane" "${G_APP} flipstat" \
+			'zxdg_decoration_manager_v1' 'zwp_linux_dmabuf_v1' 'kmsro' "${G_APP}: Phoenix-RTOS GPU stack" "${G_APP} flipstat" \
 			"${G_APP} swapstat"; do
 		n="$(grep -acF -- "$s" "$elf.stripped" || true)"
 		log "  string '$s': $n"

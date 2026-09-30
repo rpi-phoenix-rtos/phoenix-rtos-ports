@@ -6,7 +6,7 @@
 
 	name="wayland_phoenix"
 	version="1.24.0"
-	desc="libwayland 1.24 + wayland-protocols 1.45 + libxkbcommon 1.7 + the Phoenix Wayland compat/shims (new GPU lane base)"
+	desc="libwayland 1.24 + wayland-protocols 1.45 + libxkbcommon 1.7 + the Phoenix Wayland compat/shims"
 
 	# The Wayland base every new-lane Wayland program builds on, as the M6 Weston
 	# build (tools/gpu-lane/weston-drm/build.sh in the coordination repo) builds it:

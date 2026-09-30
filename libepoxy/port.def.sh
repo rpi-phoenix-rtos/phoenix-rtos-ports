@@ -6,7 +6,7 @@
 
 	name="libepoxy"
 	version="1.5.10"
-	desc="libepoxy (GL/EGL dispatch) built static with a static-EGL dispatch patch, against mesa_drm (new GPU lane)"
+	desc="libepoxy (GL/EGL dispatch) built static with a static-EGL dispatch patch, against mesa_drm"
 
 	# GitHub tag archive, served as "1.5.10.tar.gz", saved under the descriptive name
 	source="https://github.com/anholt/libepoxy/archive/refs/tags"

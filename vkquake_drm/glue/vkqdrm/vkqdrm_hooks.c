@@ -63,7 +63,7 @@ void __wrap_SDL_UnloadObject(void *handle);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkqdrm_GetInstanceProcAddr(VkInstance instance, const char *name);
 
 static const char vkqdrm_banner[] =
-	"vkquake-drm: new GPU lane -- SDL 2.30.12 KMSDRM (Vulkan, VK_KHR_display) + Mesa 26.2 v3dv (static ICD via phxvk) "
+	"vkquake-drm: Phoenix-RTOS GPU stack -- SDL 2.30.12 KMSDRM (Vulkan, VK_KHR_display) + Mesa 26.2 v3dv (static ICD via phxvk) "
 	"+ libdrm-phoenix -> rpi4-kms (card0) + rpi4-v3d-async (renderD128)\n";
 
 static const char vkqdrm_vulkan_handle;   /* the sentinel "library handle" */

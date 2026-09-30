@@ -8,7 +8,7 @@
 	# upstream libdrm 2.4.134-16-gb97cbde (main, 16 commits after the 2.4.134 tag); the
 	# resolver needs a dotted version, the exact commit is in `commit`/archive_filename.
 	version="2.4.134"
-	desc="libdrm (upstream) + the Phoenix-RTOS backend: DRM ioctls served by rpi4-kms / rpi4-v3d-async (new GPU lane)"
+	desc="libdrm (upstream) + the Phoenix-RTOS backend: DRM ioctls served by rpi4-kms / rpi4-v3d-async"
 
 	# GitLab commit archive (content-addressed by the commit; checked byte-identical to
 	# `git archive b97cbde` of the freedesktop repository).
