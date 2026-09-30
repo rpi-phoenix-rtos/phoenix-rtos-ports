@@ -15,7 +15,8 @@
 	#                         credentials and MSG_CMSG_CLOEXEC on Phoenix)
 	#   wayland-protocols 1.49 (+ patches/wayland-protocols: validate strictly only
 	#                         with wayland-scanner >= 1.25; the host's is 1.24)
-	#   libxkbcommon 1.13.2   no X11/wayland tools, no registry (bison >= 3.6)
+	#   libxkbcommon 1.13.2   no X11/wayland tools, no registry (bison >= 3.6); reads
+	#                         its XKB data from /usr/share/X11/xkb (xkeyboard_config)
 	#   libwlphx-compat.a     epoll/timerfd/signalfd/eventfd over poll, memfd_create
 	#                         over shmsrv (/shm; files/shmsrv/shm_proto.h is its wire
 	#                         protocol), msync/pipe2 stand-ins if libphoenix lacks
@@ -26,7 +27,8 @@
 	#                         (files/shims, BSD-3-Clause); <linux/input.h> over
 	#                         FreeBSD's BSD-2 input-event-codes.h (files/, pinned)
 	#   keymap-us.xkb         evdev/pc105/us, compiled once on a build host
-	#                         (files/keymap-us.xkb; see below)
+	#                         (files/keymap-us.xkb; see below): the keymap built into
+	#                         labwc and GTK, which need no XKB data to start
 	#
 	# It also installs those glue SOURCES and the M6 seatd patch set under
 	# share/wayland-phoenix/, for ports that must recompile them with their own
@@ -319,7 +321,10 @@ EOF
 		local name="$1" bname="$2"
 		shift 2
 		local bd="${out}/${bname}"
-		if [ -f "${out}/${name}.built" ]; then
+		# The stamp records the configuration it was built with: changed meson options
+		# rebuild the package (the extract stamp covers only the sources and patches).
+		local key="${cf} ${MESON_TARGETS:-} $*"
+		if [ -f "${out}/${name}.built" ] && [ "$(cat "${out}/${name}.built")" = "${key}" ]; then
 			echo "wayland_phoenix: ${name}: up to date"
 			return 0
 		fi
@@ -337,7 +342,7 @@ EOF
 			ninja -C "${bd}" install >"${out}/${bname}-install.log" 2>&1
 		fi || { tail -20 "${out}/${bname}-install.log"; b_die "wayland_phoenix: ${name}: install failed"; }
 		echo "wayland_phoenix: ${name}: built ($(grep -c 'warning:' "${out}/${bname}-ninja.log" || true) warning line(s))"
-		touch "${out}/${name}.built"
+		printf '%s' "${key}" >"${out}/${name}.built"
 	}
 	# Every installed wayland-{server,client}.pc pulls the compat archive (epoll & co. for
 	# the event loop, --wrap=close) into whatever links it.
@@ -353,10 +358,18 @@ EOF
 		-Dtests=false -Ddocumentation=false -Ddtd_validation=false
 	_pc_require_compat "${P}/lib/pkgconfig/wayland-server.pc" "${P}/lib/pkgconfig/wayland-client.pc"
 	_meson_pkg wayland-protocols wayland-protocols-build -Dtests=false
-	# libxkbcommon 1.13's tests cannot be switched off (and do not link on Phoenix)
+	# libxkbcommon 1.13's tests cannot be switched off (and do not link on Phoenix).
+	# Every lookup path it compiles in names the TARGET filesystem, never ${P}: the XKB
+	# root (xkeyboard_config installs /usr/share/X11/xkb), the system extra path
+	# (default: prefix/etc/xkb), the X locale root (xorg_libs) and the legacy root, a
+	# fallback derived from prefix/datadir that no option sets -- hence the absolute
+	# datadir (nothing this configuration installs goes to datadir). The extension
+	# directories are compiled in only when pkg-config finds an xkeyboard-config .pc,
+	# which the restricted pkg-config here never does.
 	MESON_TARGETS=libxkbcommon.a _meson_pkg libxkbcommon xkbcommon-build -Denable-x11=false -Denable-wayland=false -Denable-docs=false \
 		-Denable-tools=false -Denable-xkbregistry=false -Denable-bash-completion=false \
-		-Dxkb-config-root=/usr/share/X11/xkb -Dx-locale-root=/usr/share/X11/locale
+		-Dxkb-config-root=/usr/share/X11/xkb -Dxkb-config-extra-path=/etc/xkb \
+		-Dx-locale-root=/usr/share/X11/locale -Ddatadir=/usr/share
 
 	# --- shims: libudev (fixed device table), libinput-phoenix (usbkbd/usbmouse/phxhid),
 	# libevdev. Only libinput.h is used from the libinput tarball (MIT); the
@@ -386,7 +399,8 @@ EOF
 	_shim_pc libinput 1.26.2 "-linput -ludev" "weston-drm shim: libinput-phoenix (usbkbd, usbmouse)"
 	_shim_pc libevdev 1.13.0 -levdev "weston-drm shim: libevdev_event_code_from_name"
 
-	# --- the baked default keymap (Phoenix has no xkeyboard-config) ---
+	# --- the baked default keymap (labwc_desktop, gtk3_wayland: a keymap that needs no
+	# XKB data files; the data itself is the xkeyboard_config port's) ---
 	# files/keymap-us.xkb is the output of `xkbcli compile-keymap --rules evdev --model
 	# pc105 --layout us` (libxkbcommon 1.13.2 over the build host's xkeyboard-config, MIT)
 	# that the labwc-drm (M7) build baked in -- committed so this build no longer depends on the
@@ -408,6 +422,12 @@ EOF
 		[ -f "${P}/lib/${l}" ] || b_die "wayland_phoenix: ${l} not installed"
 	done
 	[ -f "${P}/share/pkgconfig/wayland-protocols.pc" ] || b_die "wayland_phoenix: wayland-protocols.pc not installed"
+	# no build path in what the programs link (the debug info, stripped from the shipped
+	# programs, names the work tree by design)
+	"${TC}-strip" --strip-debug -o "${out}/libxkbcommon.nodebug.a" "${P}/lib/libxkbcommon.a"
+	if grep -qaF "${B}" "${out}/libxkbcommon.nodebug.a"; then
+		b_die "wayland_phoenix: libxkbcommon.a compiles in a build path ($(grep -aoF "${B}" "${out}/libxkbcommon.nodebug.a" | head -1)...)"
+	fi
 	local syms
 	syms="$("${TC}-nm" -g --defined-only "${P}/lib/libwayland-server.a" 2>/dev/null || true)"
 	grep -qE ' T wl_display_create$' <<<"${syms}" || b_die "wayland_phoenix: libwayland-server.a has no wl_display_create"

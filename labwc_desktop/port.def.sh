@@ -537,7 +537,8 @@ EOF
 	_shim_pc libinput 1.26.2 "-linput -ludev" "weston-drm shim: libinput-phoenix (usbkbd, usbmouse)"
 	_shim_pc libevdev 1.13.0 -levdev "weston-drm shim: libevdev_event_code_from_name"
 
-	# --- the baked keymap (Phoenix has no xkeyboard-config): wayland_phoenix's keymap-us.xkb,
+	# --- the baked keymap (labwc patch 0002: used only when the rule names do not compile,
+	# i.e. without the xkeyboard_config port's data): wayland_phoenix's keymap-us.xkb,
 	# `xkbcli-compile-keymap --rules evdev --model pc105 --layout us` of libxkbcommon 1.13.2 ---
 	local km="${WLR}/keymap-us.xkb"
 	grep -q 'xkb_keymap' "${km}" || b_die "labwc_desktop: ${km} is not a keymap"
