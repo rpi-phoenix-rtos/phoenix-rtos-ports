@@ -1,0 +1,41 @@
+From bfc99a746ea2827b3b3c51651582b38d0cac83f0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Wed, 30 Sep 2026 19:41:42 +0200
+Subject: [PATCH] launcher: no file monitor backend is not critical
+
+The launcher watches its config directory for edited .desktop files.
+On a GIO without a local file monitor backend (no inotify, kqueue or
+fen -- Phoenix-RTOS) g_file_monitor_directory() fails with
+G_IO_ERROR_FAILED "Unable to find default local file monitor type",
+and every launcher printed "liblauncher-CRITICAL **: Failed to start
+file monitor" at startup. The launcher works without it: it just does
+not notice desktop files edited from outside the panel. Log that case
+(and G_IO_ERROR_NOT_SUPPORTED) at debug level; anything else stays
+critical.
+---
+ plugins/launcher/launcher.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/plugins/launcher/launcher.c b/plugins/launcher/launcher.c
+index adf6df8..21e7ba5 100644
+--- a/plugins/launcher/launcher.c
++++ b/plugins/launcher/launcher.c
+@@ -1083,7 +1083,14 @@ launcher_plugin_construct (XfcePanelPlugin *panel_plugin)
+     }
+   else
+     {
+-      g_critical ("Failed to start file monitor: %s", error->message);
++      /* a GIO without a local file monitor backend (G_IO_ERROR_FAILED: "Unable to find
++       * default local file monitor type") or one that cannot watch this directory: the
++       * launcher just does not notice edits to its desktop files made from outside */
++      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_FAILED)
++          || g_error_matches (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED))
++        g_debug ("Failed to start file monitor: %s", error->message);
++      else
++        g_critical ("Failed to start file monitor: %s", error->message);
+       g_error_free (error);
+     }
+ 
+-- 
+2.53.0
+
