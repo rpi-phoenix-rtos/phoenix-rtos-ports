@@ -24,14 +24,14 @@
 	conflicts=""
 	# zlib/sqlite3/libffi are non-conflicting ports -> install into the shared
 	# PREFIX_A/PREFIX_H, so python (also non-conflicting, same shared prefix) links
-	# them via -I${PREFIX_H} -L${PREFIX_A}. openssl (1.1.1a) is conflictable ->
+	# them via -I${PREFIX_H} -L${PREFIX_A}. openssl (3.5) is conflictable ->
 	# installs to a versioned dir, resolved at build time via b_dependency_dir.
 	#
 	# ncurses is needed for _curses (see p_build). It is listed here rather than
 	# left to a standalone script so that `import curses` exists in any plain
 	# --with-ports image; ncurses itself needs no ports.yaml entry, being pulled
 	# transitively (same as glib2/fltk for the X11 ports).
-	depends="zlib openssl>=1.1.1a sqlite3 libffi bzip2 xz ncurses"
+	depends="zlib openssl>=3.5 sqlite3 libffi bzip2 xz ncurses"
 
 	supports="phoenix>=3.3"
 }
@@ -186,7 +186,7 @@ p_prepare() {
 		echo "_ctypes _ctypes/_ctypes.c _ctypes/callbacks.c _ctypes/callproc.c _ctypes/cfield.c _ctypes/malloc_closure.c _ctypes/stgdict.c -I${PREFIX_H} -L${PREFIX_A} -lffi -DHAVE_FFI_PREP_CIF_VAR -DHAVE_FFI_PREP_CLOSURE_LOC -DHAVE_FFI_CLOSURE_ALLOC -DHAVE_ALLOCA_H -DUSING_MALLOC_CLOSURE_DOT_C" >> "${cfg}/Modules/Setup.local"
 
 	# 4e. _ssl + _hashlib (TLS/HTTPS + OpenSSL-backed hashlib) against the framework
-	#     openssl (1.1.1a, conflictable -> versioned dir via b_dependency_dir).
+	#     openssl (3.5, conflictable -> versioned dir via b_dependency_dir).
 	grep -q '^_ssl ' "${cfg}/Modules/Setup.local" || \
 		echo "_ssl _ssl.c -I${OSSL}/include -L${OSSL}/lib -lssl -lcrypto" >> "${cfg}/Modules/Setup.local"
 	grep -q '^_hashlib ' "${cfg}/Modules/Setup.local" || \

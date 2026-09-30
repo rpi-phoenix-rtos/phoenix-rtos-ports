@@ -21,7 +21,7 @@
 	license_file="LICENSE"
 
 	conflicts=""
-	depends="openssl>=1.1.1a curl>=7.64.1"
+	depends="openssl>=3.5 curl>=7.64.1"
 
 	supports="phoenix>=3.3"
 

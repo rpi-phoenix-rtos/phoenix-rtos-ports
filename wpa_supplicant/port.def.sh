@@ -20,7 +20,7 @@
 	license_file="COPYING"
 
 	conflicts=""
-	depends="openssl>=1.1.1a"
+	depends="openssl>=3.5"
 
 	supports="phoenix>=3.3"
 }

@@ -61,7 +61,7 @@ p_build() {
 	#
 	#   /etc/ssl/cert.pem
 	#       OpenSSL's X509_get_default_cert_file() == OPENSSLDIR "/cert.pem",
-	#       and openssl111/port.def.sh configures --openssldir=/etc/ssl. This is
+	#       and openssl/port.def.sh configures --openssldir=/etc/ssl. This is
 	#       what `openssl s_client`, python3's ssl module, and anything else
 	#       calling SSL_CTX_set_default_verify_paths() reads.
 	#

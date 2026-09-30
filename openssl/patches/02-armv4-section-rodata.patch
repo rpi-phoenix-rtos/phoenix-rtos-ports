@@ -1,0 +1,16 @@
+armv4 targets only (phoenix-armv7a7-imx6ull): the arm assembler rejects a bare
+`.rodata` directive. Carried from the upstream phoenix-rtos-ports openssl 3.4.1 work.
+See https://github.com/openssl/openssl/issues/20923
+diff --git a/crypto/ec/asm/ecp_nistz256-armv4.pl b/crypto/ec/asm/ecp_nistz256-armv4.pl
+--- a/crypto/ec/asm/ecp_nistz256-armv4.pl
++++ b/crypto/ec/asm/ecp_nistz256-armv4.pl
+@@ -81,7 +81,7 @@ close TABLE;
+ die "insane number of elements" if ($#arr != 64*16*37-1);
+ 
+ $code.=<<___;
+-.rodata
++.section .rodata
+ .globl	ecp_nistz256_precomputed
+ .type	ecp_nistz256_precomputed,%object
+ .align	12
+

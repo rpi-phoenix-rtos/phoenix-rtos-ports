@@ -21,7 +21,11 @@
 	license_file="COPYING"
 
 	conflicts=""
-	depends="openssl>=1.1.1a lzo>=2.10"
+	# TODO: openvpn 2.4.x does not compile against OpenSSL 3 (its openssl_compat.h
+	# redefines EVP_PKEY_get_id & co. that 3.x provides as macros; verified
+	# 2026-09-30 with 2.4.7 and 2.4.12 against 3.5.9). OpenSSL 3 support starts in
+	# 2.5/2.6, so this port needs a version bump + a rebase of its Phoenix patch.
+	depends="openssl>=3.5 lzo>=2.10"
 
 	supports="phoenix>=3.3"
 }

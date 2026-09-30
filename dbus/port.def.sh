@@ -25,7 +25,7 @@
 	# private prefix, versioned-ports/<name>-<version>/, instead of the shared
 	# _build/<target>/{lib,include} (phoenix-rtos-build port_manager,
 	# InstallableCandidate.install_path): nothing it builds is visible to the configure
-	# probes of the image's ports. (openssl111 uses the same mechanism.)
+	# probes of the image's ports. (openssl uses the same mechanism.)
 	conflicts="dbus!=${version}"
 	# expat (libexpat.a + headers) is built by xorg_fonts into the shared prefix.
 	depends="xorg_fonts"

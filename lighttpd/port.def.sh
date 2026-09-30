@@ -20,7 +20,7 @@
 	license_file="COPYING"
 
 	iuse="zlib"
-	depends="pcre>=8.42 openssl>=1.1.1a zlib? (zlib>=1.2.11)"
+	depends="pcre>=8.42 openssl>=3.5 zlib? (zlib>=1.2.11)"
 	conflicts=""
 
 	supports="phoenix>=3.3"

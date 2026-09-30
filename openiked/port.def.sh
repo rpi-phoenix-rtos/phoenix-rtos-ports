@@ -19,7 +19,7 @@
 	license_file="LICENSE"
 
 	conflicts=""
-	depends="openssl>=1.1.1a libevent>=2.1"
+	depends="openssl>=3.5 libevent>=2.1"
 
 	supports="phoenix>=3.3"
 }
