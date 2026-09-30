@@ -30,7 +30,7 @@
 #   G_ENGINE_SYMS    engine symbols that must be present in the program (sanity)
 #
 # HOW:
-#   1. compile gamedrm_hooks.c (banner, SDL VIDEO/INPUT DEBUG logging, the `<app> flipstat`
+#   1. compile gamedrm_hooks.c (banner, the `<app> flipstat`
 #      frame counter behind -Wl,--wrap=SDL_GL_SwapWindow);
 #   2. link: <gcc> ENGINE_LINK_FLAGS ENGINE_OBJS hooks.o, libgallium whole-archive + one group
 #      of libSDL2.a, the Mesa EGL/GBM/dri_gbm/<GLES|bridge>/glapi/v3d/broadcom/winsys/util

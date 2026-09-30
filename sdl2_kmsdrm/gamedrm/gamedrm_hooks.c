@@ -9,8 +9,9 @@
  *
  * 1. One identifying line at process start (write(2), before any stdio), so a UART log
  *    names the lane: the shipped engine and the clone print the same text otherwise.
- * 2. SDL's VIDEO and INPUT log categories at DEBUG, so KMSDRM reports its init steps
- *    (a dozen lines at start, nothing per frame).
+ * 2. SDL logging stays at SDL's defaults (no DEBUG lines). KMSDRM's init steps (a dozen
+ *    lines at start, nothing per frame) are one variable away, SDL's own hint:
+ *      export SDL_LOGGING=video=debug,input=debug
  * 3. A frame counter: the clone is linked with -Wl,--wrap=SDL_GL_SwapWindow, so the
  *    engine's per-frame SDL_GL_SwapWindow() lands here first. Every V3D_FLIPSTAT_MS
  *    (default 5000) ms it prints
@@ -41,7 +42,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <SDL2/SDL_log.h>
 #include <SDL2/SDL_video.h>
 
 #ifndef GAMEDRM_NAME
@@ -117,8 +117,6 @@ __attribute__((constructor)) static void gamedrm_start(void)
 	if (S.errfd < 0) {
 		S.errfd = 2;
 	}
-	SDL_LogSetPriority(SDL_LOG_CATEGORY_VIDEO, SDL_LOG_PRIORITY_DEBUG);
-	SDL_LogSetPriority(SDL_LOG_CATEGORY_INPUT, SDL_LOG_PRIORITY_DEBUG);
 	S.start_us = now_us();
 }
 

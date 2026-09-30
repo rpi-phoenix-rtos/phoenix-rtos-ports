@@ -41,6 +41,14 @@
  * bit1 R, bit2 M), [1] X int8, [2] Y int8, [3] wheel int8 -> relative motion,
  * button transitions, wheel.
  *
+ * RELATIVE MOUSE MODE: the device only ever reports deltas, so SDL's native
+ * relative mode needs nothing from the platform -- the same as evdev, whose
+ * SDL_EVDEV_SetRelativeMouseMode() just returns 0. Without the callback SDL
+ * falls back to warp emulation, which needs mouse->WarpMouse; KMSDRM installs
+ * that only for a GL window (KMSDRM_InitMouse is skipped for a Vulkan one), so
+ * SDL_SetRelativeMouseMode(SDL_TRUE) failed in vkQuake, and for GL games every
+ * motion event was followed by a pointless warp back to the window centre.
+ *
  * poll() does not wake on these nodes, so they are never blocked on: Poll()
  * drains them non-blocking with a bounded number of reads per call.
  *
@@ -226,8 +234,16 @@ static void hid_mouse_process(const uint8_t *p)
     hid_mouse_btn_prev = btn;
 }
 
+/* The mouse delivers relative motion already: nothing to switch. */
+static int hid_set_relative_mouse_mode(SDL_bool enabled)
+{
+    (void)enabled;
+    return 0;
+}
+
 void SDL_PHOENIX_HID_Init(void)
 {
+    SDL_GetMouse()->SetRelativeMouseMode = hid_set_relative_mouse_mode;
     hid_kbd_tries = 0;
     hid_mouse_tries = 0;
     hid_mouse_btn_prev = 0;

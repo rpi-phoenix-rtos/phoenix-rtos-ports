@@ -64,6 +64,9 @@
 #   patches/wayland/0101-0103 (= tools/gpu-lane/sdl2-wl/patches) the Phoenix Wayland video
 #                       driver in cmake, a clipboard pipe without sigtimedwait, fractional-scale
 #                       uint32_t (applied after the vulkan copy: that variant has no Wayland)
+#   patches/wayland/0104 no wl_display_connect() when no socket can be named (no
+#                       WAYLAND_DISPLAY/WAYLAND_SOCKET/XDG_RUNTIME_DIR): quiet fall-through to
+#                       KMSDRM from psh
 #   patches/vulkan/0001 (USE vulkan) PHOENIX in SDL_VULKAN's condition + SDL_VIDEO_VULKAN
 #
 # Installs: include/SDL2, lib/libSDL2.a (+ libSDL2main.a), vulkan/{include,lib} (USE vulkan),
