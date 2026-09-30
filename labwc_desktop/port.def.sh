@@ -719,7 +719,7 @@ PY
 		zwlr_layer_shell_v1_interface png_read_info __wrap_close
 	_check_syms swaybg wl_display_connect cairo_image_surface_create_from_png zwlr_layer_shell_v1_interface shm_open __wrap_close
 	strs="$(strings -a "${BIN}/foot-stripped")"
-	for s in 'xterm-256color' 'C.UTF-8' '/dev/ptmx' 'failed to seal SHM backing memory file'; do
+	for s in 'xterm-256color' 'C.UTF-8' '/dev/ptmx' 'failed to create SHM backing memory file'; do
 		n=$(grep -cF -- "${s}" <<<"${strs}" || true)
 		[ "${n}" != 0 ] || { echo "labwc_desktop: foot strings '${s}': 0"; bad=1; }
 	done
