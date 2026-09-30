@@ -168,9 +168,13 @@ int drmphx_kms_token_memref(drmphx_conn_t *c, uint32_t handle, kms_memref_t *m)
 }
 
 
-/* G13: framebuffer -> the dumb handle it scans (ADDFB2 names exactly one). */
-static void fb_note(drmphx_conn_t *c, uint32_t fb_id, uint32_t handle)
+/* G13: framebuffer -> the dumb handle it scans (ADDFB2 names exactly one) and that
+ * handle's buffer. The buffer is recorded here, not looked up at flip time: in DRM
+ * the framebuffer holds its buffer, and a compositor may close the handle right
+ * after ADDFB2 (wlroots does, backend/drm/fb.c) - its flips must stay gated (G5). */
+static void fb_note(drmphx_conn_t *c, uint32_t fb_id, uint32_t handle, const kms_memref_t *mem)
 {
+	static int warned;
 	uint32_t i, k = DRMPHX_KMS_MAX_FB;
 
 	(void)pthread_mutex_lock(&c->lock);
@@ -186,8 +190,14 @@ static void fb_note(drmphx_conn_t *c, uint32_t fb_id, uint32_t handle)
 	if (k < DRMPHX_KMS_MAX_FB) {
 		c->u.kms.fb[k].fb_id = fb_id;
 		c->u.kms.fb[k].handle = handle;
+		c->u.kms.fb[k].mem = *mem;
 	}
 	(void)pthread_mutex_unlock(&c->lock);
+	if ((k == DRMPHX_KMS_MAX_FB) && (warned == 0)) {
+		warned = 1;
+		(void)fprintf(stderr, "libdrm-phoenix: more than %u framebuffers: flips of fb %u go without implicit sync\n",
+			DRMPHX_KMS_MAX_FB, fb_id);
+	}
 }
 
 
@@ -206,24 +216,23 @@ static void fb_drop(drmphx_conn_t *c, uint32_t fb_id)
 
 
 /* The buffer export {namespace port, id} a framebuffer scans, if it has one (a
- * pool dumb BO: its memref is the /kmsbuf name). 0 or -ENOENT. */
+ * pool dumb BO or an alias of one: the /kmsbuf name; a G7 import: the /v3dbuf
+ * name). 0 or -ENOENT. */
 static int fb_export(drmphx_conn_t *c, uint32_t fb_id, uint32_t *port, uint64_t *id)
 {
-	const drmphx_kms_dumb_t *d = NULL;
 	uint32_t i;
 	int rc = -ENOENT;
 
 	(void)pthread_mutex_lock(&c->lock);
 	for (i = 0u; (fb_id != 0u) && (i < DRMPHX_KMS_MAX_FB); i++) {
 		if (c->u.kms.fb[i].fb_id == fb_id) {
-			d = dumb_find(c, c->u.kms.fb[i].handle);
+			if (c->u.kms.fb[i].mem.kind == KMS_MEM_OID) {
+				*port = c->u.kms.fb[i].mem.port;
+				*id = c->u.kms.fb[i].mem.addr;
+				rc = 0;
+			}
 			break;
 		}
-	}
-	if ((d != NULL) && (d->mem.kind == KMS_MEM_OID)) {
-		*port = d->mem.port;
-		*id = d->mem.addr;
-		rc = 0;
 	}
 	(void)pthread_mutex_unlock(&c->lock);
 	return rc;
@@ -952,6 +961,7 @@ static int ioc_get_property(drmphx_conn_t *c, struct drm_mode_get_property *gp)
 static int ioc_addfb2(drmphx_conn_t *c, struct drm_mode_fb_cmd2 *f)
 {
 	kms_addfb2_req_t q;
+	kms_memref_t mem;
 	kms_resp_t r;
 	int rc;
 
@@ -975,7 +985,12 @@ static int ioc_addfb2(drmphx_conn_t *c, struct drm_mode_fb_cmd2 *f)
 	rc = kcall(c, KMS_OP_ADDFB2, &q, sizeof(q), &r, NULL, 0u, NULL, 0u);
 	if (rc == 0) {
 		f->fb_id = r.u.fb.fb_id;
-		fb_note(c, f->fb_id, q.handle);
+		/* the handle's buffer while the handle is certainly open (the dumb cache: no IPC
+		 * for this client's own and imported buffers) */
+		if (drmphx_kms_token_memref(c, q.handle, &mem) != 0) {
+			memset(&mem, 0, sizeof(mem));   /* KMS_MEM_NONE: no implicit sync for it */
+		}
+		fb_note(c, f->fb_id, q.handle, &mem);
 	}
 	return rc;
 }
