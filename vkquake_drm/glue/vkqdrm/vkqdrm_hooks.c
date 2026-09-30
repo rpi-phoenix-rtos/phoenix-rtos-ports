@@ -3,8 +3,9 @@
  * (SDL 2.30.12 KMSDRM with its stock Vulkan path + Mesa 26.2 v3dv as a static ICD +
  * VK_KHR_display + libdrm-phoenix). Nothing engine-side: linked only into vkquake-drm.
  *
- * 1. One identifying line at process start (write(2), before any stdio), and SDL's VIDEO
- *    and INPUT log categories at DEBUG (KMSDRM init steps; nothing per frame).
+ * 1. One identifying line at process start (write(2), before any stdio). SDL logging stays
+ *    at SDL's defaults; KMSDRM's init steps are SDL's own hint away:
+ *    `export SDL_LOGGING=video=debug,input=debug`.
  *
  * 2. The Vulkan "library" SDL loads. SDL_Vulkan_LoadLibrary() -> KMSDRM_Vulkan_LoadLibrary()
  *    does SDL_LoadObject("libvulkan.so.1") + SDL_LoadFunction("vkGetInstanceProcAddr"). Phoenix
@@ -49,7 +50,6 @@
 #include <unistd.h>
 
 #include <SDL2/SDL_loadso.h>
-#include <SDL2/SDL_log.h>
 
 #include "phxvk_loader.h"
 
@@ -114,8 +114,6 @@ __attribute__((constructor)) static void vkqdrm_start(void)
 	if (S.errfd < 0) {
 		S.errfd = 2;
 	}
-	SDL_LogSetPriority(SDL_LOG_CATEGORY_VIDEO, SDL_LOG_PRIORITY_DEBUG);
-	SDL_LogSetPriority(SDL_LOG_CATEGORY_INPUT, SDL_LOG_PRIORITY_DEBUG);
 	S.start_us = now_us();
 }
 

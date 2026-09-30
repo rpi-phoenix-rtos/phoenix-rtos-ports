@@ -38,7 +38,7 @@
 # the same TU lists as its p_build -- minus the old lane's SDL-GL context glue
 # (sdl2/glue/sdl_phoenix_glctx.c): SDL's KMSDRM/EGL owns the context. GL headers come from the
 # new lane's Mesa source (the Mesa the binary links), never external/mesa.
-# The clone links the shared gamedrm hooks (banner, SDL VIDEO/INPUT at DEBUG, and the
+# The clone links the shared gamedrm hooks (banner and the
 # `quakespasm-drm flipstat ... (total N)` + `swapstat` counter on GL_EndRendering's
 # SDL_GL_SwapWindow, behind -Wl,--wrap=SDL_GL_SwapWindow) that the migration gate reads.
 # The copies of the quakespasm port's patch and glue are kept identical to it by the

@@ -1,0 +1,35 @@
+wayland: do not try to connect when no compositor socket can be named.
+
+SDL tries its Wayland driver first. Run full screen from the console (psh),
+where there is no Wayland session, Wayland_CreateDevice() still calls
+wl_display_connect(NULL); with WAYLAND_DISPLAY, WAYLAND_SOCKET and
+XDG_RUNTIME_DIR all unset that call cannot succeed, and libwayland prints
+"error: XDG_RUNTIME_DIR is invalid or not set in the environment." before
+failing, so every game started from psh logged it. SDL then fell through to
+KMSDRM as intended.
+
+Return NULL before the connect in exactly that case. It is the case where
+libwayland's connect_to_socket() gives up (a relative default "wayland-0" and no
+runtime dir), so the outcome is unchanged -- only the line is gone. A desktop
+client (labwc exports WAYLAND_DISPLAY; game-window.sh exports XDG_RUNTIME_DIR)
+takes the unchanged path.
+
+--- a/src/video/wayland/SDL_waylandvideo.c
++++ b/src/video/wayland/SDL_waylandvideo.c
+@@ -183,6 +183,16 @@
+         }
+     }
+ 
++    /* No compositor socket can be named: with none of WAYLAND_DISPLAY,
++       WAYLAND_SOCKET or XDG_RUNTIME_DIR set, wl_display_connect() can only fail,
++       and it prints "error: XDG_RUNTIME_DIR is invalid or not set in the
++       environment." on the way. Skip the attempt quietly, so that a program run
++       outside a Wayland session (full screen from a console) falls through to the
++       next video driver without that line. */
++    if (!getenv("WAYLAND_DISPLAY") && !getenv("WAYLAND_SOCKET") && !getenv("XDG_RUNTIME_DIR")) {
++        return NULL;
++    }
++
+     if (!SDL_WAYLAND_LoadSymbols()) {
+         return NULL;
+     }

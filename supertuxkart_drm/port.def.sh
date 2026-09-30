@@ -36,7 +36,7 @@
 }
 
 # Ported from the coordination repo's tools/gpu-lane/sdl2-drm/build-stk-drm.sh:
-#   1. compile glue/stkdrm_hooks.c (banner, SDL VIDEO/INPUT DEBUG logging, and the
+#   1. compile glue/stkdrm_hooks.c (banner and the
 #      `stk-drm flipstat` frame counter behind -Wl,--wrap=SDL_GL_SwapWindow);
 #   2. run CMake's link line (link.txt) from the supertuxkart port's build tree (configured
 #      against sdl2_kmsdrm's libSDL2.a) with sdl2_kmsdrm's link-inputs.txt group, GLES half
