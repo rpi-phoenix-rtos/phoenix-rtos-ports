@@ -387,8 +387,8 @@ EOF
 
 	# --- the baked default keymap (Phoenix has no xkeyboard-config) ---
 	# files/keymap-us.xkb is the output of `xkbcli compile-keymap --rules evdev --model
-	# pc105 --layout us` (libxkbcommon 1.7.0 over the build host's xkeyboard-config, MIT)
-	# that the M6/M7 builds baked in -- committed so this build no longer depends on the
+	# pc105 --layout us` (libxkbcommon 1.13.2 over the build host's xkeyboard-config, MIT)
+	# that the labwc-drm (M7) build baked in -- committed so this build no longer depends on the
 	# host's xkeyboard-config. Regenerate with that command if the layout must change.
 	grep -q 'xkb_keymap' "${F}/keymap-us.xkb" || b_die "wayland_phoenix: files/keymap-us.xkb is not a keymap"
 	cp "${F}/keymap-us.xkb" "${I}/keymap-us.xkb"
