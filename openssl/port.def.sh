@@ -45,8 +45,16 @@ p_prepare() {
 		cp "$PREFIX_PORT/30-phoenix.conf" "$PREFIX_PORT_WORKDIR/Configurations/"
 		# --libdir=lib: the consumers (and the pkg-config files) expect lib/, and
 		# 3.x otherwise picks lib64 on some 64-bit targets.
+		# enable-ec_nistp_64_gcc_128 (aarch64 only; untried elsewhere): the
+		# constant-time 64-bit-limb P-224/P-384/P-521 code on the compiler's
+		# __int128, as the major distributions build 64-bit targets. P-256 keeps
+		# the armv8 nistz256 assembler. The sources #error without __int128.
+		local extra=()
+		case "${TARGET_FAMILY}" in
+		aarch64*) extra+=(enable-ec_nistp_64_gcc_128) ;;
+		esac
 		(cd "${PREFIX_PORT_WORKDIR}" && "${PREFIX_PORT_WORKDIR}/Configure" "phoenix-${TARGET_FAMILY}-${TARGET_SUBFAMILY}" \
-			--prefix="$PREFIX_PORT_INSTALL" --libdir=lib --openssldir="/etc/ssl" no-docs)
+			--prefix="$PREFIX_PORT_INSTALL" --libdir=lib --openssldir="/etc/ssl" no-docs "${extra[@]}")
 	fi
 }
 
