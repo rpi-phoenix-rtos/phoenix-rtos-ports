@@ -30,6 +30,27 @@
 	# It also installs those glue SOURCES and the M6 patch sets (wayland, seatd)
 	# under share/wayland-phoenix/, for ports that must recompile them with their
 	# own flags (labwc_desktop).
+	#
+	# This is the ONE libwayland of the system: Mesa's EGL wayland platform
+	# (mesa_drm), SDL's Wayland driver (sdl2_kmsdrm), GTK, XFCE and labwc all build
+	# on it. What a consumer finds in ${PORT_DEP_wayland_phoenix}:
+	#
+	#   prefix/               everything above (lib/, include/, lib/pkgconfig/,
+	#                         share/pkgconfig/, share/wayland-protocols/,
+	#                         share/wayland-phoenix/{compat,shims,shmsrv,mesa-compat,
+	#                         phxhid,patches}); shmsrv/shm_proto.h is the wire
+	#                         protocol of /shm (libxshmfence_phoenix reads it there)
+	#   libwayland/           libwayland + wlphx-compat + wayland-protocols ALONE:
+	#                         lib/*.a, include/wayland-*.h, lib/pkgconfig/,
+	#                         share/pkgconfig/, share/wayland-protocols/, and
+	#                         deps/libffi/ (a private view of the ports prefix's
+	#                         libffi). Copies of the prefix/ files, for the builds
+	#                         that must not see the rest of prefix/ (mesa_drm,
+	#                         sdl2_kmsdrm): prefix/lib/pkgconfig holds libudev.pc,
+	#                         which Mesa's meson picks up (HAVE_LIBUDEV), and
+	#                         prefix/include holds linux/{types,ioctl}.h shims, which
+	#                         Mesa's drm-uapi headers would include.
+	#   keymap-us.xkb
 	source="https://gitlab.freedesktop.org/wayland/wayland/-/releases/${version}/downloads/"
 	archive_filename="wayland-${version}.tar.xz"
 	src_path="wayland-${version}/"
@@ -375,8 +396,33 @@ EOF
 		[ -f "${P}/lib/${l}" ] || b_die "wayland_phoenix: ${l} not installed"
 	done
 	[ -f "${P}/share/pkgconfig/wayland-protocols.pc" ] || b_die "wayland_phoenix: wayland-protocols.pc not installed"
-	"${TC}-nm" "${P}/lib/libwlphx-compat.a" | grep -qE ' T (epoll_wait|memfd_create)$' ||
-		b_die "wayland_phoenix: libwlphx-compat.a lacks epoll_wait/memfd_create"
+	local syms
+	syms="$("${TC}-nm" -g --defined-only "${P}/lib/libwayland-server.a" 2>/dev/null || true)"
+	grep -qE ' T wl_display_create$' <<<"${syms}" || b_die "wayland_phoenix: libwayland-server.a has no wl_display_create"
+	syms="$("${TC}-nm" -g --defined-only "${P}/lib/libwlphx-compat.a" 2>/dev/null || true)"
+	for l in memfd_create epoll_wait timerfd_settime signalfd eventfd __wrap_close __wrap_write; do
+		grep -qE " [TW] ${l}\$" <<<"${syms}" || b_die "wayland_phoenix: libwlphx-compat.a has no ${l}"
+	done
+	# (an old shmsrv.o carried a main(): whatever links the compat archive would get it)
+	if grep -qE ' T main$' <<<"${syms}"; then b_die "wayland_phoenix: libwlphx-compat.a defines main()"; fi
+
+	# --- libwayland/: libwayland + wlphx-compat + wayland-protocols alone (see the header) ---
+	local V="${I}/libwayland" pc
+	rm -rf "${V}"
+	mkdir -p "${V}/lib/pkgconfig" "${V}/include" "${V}/share/pkgconfig" "${V}/deps"
+	cp -a "${P}"/lib/libwayland-{server,client,cursor,egl}.a "${P}/lib/libwlphx-compat.a" "${V}/lib/"
+	cp -a "${P}"/include/wayland-* "${V}/include/"
+	cp -a "${P}/share/wayland-protocols" "${V}/share/"
+	for pc in wayland-server wayland-client wayland-cursor wayland-egl wayland-egl-backend wlphx-compat; do
+		sed "s|${P}|${V}|g" "${P}/lib/pkgconfig/${pc}.pc" >"${V}/lib/pkgconfig/${pc}.pc"
+	done
+	sed "s|${P}|${V}|g" "${P}/share/pkgconfig/wayland-protocols.pc" >"${V}/share/pkgconfig/wayland-protocols.pc"
+	cp -a "${D}/libffi" "${V}/deps/"
+	sed -i "s|^prefix=.*|prefix=${V}/deps/libffi|" "${V}/deps/libffi/lib/pkgconfig/libffi.pc"
+	if grep -rlF "${P}" "${V}"/lib/pkgconfig "${V}"/share/pkgconfig "${V}"/deps/libffi/lib/pkgconfig; then
+		b_die "wayland_phoenix: libwayland/: a .pc file still names ${P} (above)"
+	fi
+
 	(cd "${P}/lib" && sha256sum ./*.a) >"${I}/SHA256SUMS"
 	sed 's/^/wayland_phoenix: /' "${I}/SHA256SUMS"
 }
