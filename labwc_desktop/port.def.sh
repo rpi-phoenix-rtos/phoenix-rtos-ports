@@ -770,6 +770,11 @@ PY
 	done
 	install -D -m 644 "${F}/conf/foot/foot.ini" "${ST}/etc/xdg/foot/foot.ini"
 	install -D -m 644 "${F}/conf/fuzzel/fuzzel.ini" "${ST}/etc/xdg/fuzzel/fuzzel.ini"
+	# The same US keymap as XKB data: SDL's Wayland keyboard creates an xkb_context, which
+	# fails ("Failed to create XKB context", the game exits) when no default include path
+	# exists. The keymap itself comes from the compositor; this makes /usr/share/X11/xkb
+	# real (keymap/ is a standard XKB component directory).
+	install -D -m 644 "${km}" "${ST}/usr/share/X11/xkb/keymap/us.xkb"
 	for f in foot mc bash; do
 		install -D -m 644 "${F}/conf/applications/${f}.desktop" "${ST}/usr/share/applications/${f}.desktop"
 	done
