@@ -12,7 +12,7 @@
 # XFCE 4.20 on labwc, the M7 showcase (docs/gpu-new-lane/M7-wayland-desktop.md). xfwm4 is
 # X11-only, so labwc is the window manager; the XFCE programs are GTK 3 Wayland clients
 # (the panel and the desktop on wlr-layer-shell). psh has no '&' and no ';': this script
-# does the job control, in the shape of labwc-desktop.sh / weston-m6a.sh:
+# does the job control:
 #   1  dbus-daemon (session bus, /etc/dbus-1/session-phoenix.conf: ANONYMOUS on
 #      unix:path=/tmp/dbus-session) in the background, wait for its socket
 #   2  xfconfd: first by BUS ACTIVATION (/usr/share/dbus-1/services/org.xfce.Xfconf.service,
