@@ -21,10 +21,10 @@
 
 	# NEW GPU LANE: private install prefix (see libdrm_phoenix)
 	conflicts="libxshmfence_phoenix!=${version}"
-	# wayland: shmsrv's wire header shm_proto.h (the fence pages are allocated from /shm;
-	# the wayland port builds and installs shmsrv); xorg_libs: X11/Xfuncproto.h (xorgproto);
-	# libdrm_phoenix: the new-lane build helpers
-	depends="libdrm_phoenix wayland xorg_libs"
+	# wayland_phoenix: shm_proto.h, the wire protocol of shmsrv (the fence pages are allocated
+	# from /shm; the server is phoenix-rtos-devices misc/shmsrv); xorg_libs: X11/Xfuncproto.h
+	# (xorgproto); libdrm_phoenix: the new-lane build helpers
+	depends="libdrm_phoenix wayland_phoenix xorg_libs"
 
 	supports="phoenix>=3.3"
 }
@@ -46,9 +46,9 @@ p_build() {
 	. "${PORT_DEP_libdrm_phoenix}/share/phoenix-newlane/newlane.subr"
 	nl_setup "${PREFIX_PORT_BUILD}/nl"
 
-	local shm_inc="${PORT_DEP_wayland}/include" x11_inc="${PORT_DEP_xorg_libs}/include"
+	local shm_inc="${PORT_DEP_wayland_phoenix%/}/prefix/share/wayland-phoenix/shmsrv" x11_inc="${PORT_DEP_xorg_libs}/include"
 	local sp="${PREFIX_PORT_INSTALL}" o="${PREFIX_PORT_BUILD}/xshmfence-obj" f s
-	[ -f "${shm_inc}/shm_proto.h" ] || b_die "no ${shm_inc}/shm_proto.h (wayland port: shmsrv)"
+	[ -f "${shm_inc}/shm_proto.h" ] || b_die "no ${shm_inc}/shm_proto.h (wayland_phoenix port)"
 	[ -f "${x11_inc}/X11/Xfuncproto.h" ] || b_die "no ${x11_inc}/X11/Xfuncproto.h (xorg_libs port)"
 
 	rm -rf "${o}" "${sp}/lib/libxshmfence.a"
