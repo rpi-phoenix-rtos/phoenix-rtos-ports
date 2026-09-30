@@ -94,9 +94,18 @@ WRAPEOF
 	# libpng16-config (emitting the cross prefix) instead of the host's
 	# /usr/bin/libpng16-config, which would leak host -I/usr/include / a mismatched
 	# libpng version into the cross build.
+	#
+	# The installation directories are the TARGET's: nothing runs `make install`
+	# (only src/dillo is shipped, below), so they serve solely as the paths compiled
+	# into the binary -- DILLO_SYSCONF (sysconfdir + "/dillo", where dillo looks for
+	# dillorc/keysrc/domainrc/hsts_preload after ~/.dillo), DILLO_BINDIR (dpid),
+	# DILLO_LIBDIR (hyphenation patterns) and DILLO_DOCDIR (the help page). With
+	# --prefix at the build tree every one of them named a directory of the build
+	# host: `paths: Cannot open file '/home/.../etc/dillo/dillorc'`.
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/config.status" ]; then
 		(cd "${PREFIX_PORT_WORKDIR}" && PATH="${PREFIX_PORT_INSTALL}/bin:${PATH}" FLTK_CONFIG="${wrap}" ./configure \
-			--host="${HOST}" --build=x86_64-pc-linux-gnu --prefix="${PREFIX_PORT_INSTALL}" \
+			--host="${HOST}" --build=x86_64-pc-linux-gnu \
+			--prefix=/usr --bindir=/bin --sysconfdir=/etc \
 			--enable-tls --disable-openssl --disable-webp \
 			--with-jpeg-lib="${PREFIX_A}" --with-jpeg-inc="${PREFIX_H}" \
 			CC="${CROSS}gcc" CXX="${CROSS}g++" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
@@ -106,7 +115,37 @@ WRAPEOF
 
 	make -C "${PREFIX_PORT_WORKDIR}"
 
+	# no directory of the build tree compiled in (see configure above)
+	local d
+	grep -aqF '/etc/dillo/' "${PREFIX_PORT_WORKDIR}/src/dillo" || b_die "dillo: the binary does not name /etc/dillo/"
+	for d in etc/dillo lib/dillo share/doc/dillo; do
+		if grep -aqF "${PREFIX_PORT_INSTALL%/}/${d}" "${PREFIX_PORT_WORKDIR}/src/dillo"; then
+			b_die "dillo: the binary names the build tree's ${d} (stale configure?)"
+		fi
+	done
+
 	mkdir -p "${PREFIX_PROG_STRIPPED}"
 	$STRIP -o "${PREFIX_PROG_STRIPPED}/dillo" "${PREFIX_PORT_WORKDIR}/src/dillo"
 	b_install "${PREFIX_PROG_TO_INSTALL}/dillo" /bin
+
+	# /etc/dillo: what `make install` puts in the sysconfdir -- dillorc (top level),
+	# keysrc, domainrc, hsts_preload (src/) -- so dillo reads a configuration instead
+	# of printing "Using internal defaults" four times. dillorc gets one change, the
+	# alternative upstream's own comment gives for an FLTK without Xft (the fltk port
+	# is --disable-xft): the core X bitmap families times/helvetica/courier, which
+	# xorg_fonts ships as iso10646-1 (75dpi) and the X server's font path holds,
+	# instead of the default "DejaVu *" names ("preferred ... font not found").
+	local etc="${PREFIX_FS}/root/etc/dillo" f
+	mkdir -p "${etc}"
+	for f in keysrc domainrc hsts_preload; do
+		install -m 644 "${PREFIX_PORT_WORKDIR}/src/${f}" "${etc}/${f}"
+	done
+	sed -E 's/^# (font_(serif|sans_serif|cursive|fantasy|monospace)=)/\1/' \
+		"${PREFIX_PORT_WORKDIR}/dillorc" > "${etc}/dillorc"
+	chmod 644 "${etc}/dillorc"
+	for f in 'font_serif="times"' 'font_sans_serif="helvetica"' 'font_cursive="helvetica"' \
+			'font_fantasy="helvetica"' 'font_monospace="courier"'; do
+		[ "$(grep -cxF "${f}" "${etc}/dillorc")" = 1 ] || b_die "dillo: dillorc lacks exactly one ${f}"
+	done
+	[ "$(grep -cE '^font_' "${etc}/dillorc")" = 5 ] || b_die "dillo: dillorc sets other than the five font_* families"
 }
