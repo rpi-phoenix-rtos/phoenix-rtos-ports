@@ -236,6 +236,14 @@ p_build() {
 	grep -q '^#define USE_COMPUTED_GOTOS 1$' "${PREFIX_PORT_WORKDIR}/pyconfig.h" ||
 		b_die "python: pyconfig.h: USE_COMPUTED_GOTOS is not 1"
 
+	# The Setup.local modules that need nothing but the bundled sources are linked
+	# in, not merely listed (a makesetup "previous rule" or a typo only warns).
+	local m pysyms
+	pysyms="$("${CROSS}nm" "${PREFIX_PORT_WORKDIR}/python")"
+	for m in _asyncio _lsprof termios syslog pyexpat _elementtree; do
+		grep -qE " T PyInit_${m}\$" <<<"${pysyms}" || b_die "python: PyInit_${m} is not in the interpreter"
+	done
+
 	# Install the interpreter as /bin/python3. Keep the NON-stripped binary: the
 	# dlopen C-extension recipe (README) resolves the Py C-API + libc against the
 	# python binary's .symtab, so PREFIX_PROG_TO_INSTALL (stripped by default) must
