@@ -21,19 +21,65 @@
  * wins over -fullscreen anyway). With the M9 scaled modes of rpi4-kms, `vkquake -width 1280
  * -height 720` is therefore a 1280x720 fullscreen mode, scaled to the screen.
  *
+ * The first start on a system compiles every Vulkan pipeline into Mesa's shader cache
+ * ($HOME/.cache/mesa_shader_cache): about 75 s of black screen before the first frame. Later
+ * starts read the cache and take a few seconds. So that the wait is not mistaken for a hang,
+ * the launcher says so on the console and pauses briefly before the display is taken, the first
+ * time it runs (until $HOME/.cache/vkquake-first-start exists; a freshly flashed card or a
+ * fresh NFS export has neither the marker nor the cache).
+ *
  * The engine path is VKQDRM_TARGET (the vkquake_drm port passes it).
  *
  * Copyright 2026 Phoenix Systems
  * SPDX-License-Identifier: BSD-3-Clause
  */
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #ifndef VKQDRM_TARGET
 #define VKQDRM_TARGET "/usr/bin/vkquake-drm"
 #endif
+
+
+/* Tell the user about the one-time shader compile, the first time only. */
+static void first_start_notice(void)
+{
+	const char *home = getenv("HOME");
+	char marker[256];
+	int fd;
+
+	if ((home == NULL) || (home[0] == '\0')) {
+		home = "/";
+	}
+	(void)snprintf(marker, sizeof(marker), "%s%s.cache/vkquake-first-start", home,
+		(home[strlen(home) - 1] == '/') ? "" : "/");
+	if (access(marker, F_OK) == 0) {
+		fprintf(stderr, "vkquake: starting (shaders come from the cache; a first start after an update compiles them again)\n");
+		return;
+	}
+
+	fprintf(stderr,
+		"\n"
+		"  vkQuake: FIRST START on this system.\n"
+		"  The Vulkan shaders are compiled now and kept in the shader cache. This takes about\n"
+		"  1-1.5 minutes, with a black screen. It has not hung: please wait for the first frame.\n"
+		"  Later starts take a few seconds.\n"
+		"\n");
+	(void)sleep(5);
+
+	/* best effort: without a writable $HOME/.cache the notice simply shows again */
+	(void)snprintf(marker, sizeof(marker), "%s%s.cache", home, (home[strlen(home) - 1] == '/') ? "" : "/");
+	(void)mkdir(marker, 0755);
+	(void)strncat(marker, "/vkquake-first-start", sizeof(marker) - strlen(marker) - 1);
+	fd = open(marker, O_WRONLY | O_CREAT, 0644);
+	if (fd >= 0) {
+		(void)close(fd);
+	}
+}
 
 
 static int caller_gives(int argc, char **argv, const char *opt)
@@ -84,6 +130,8 @@ int main(int argc, char **argv)
 		a[n++] = argv[i];
 	}
 	a[n] = NULL;
+
+	first_start_notice();
 
 	fprintf(stderr, "vkquake: exec");
 	for (i = 0; i < n; i++) {
