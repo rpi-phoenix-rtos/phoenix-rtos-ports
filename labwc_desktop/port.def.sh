@@ -564,7 +564,9 @@ PY
 
 	# --- text stack for labwc (libxml2, fribidi, pango over the ports cairo/harfbuzz/glib)
 	# and for foot (tllist, fcft over the ports fontconfig/freetype/harfbuzz) ---
-	_meson_pkg libxml2 libxml2-build -Dpython=disabled -Dzlib=disabled -Dicu=disabled -Diconv=disabled \
+	# libxml2 with -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+	# __stack_chk_fail, and XML parsers are among the ports that get it first.
+	EXTRA_C_ARGS="'-fstack-protector-strong'" _meson_pkg libxml2 libxml2-build -Dpython=disabled -Dzlib=disabled -Dicu=disabled -Diconv=disabled \
 		-Dhttp=disabled -Dmodules=disabled -Dreadline=disabled -Dhistory=disabled -Ddocs=disabled \
 		-Dsax1=enabled -Dcatalog=disabled -Ddebugging=disabled
 	_meson_pkg fribidi fribidi-build -Ddocs=false -Dbin=false -Dtests=false

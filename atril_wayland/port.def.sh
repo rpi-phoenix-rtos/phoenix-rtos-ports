@@ -336,8 +336,11 @@ EOF
 	}
 
 	# --- libraries ---
-	# libxml2: tree + XPath; no zlib, iconv, ICU, HTTP, modules, python
-	_meson_pkg libxml2 -Dpython=disabled -Dzlib=disabled -Dicu=disabled -Diconv=disabled \
+	# libxml2: tree + XPath; no zlib, iconv, ICU, HTTP, modules, python. It parses the XMP
+	# metadata of untrusted PDFs: -fstack-protector-strong (libphoenix provides
+	# __stack_chk_guard and __stack_chk_fail), through a cross file of its own.
+	sed "s#^c_args = \[#c_args = ['-fstack-protector-strong', #" "${out}/phoenix-aarch64.cross" >"${out}/libxml2.cross"
+	_meson_pkg --cross "${out}/libxml2.cross" libxml2 -Dpython=disabled -Dzlib=disabled -Dicu=disabled -Diconv=disabled \
 		-Dhttp=disabled -Dmodules=disabled -Dreadline=disabled -Dhistory=disabled -Ddocs=disabled \
 		-Dsax1=enabled -Dcatalog=disabled -Ddebugging=disabled
 	# lcms2: no tiff/jpeg utilities, no GPL plugins
