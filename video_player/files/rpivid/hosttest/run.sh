@@ -24,8 +24,8 @@
 # A clip given on the command line is also decoded with -threads N (default 4) to show that
 # frame threading does not change what the block is told.
 #
-# --loop (clips given on the command line, whose POC is the display index -- one IDR, e.g.
-# x265 clips shorter than its keyint): the mock "decodes" each picture by writing the host
+# --loop (clips given on the command line, closed GOP: the display index is derived from the
+# POC and the IDRs): the mock "decodes" each picture by writing the host
 # ffmpeg's decode of it, SAND tiled, into the output buffers; hevc-rpivid-check (-l 2, all
 # tools) then compares the hwaccel's frames with the CPU decoder's: the output path --
 # de-tiling 8/10 bit, cropping, frame order, 1 and N threads -- must be BIT-EXACT.

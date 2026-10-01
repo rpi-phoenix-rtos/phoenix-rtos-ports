@@ -17,8 +17,9 @@
  * by writing frame p of this raw yuv420p / yuv420p10le file, display order, into the
  * output buffers in the block's SAND layout: then the decoder's output path -- de-tiling,
  * frame order, cropping, threading -- can be checked bit-exact against the CPU decoder,
- * for clips whose POC is the display index; MOCK_GOLDEN_SIZE=<w>x<h> when the file holds
- * the cropped pictures of a stream with a conformance window at the bottom/right).
+ * for closed-GOP clips: the display index is the POC plus the pictures decoded before the
+ * last POC 0; MOCK_GOLDEN_SIZE=<w>x<h> when the file holds the cropped pictures of a
+ * stream with a conformance window at the bottom/right).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -470,7 +471,12 @@ static void phase2(void)
 	fflush(f);
 
 	if (golden != NULL) {
-		golden_picture(pa2va(y, 1), pa2va(c, 1), poc);
+		static long gop_base;
+
+		if ((poc == 0) && (pic_no > 0)) {
+			gop_base = pic_no; /* an IDR: every earlier picture is displayed before it */
+		}
+		golden_picture(pa2va(y, 1), pa2va(c, 1), (int32_t)(gop_base + poc));
 	}
 
 	map_set(y, poc, 0);
