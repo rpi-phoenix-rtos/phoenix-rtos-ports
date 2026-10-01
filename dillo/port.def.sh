@@ -127,6 +127,14 @@ WRAPEOF
 
 	mkdir -p "${PREFIX_PROG_STRIPPED}"
 	$STRIP -o "${PREFIX_PROG_STRIPPED}/dillo" "${PREFIX_PORT_WORKDIR}/src/dillo"
+	# ...nor any other build directory, the libraries' included (libX11's data dirs
+	# were the last ones); the needle also catches a path left relative by
+	# -fmacro-prefix-map
+	local needle
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	if grep -qaF "${needle}" "${PREFIX_PROG_STRIPPED}/dillo"; then
+		b_die "dillo: the binary names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${PREFIX_PROG_STRIPPED}/dillo" | head -1)"
+	fi
 	b_install "${PREFIX_PROG_TO_INSTALL}/dillo" /bin
 
 	# /etc/dillo: what `make install` puts in the sysconfdir -- dillorc (top level),
