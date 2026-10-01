@@ -6,7 +6,7 @@
 
 	name="video_player"
 	version="6.1"
-	desc="Video players: ffplay (FFmpeg 6.1, SDL KMSDRM + Wayland), /bin/video-play, gtk-video (GTK 3)"
+	desc="Video players: ffplay (FFmpeg 6.1, SDL KMSDRM + Wayland), /bin/video-play, gtk-video (GTK 3); HEVC on the Pi 4's rpivid block"
 
 	# The ffmpeg port's release tarball (same archive, same sha256). This port builds its
 	# own copy with the PLAYER component set (+ libavfilter, libswscale, libswresample):
@@ -20,7 +20,9 @@
 
 	# FFmpeg configured without --enable-gpl / --enable-nonfree (fftools/ffplay.c,
 	# cmdutils.c, opt_common.c and every enabled component: LGPL-2.1-or-later); files/
-	# (the glue, gtk-video, the launcher, the clip generator, configuration): BSD-3-Clause.
+	# (the glue, gtk-video, the launcher, the clip generator, configuration, the rpivid
+	# decoder sources and hevc-rpivid-check): BSD-3-Clause; files/rpivid/patches (FFmpeg
+	# integration hunks): LGPL-2.1-or-later as the files they change.
 	license="LGPL-2.1-or-later AND BSD-3-Clause"
 	license_file="COPYING.LGPLv2.1"
 
@@ -52,11 +54,26 @@
 #   files/image/video-play  /bin/video-play: a window under a compositor, else full screen
 #   files/image/labwc-xfce-video/ (the video desktop session: the XFCE session's labwc
 #   configuration + an autostart that plays a clip), files/image/video-demo.desktop
+# and the HEVC hardware decoder (files/rpivid/, port-only: not in tools/gpu-lane):
+#   src/         the BCM2711 rpivid block as an hwaccel of FFmpeg's own HEVC decoder that
+#                writes system-memory frames: rpivid_hevc.c (the HEVCContext -> block
+#                mapping), rpivid_cmd.c (the command buffer, from tools/hevc-decode's proven
+#                hevc-m2.c), rpivid_hw.c (MMIO, mailbox clock, IRQ, contiguous memory),
+#                rpivid_sand.c (SAND/column-128 -> planar, NEON); copied into libavcodec/
+#   patches/     1001: the decoder "hevc_rpivid" = "hevc" + the "rpivid" option (registered
+#                first, so avcodec_find_decoder(HEVC) -- ffplay, gtk-video -- picks it); CPU
+#                fallback for a stream, a picture or a hardware failure
+#   check/       hevc-rpivid-check: hardware vs CPU decode of a file, every frame's md5, timing
+#   hosttest/    run.sh: the hwaccel's register programming against the reference player on
+#                a register-level mock (host, ASan); not part of the build
+# Knobs: FFMPEG_RPIVID=0 (CPU only) | 1 (default: the verified tool set) | 2 (all tools,
+# unverified), or the decoder option -rpivid N; ffplay -vcodec hevc = the plain CPU decoder.
 #
 # Installs (${PREFIX_PORT_INSTALL}): bin/ (stripped), prog/ (unstripped, addr2line),
 # share/video-player/ (link maps, stage.MANIFEST), stage/ + stage.MANIFEST (the rootfs files):
 #   /usr/bin/ffplay                        ffplay: full screen on KMS from psh, a window on the
 #                                          desktop (SDL tries Wayland, then KMSDRM)
+#   /usr/bin/hevc-rpivid-check             the rpivid decoder checked against the CPU one
 #   /bin/video-play                        picks the mode (SDL_VIDEODRIVER, -fs) by whether a
 #                                          compositor socket exists
 #   /usr/bin/gtk-video         (gtk)       + /usr/share/applications/gtk-video.desktop
@@ -75,6 +92,13 @@
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
+	# the rpivid decoder: its FFmpeg hunks (kept apart from patches/, which mirrors
+	# tools/gpu-lane/video-player/patches) and its sources
+	PREFIX_PORT_PATCHES="${PREFIX_PORT}/files/rpivid/patches" b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
+	local f
+	for f in "${PREFIX_PORT}"/files/rpivid/src/*.[ch]; do
+		cmp -s "${f}" "${PREFIX_PORT_WORKDIR%/}/libavcodec/${f##*/}" || cp "${f}" "${PREFIX_PORT_WORKDIR%/}/libavcodec/"
+	done
 }
 
 # _vp_fftools <SDL prefix> <object dir>: ffplay.c's objects against that SDL's headers
@@ -149,7 +173,7 @@ _vp_verify_ffplay() {
 	nl_no_undefined "${bin}"
 	syms="$("${NL_NM}" "${bin}")"
 	local want_syms=(main video_thread audio_thread read_thread sdl_audio_callback __wrap_pthread_create __wrap_mmap
-		KMSDRM_CreateDevice SDL_EGL_LoadLibrary ff_hevc_decoder ff_h264_decoder ff_aac_decoder
+		KMSDRM_CreateDevice SDL_EGL_LoadLibrary ff_hevc_decoder ff_hevc_rpivid_decoder rpivid_hw_decode ff_h264_decoder ff_aac_decoder
 		ff_mov_demuxer ff_matroska_demuxer ff_vf_scale ff_af_aresample swr_convert sws_scale v3d_drm_screen_create_renderonly
 		SDL_PHOENIX_HID_Poll Wayland_CreateDevice wl_display_connect wl_egl_window_create xkb_context_new __wrap_ioctl
 		__wrap_close memfd_create)
@@ -158,7 +182,7 @@ _vp_verify_ffplay() {
 	done
 	local want_strs=('KMS/DRM Video Driver' '/dev/dri/' 'libdrm-phoenix:' '/dev/audio0' 'EGL_KHR_platform_gbm' 'V3D 4.2'
 		'FFPLAY_THREAD_STACK' 'Simple media player' 'ffplay-stat t=' 'FFPLAY_AUTOKEYS' '/dev/kbd0' 'WAYLAND_DISPLAY'
-		'xdg_wm_base' 'EGL_KHR_platform_wayland' 'SDL Wayland video driver')
+		'xdg_wm_base' 'EGL_KHR_platform_wayland' 'SDL Wayland video driver' 'rpivid: hardware HEVC decode' 'FFMPEG_RPIVID')
 	for s in "${want_strs[@]}"; do
 		n="$(nl_count_strings "${bin}.stripped" "${s}")"
 		[ "${n}" != 0 ] || { echo "video_player: ${name}: string '${s}': 0"; bad=1; }
@@ -198,7 +222,7 @@ p_build() {
 	# libraries and the fftools objects; FFmpeg's --toolchain=hardened would also make PIE.
 	local cfg_args=(--enable-cross-compile --arch=aarch64 --target-os=none --cross-prefix="${NL_CC%gcc}"
 		--cc="${NL_CC}" --extra-cflags="${NL_TFLAGS[*]} -O2 -g -fstack-protector-strong -I${ZV}/include" --extra-ldflags="${NL_TFLAGS[*]} -L${ZV}/lib"
-		"${FF_COMMON[@]}" --enable-asm --disable-programs --disable-shared --enable-static)
+		"${FF_COMMON[@]}" --enable-decoder=hevc_rpivid --enable-asm --disable-programs --disable-shared --enable-static)
 	local stamp
 	stamp="$( { printf '%s\n' "${cfg_args[@]}"; awk '{ print $3 }' <<<"${NL_LIBC_SYMS}" | LC_ALL=C sort -u; } |
 		sha256sum | cut -c1-16)"
@@ -228,7 +252,8 @@ p_build() {
 	local d
 	for d in HAVE_PTHREADS HAVE_NEON CONFIG_AVFILTER CONFIG_SWSCALE CONFIG_SWRESAMPLE CONFIG_HEVC_DECODER CONFIG_H264_DECODER \
 			CONFIG_AAC_DECODER CONFIG_MOV_DEMUXER CONFIG_SCALE_FILTER CONFIG_ARESAMPLE_FILTER CONFIG_ZLIB \
-			CONFIG_MPEG2VIDEO_DECODER CONFIG_AC3_DECODER CONFIG_DCA_DECODER CONFIG_MPEGPS_DEMUXER CONFIG_YADIF_FILTER; do
+			CONFIG_MPEG2VIDEO_DECODER CONFIG_AC3_DECODER CONFIG_DCA_DECODER CONFIG_MPEGPS_DEMUXER CONFIG_YADIF_FILTER \
+			CONFIG_HEVC_RPIVID_DECODER; do
 		cat "${VP_FS}/config.h" "${VP_FS}/config_components.h" | grep -qE "^#define ${d} 1$" ||
 			b_die "video_player: config: ${d} is not 1"
 	done
@@ -265,6 +290,29 @@ p_build() {
 	_vp_verify_ffplay ffplay
 	local progs=(ffplay)
 
+	# --- 4. hevc-rpivid-check: the rpivid decoder against the CPU one (libavformat +
+	# libavcodec, no SDL); the glue's 8 MiB thread stacks as in the players ------------------
+	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" \
+		-c "${F}/rpivid/check/hevc-rpivid-check.c" -o "${VP_OUT}/hevc-rpivid-check.o"
+	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=pthread_create \
+		-Wl,-Map,"${VP_OUT}/hevc-rpivid-check.map" -o "${VP_OUT}/hevc-rpivid-check" "${VP_OUT}/hevc-rpivid-check.o" "${VP_GLUE_O}" \
+		-Wl,--start-group "${VP_FS}/libavformat/libavformat.a" "${VP_FS}/libavcodec/libavcodec.a" "${VP_FS}/libswresample/libswresample.a" \
+		"${VP_FS}/libavutil/libavutil.a" "${ZV}/lib/libz.a" -Wl,--end-group -lm \
+		>"${VP_OUT}/hevc-rpivid-check-link.log" 2>&1 ||
+		{ head -40 "${VP_OUT}/hevc-rpivid-check-link.log"; b_die "video_player: hevc-rpivid-check: link failed"; }
+	"${NL_STRIP}" -o "${VP_OUT}/hevc-rpivid-check.stripped" "${VP_OUT}/hevc-rpivid-check"
+	nl_no_undefined "${VP_OUT}/hevc-rpivid-check"
+	local rs rsyms rbad=0
+	rsyms="$("${NL_NM}" "${VP_OUT}/hevc-rpivid-check")"
+	for rs in main ff_hevc_rpivid_decoder ff_hevc_decoder rpivid_hw_open rpivid_sand8_to_planar rpivid_cmd_slice __wrap_pthread_create; do
+		grep -qE " [TtWwDdRr] ${rs}\$" <<<"${rsyms}" || { echo "video_player: hevc-rpivid-check: symbol ${rs}: NO"; rbad=1; }
+	done
+	for rs in 'RPIVID-CHECK verdict=' 'rpivid: hardware HEVC decode' '/dev/vcmbox' '/tmp/.rpivid.lock'; do
+		[ "$(nl_count_strings "${VP_OUT}/hevc-rpivid-check.stripped" "${rs}")" != 0 ] || { echo "video_player: hevc-rpivid-check: string '${rs}': 0"; rbad=1; }
+	done
+	[ "${rbad}" = 0 ] || b_die "video_player: hevc-rpivid-check: verification failed (see above)"
+	progs+=(hevc-rpivid-check)
+
 	# --- 5. gtk-video: GTK 3 Wayland (gtk3_wayland, linked as its gtk3-hello) + the player's
 	# FFmpeg libraries + the glue; painted with cairo (no Mesa in this binary) --------------
 	if b_use gtk; then
@@ -293,7 +341,7 @@ p_build() {
 		local s syms bad=0 direct
 		syms="$("${NL_NM}" "${GV}")"
 		for s in main gtk_init gtk_window_fullscreen gdk_wayland_display_get_type avformat_open_input ff_h264_decoder \
-				ff_hevc_decoder ff_aac_decoder sws_scale_frame swr_convert __wrap_pthread_create __wrap_close; do
+				ff_hevc_decoder ff_hevc_rpivid_decoder ff_aac_decoder sws_scale_frame swr_convert __wrap_pthread_create __wrap_close; do
 			grep -qE " [TtWwDdRr] ${s}\$" <<<"${syms}" || { echo "video_player: gtk-video: symbol ${s}: NO"; bad=1; }
 		done
 		for s in 'GTK-VIDEO stat t=' 'GTK_VIDEO_AUTOKEYS' '/dev/audio0' 'media-playback-start' '/org/gtk/libgtk/theme/Adwaita'; do
@@ -346,6 +394,7 @@ p_build() {
 	local ST="${I}/stage" f
 	rm -rf "${ST}"
 	install -D -m 755 "${I}/bin/ffplay" "${ST}/usr/bin/ffplay"
+	install -D -m 755 "${I}/bin/hevc-rpivid-check" "${ST}/usr/bin/hevc-rpivid-check"
 	install -D -m 755 "${F}/image/video-play" "${ST}/bin/video-play"
 	if b_use gtk; then
 		install -D -m 755 "${I}/bin/gtk-video" "${ST}/usr/bin/gtk-video"
