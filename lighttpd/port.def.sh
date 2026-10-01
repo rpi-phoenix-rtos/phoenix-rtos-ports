@@ -61,6 +61,10 @@ p_prepare() {
 		# Increase the stack size. A 32 kB array allocated on the stack was causing a stack overflow on the Phoenix-RTOS.
 		LDFLAGS="${LDFLAGS} -z stack-size=65536"
 
+		# --libdir is the module directory compiled in as the default for `-m` (the
+		# plugins are linked in statically, so nothing is loaded from it): the target's.
+		# Nothing is installed there -- lib_LTLIBRARIES is empty in a static build -- so
+		# `make install` still writes only under --prefix (the work dir) and --sbindir.
 		# FIXME: lighttpd ./configure ignores custom openssl location provided by pkg-config
 		(cd "$PREFIX_PORT_WORKDIR" && "./autogen.sh")
 		(cd "$PREFIX_PORT_WORKDIR" && "./configure" LIGHTTPD_STATIC=yes CFLAGS="${LIGHTTPD_CFLAGS} ${CFLAGS}" CPPFLAGS="" LDFLAGS="${LDFLAGS}" AR_FLAGS="-r" \
@@ -69,7 +73,7 @@ p_prepare() {
 			--with-openssl="$(b_dependency_dir 'openssl')" \
 			--with-pcre="$(b_dependency_dir "pcre")" \
 			--enable-silent-rules \
-			--prefix="$PREFIX_PORT_WORKDIR" --sbindir="$PREFIX_PROG")
+			--prefix="$PREFIX_PORT_WORKDIR" --sbindir="$PREFIX_PROG" --libdir=/usr/lib/lighttpd)
 
 		sed -i.bak \
 			-e '/HAVE_MMAP 1/d' \
@@ -86,5 +90,13 @@ p_build() {
 	make -C "${PREFIX_PORT_WORKDIR}" install
 
 	$STRIP -o "$PREFIX_PROG_STRIPPED/lighttpd" "$PREFIX_PROG/lighttpd"
+
+	# checked on the stripped program (the debug info names the work tree by design);
+	# the needle also catches a path left relative by -fmacro-prefix-map
+	local needle
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	if grep -qaF "${needle}" "$PREFIX_PROG_STRIPPED/lighttpd"; then
+		b_die "lighttpd: the program names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "$PREFIX_PROG_STRIPPED/lighttpd" | head -1)"
+	fi
 	b_install "$PREFIX_PROG_TO_INSTALL/lighttpd" /usr/sbin
 }
