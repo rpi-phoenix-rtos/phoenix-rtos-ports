@@ -45,6 +45,11 @@ p_build() {
 	# Flag that can be checked in makefiles
 	export phoenix=1
 
+	# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+	# __stack_chk_fail. Enabled per port, network- and parser-facing ones first.
+	# The mbedtls makefiles take CFLAGS from the environment (p_build_test too).
+	CFLAGS+=" -fstack-protector-strong"
+
 	# Build mbedtls without tests
 	(cd "${PREFIX_PORT_WORKDIR}" && make install no_test DESTDIR="$PREFIX_MBEDTLS_DESTDIR")
 
