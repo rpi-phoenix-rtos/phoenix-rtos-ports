@@ -37,6 +37,9 @@ p_build() {
 	# TODO: set up pkgconfig for versioned ports?
 	openssl_dir=$(b_dependency_dir "openssl")
 	CFLAGS+=" -I${openssl_dir}/include"
+	# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+	# __stack_chk_fail. Enabled per port, network- and parser-facing ones first.
+	CFLAGS+=" -fstack-protector-strong"
 	LDFLAGS+=" -L${openssl_dir}/lib"
 
 	(
