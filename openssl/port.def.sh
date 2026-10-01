@@ -42,6 +42,10 @@ p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/Makefile" ]; then
+		# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+		# __stack_chk_fail. Configure takes CFLAGS from the environment and the
+		# phoenix targets add no stack protector of their own.
+		CFLAGS+=" -fstack-protector-strong"
 		cp "$PREFIX_PORT/30-phoenix.conf" "$PREFIX_PORT_WORKDIR/Configurations/"
 		# --libdir=lib: the consumers (and the pkg-config files) expect lib/, and
 		# 3.x otherwise picks lib64 on some 64-bit targets.
