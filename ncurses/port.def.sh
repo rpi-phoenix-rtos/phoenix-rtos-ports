@@ -31,6 +31,11 @@
 # terminal: xterm variants) with no /usr/share/terminfo needed at runtime.
 # Static only, no progs/tests/cxx/ada/manpages — this is a reusable libncurses.a
 # for dependent ports (nano, mc, python curses).
+#
+# --with-terminfo-dirs: the database search list is compiled into the library and
+# defaults to ${datadir}/terminfo -- the build host's prefix, which then shipped in
+# every program linking it. /usr/share/terminfo is where a database would go; the
+# image has none, so the lookup fails and the fallbacks answer, as before.
 p_prepare() {
 	if [ ! -f "$PREFIX_PORT_WORKDIR/config.status" ]; then
 		(cd "$PREFIX_PORT_WORKDIR" && "./configure" \
@@ -41,6 +46,7 @@ p_prepare() {
 			--disable-db-install --enable-termcap --disable-home-terminfo --enable-sp-funcs \
 			--without-pkg-config \
 			--with-fallbacks="xterm,xterm-256color,vt100,vt220,linux,ansi,dumb,screen" \
+			--with-terminfo-dirs=/usr/share/terminfo \
 			CFLAGS="${CFLAGS} -O2 -fPIC" CPPFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}" \
 			RANLIB="${CROSS}ranlib")
 	fi
@@ -48,6 +54,20 @@ p_prepare() {
 
 p_build() {
 	make -C "$PREFIX_PORT_WORKDIR"
+
+	# None of the libraries may compile in a build path (checked on a --strip-debug
+	# copy: the debug info names the work tree by design; the needle also catches a
+	# path -fmacro-prefix-map left relative).
+	local a needle nodebug="${PREFIX_PORT_BUILD}/nodebug.a"
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	for a in "$PREFIX_PORT_WORKDIR"/lib/*.a; do
+		"${CROSS}strip" --strip-debug -o "${nodebug}" "${a}"
+		if grep -qaF "${needle}" "${nodebug}"; then
+			b_die "ncurses: $(basename "${a}") compiles in a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${nodebug}" | head -1)"
+		fi
+	done
+	rm -f "${nodebug}"
+
 	make -C "$PREFIX_PORT_WORKDIR" install
 	# ncurses (--disable-overwrite default) installs its headers under
 	# $includedir/ncurses/. Mirror them to the include root as well so consumers
