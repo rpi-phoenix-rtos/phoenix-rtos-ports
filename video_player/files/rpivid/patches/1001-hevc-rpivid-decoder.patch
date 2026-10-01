@@ -1,0 +1,261 @@
+hevc_rpivid: the HEVC decoder with the Raspberry Pi 4 rpivid block as an hwaccel
+
+A second FFCodec, "hevc_rpivid", is FFmpeg's HEVC decoder with its new "rpivid"
+option on (1: the HW-verified tool set; 0 off, 2 all tools; -1 = 1 for hevc_rpivid,
+0 for hevc; FFMPEG_RPIVID=0|1|2 sets the default of hevc_rpivid). It is listed
+before "hevc" in allcodecs.c, so avcodec_find_decoder(AV_CODEC_ID_HEVC) returns it.
+
+With the option on, get_format() -- after a software format was chosen -- attaches
+ff_hevc_rpivid_hwaccel (libavcodec/rpivid_hevc.c, BSD-3-Clause, from the port's
+files/rpivid/src): an hwaccel that decodes into the system-memory frames the decoder
+allocated, so players see a software decoder. A stream the block cannot take stays
+on the CPU; a picture it cannot take, or a picture the block fails, switches the
+rest of the stream to the CPU (the pictures it decoded serve as references).
+
+  configure        hevc_rpivid_decoder: deps pthreads, selects hevc_decoder
+  Makefile         the rpivid objects
+  allcodecs.c      ff_hevc_rpivid_decoder before ff_hevc_decoder
+  decode.c         per-frame hwaccel data without a frames context
+  hevcdec.[ch]     the option, the attach/fallback points, SAO buffers kept for a
+                   fallback, the SEI picture hash also checked on block-decoded
+                   frames, the hevc_rpivid FFCodec
+
+Copyright 2026 Phoenix Systems
+SPDX-License-Identifier: LGPL-2.1-or-later (as the files it changes)
+
+diff --git a/configure b/configure
+index 1f0b949..29d3f14 100755
+--- a/configure
++++ b/configure
+@@ -2872,6 +2872,8 @@ hap_decoder_select="snappy texturedsp"
+ hap_encoder_deps="libsnappy"
+ hap_encoder_select="texturedspenc"
+ hevc_decoder_select="bswapdsp cabac dovi_rpu golomb hevcparse hevc_sei videodsp"
++hevc_rpivid_decoder_deps="pthreads"
++hevc_rpivid_decoder_select="hevc_decoder"
+ huffyuv_decoder_select="bswapdsp huffyuvdsp llviddsp"
+ huffyuv_encoder_select="bswapdsp huffman huffyuvencdsp llvidencdsp"
+ hymt_decoder_select="huffyuv_decoder"
+diff --git a/libavcodec/Makefile b/libavcodec/Makefile
+index 580a8d6..2f63e51 100644
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -425,6 +425,7 @@ OBJS-$(CONFIG_HCA_DECODER)             += hcadec.o
+ OBJS-$(CONFIG_HCOM_DECODER)            += hcom.o
+ OBJS-$(CONFIG_HDR_DECODER)             += hdrdec.o
+ OBJS-$(CONFIG_HDR_ENCODER)             += hdrenc.o
++OBJS-$(CONFIG_HEVC_RPIVID_DECODER)     += rpivid_hevc.o rpivid_cmd.o rpivid_hw.o rpivid_sand.o
+ OBJS-$(CONFIG_HEVC_DECODER)            += hevcdec.o hevc_mvs.o \
+                                           hevc_cabac.o hevc_refs.o hevcpred.o    \
+                                           hevcdsp.o hevc_filter.o hevc_data.o \
+diff --git a/libavcodec/allcodecs.c b/libavcodec/allcodecs.c
+index 5136a56..28dbbb6 100644
+--- a/libavcodec/allcodecs.c
++++ b/libavcodec/allcodecs.c
+@@ -160,6 +160,7 @@ extern const FFCodec ff_h264_qsv_decoder;
+ extern const FFCodec ff_h264_rkmpp_decoder;
+ extern const FFCodec ff_hap_encoder;
+ extern const FFCodec ff_hap_decoder;
++extern const FFCodec ff_hevc_rpivid_decoder;
+ extern const FFCodec ff_hevc_decoder;
+ extern const FFCodec ff_hevc_qsv_decoder;
+ extern const FFCodec ff_hevc_rkmpp_decoder;
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index ad39021..43d88e4 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -1838,16 +1838,18 @@ int ff_copy_palette(void *dst, const AVPacket *src, void *logctx)
+ int ff_hwaccel_frame_priv_alloc(AVCodecContext *avctx, void **hwaccel_picture_private)
+ {
+     const FFHWAccel *hwaccel = ffhwaccel(avctx->hwaccel);
+-    AVHWFramesContext *frames_ctx;
++    AVHWDeviceContext *device_ctx = NULL;
+ 
+     if (!hwaccel || !hwaccel->frame_priv_data_size)
+         return 0;
+ 
+     av_assert0(!*hwaccel_picture_private);
+ 
+-    frames_ctx = (AVHWFramesContext *)avctx->hw_frames_ctx->data;
++    /* an hwaccel that decodes into system memory frames has no frames context */
++    if (avctx->hw_frames_ctx)
++        device_ctx = ((AVHWFramesContext *)avctx->hw_frames_ctx->data)->device_ctx;
+     *hwaccel_picture_private = ff_refstruct_alloc_ext(hwaccel->frame_priv_data_size, 0,
+-                                                      frames_ctx->device_ctx,
++                                                      device_ctx,
+                                                       hwaccel->free_frame_priv);
+     if (!*hwaccel_picture_private)
+         return AVERROR(ENOMEM);
+diff --git a/libavcodec/hevcdec.c b/libavcodec/hevcdec.c
+index b267f6e..424e407 100644
+--- a/libavcodec/hevcdec.c
++++ b/libavcodec/hevcdec.c
+@@ -50,6 +50,9 @@
+ #include "refstruct.h"
+ #include "thread.h"
+ #include "threadframe.h"
++#if CONFIG_HEVC_RPIVID_DECODER
++#include "rpivid_hevc.h"
++#endif
+ 
+ static const uint8_t hevc_pel_weight[65] = { [2] = 0, [4] = 1, [6] = 2, [8] = 3, [12] = 4, [16] = 5, [24] = 6, [32] = 7, [48] = 8, [64] = 9 };
+ 
+@@ -519,7 +522,18 @@ static enum AVPixelFormat get_format(HEVCContext *s, const HEVCSPS *sps)
+     *fmt++ = sps->pix_fmt;
+     *fmt = AV_PIX_FMT_NONE;
+ 
++#if CONFIG_HEVC_RPIVID_DECODER
++    {
++        enum AVPixelFormat ret = ff_get_format(s->avctx, pix_fmts);
++
++        /* the rpivid block decodes into system memory frames of the software format */
++        if (ret == sps->pix_fmt && !s->avctx->hwaccel && s->rpivid_level > 0 && !s->rpivid_failed)
++            ff_rpivid_hevc_attach(s->avctx, s->rpivid_level);
++        return ret;
++    }
++#else
+     return ff_get_format(s->avctx, pix_fmts);
++#endif
+ }
+ 
+ static int set_sps(HEVCContext *s, const HEVCSPS *sps,
+@@ -551,7 +565,7 @@ static int set_sps(HEVCContext *s, const HEVCSPS *sps,
+         av_freep(&s->sao_pixel_buffer_v[i]);
+     }
+ 
+-    if (sps->sao_enabled && !s->avctx->hwaccel) {
++    if (sps->sao_enabled && (!s->avctx->hwaccel || CONFIG_HEVC_RPIVID_DECODER)) {
+         int c_count = (sps->chroma_format_idc != 0) ? 3 : 1;
+         int c_idx;
+ 
+@@ -2941,6 +2955,17 @@ static int hevc_frame_end(HEVCContext *s)
+     return 0;
+ }
+ 
++#if CONFIG_HEVC_RPIVID_DECODER
++/* Leave the rpivid block for the rest of the stream. The pictures it decoded are in
++ * system memory, so they serve the CPU decoder as references. */
++static void rpivid_fallback(HEVCContext *s, const char *why)
++{
++    av_log(s->avctx, AV_LOG_WARNING, "rpivid: continuing on the CPU decoder (%s)\n", why);
++    ff_hwaccel_uninit(s->avctx);
++    s->rpivid_failed = 1;
++}
++#endif
++
+ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
+ {
+     HEVCLocalContext *lc = s->HEVClc;
+@@ -3075,6 +3100,12 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
+             }
+         }
+ 
++#if CONFIG_HEVC_RPIVID_DECODER
++        /* a picture the block cannot take is still whole: decode it on the CPU */
++        if (s->sh.first_slice_in_pic_flag && ff_rpivid_hevc_active(s->avctx) &&
++            ff_rpivid_hevc_picture_ok(s->avctx) < 0)
++            rpivid_fallback(s, "a picture the block cannot decode");
++#endif
+         if (s->sh.first_slice_in_pic_flag && s->avctx->hwaccel) {
+             ret = FF_HW_CALL(s->avctx, start_frame, NULL, 0);
+             if (ret < 0)
+@@ -3363,7 +3394,16 @@ static int hevc_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
+             ff_hevc_unref_frame(s->ref, ~0);
+             return ret;
+         }
+-    } else {
++#if CONFIG_HEVC_RPIVID_DECODER
++        if (ff_rpivid_hevc_active(avctx)) {
++            if (ff_rpivid_hevc_failed(avctx))
++                rpivid_fallback(s, "the block failed a picture");
++            else if (s->ref)
++                s->is_decoded = 1; /* a system memory picture: the SEI checksum applies */
++        }
++#endif
++    }
++    if (!avctx->hwaccel || (CONFIG_HEVC_RPIVID_DECODER && s->is_decoded)) {
+         /* verify the SEI checksum */
+         if (avctx->err_recognition & AV_EF_CRCCHECK && s->ref && s->is_decoded &&
+             s->sei.picture_hash.is_md5) {
+@@ -3555,6 +3595,8 @@ static int hevc_update_thread_context(AVCodecContext *dst,
+         if ((ret = set_sps(s, s0->ps.sps, src->pix_fmt)) < 0)
+             return ret;
+ 
++    s->rpivid_failed = s0->rpivid_failed;
++
+     s->seq_decode = s0->seq_decode;
+     s->seq_output = s0->seq_output;
+     s->pocTid0    = s0->pocTid0;
+@@ -3614,6 +3656,19 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
+     HEVCContext *s = avctx->priv_data;
+     int ret;
+ 
++#if CONFIG_HEVC_RPIVID_DECODER
++    if (s->rpivid_level < 0) {
++        const char *e = getenv("FFMPEG_RPIVID");
++
++        s->rpivid_level = RPIVID_LEVEL_OFF;
++        if (!strcmp(avctx->codec->name, "hevc_rpivid")) {
++            s->rpivid_level = RPIVID_LEVEL_VERIFIED;
++            if (e && e[0] >= '0' && e[0] <= '2' && !e[1])
++                s->rpivid_level = e[0] - '0';
++        }
++    }
++#endif
++
+     if (avctx->active_thread_type & FF_THREAD_SLICE) {
+         s->threads_number = avctx->thread_count;
+         ret = ff_slice_thread_init_progress(avctx);
+@@ -3677,6 +3732,10 @@ static const AVOption options[] = {
+         AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
+     { "strict-displaywin", "stricly apply default display window size", OFFSET(apply_defdispwin),
+         AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
++#if CONFIG_HEVC_RPIVID_DECODER
++    { "rpivid", "rpivid hardware decode: 0 off, 1 the verified tool set, 2 all tools (-1: 1 for hevc_rpivid, 0 for hevc)",
++        OFFSET(rpivid_level), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 2, PAR },
++#endif
+     { NULL },
+ };
+ 
+@@ -3732,3 +3791,27 @@ const FFCodec ff_hevc_decoder = {
+                                NULL
+                            },
+ };
++
++#if CONFIG_HEVC_RPIVID_DECODER
++/* The same decoder with the rpivid block on (the "rpivid" option, default 1 here):
++ * listed before "hevc", so it is what avcodec_find_decoder(AV_CODEC_ID_HEVC) returns.
++ * Streams and pictures the block cannot take decode on the CPU as with "hevc". */
++const FFCodec ff_hevc_rpivid_decoder = {
++    .p.name                = "hevc_rpivid",
++    CODEC_LONG_NAME("HEVC (High Efficiency Video Coding), Raspberry Pi 4 rpivid hardware with CPU fallback"),
++    .p.type                = AVMEDIA_TYPE_VIDEO,
++    .p.id                  = AV_CODEC_ID_HEVC,
++    .priv_data_size        = sizeof(HEVCContext),
++    .p.priv_class          = &hevc_decoder_class,
++    .init                  = hevc_decode_init,
++    .close                 = hevc_decode_free,
++    FF_CODEC_DECODE_CB(hevc_decode_frame),
++    .flush                 = hevc_decode_flush,
++    UPDATE_THREAD_CONTEXT(hevc_update_thread_context),
++    .p.capabilities        = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY |
++                             AV_CODEC_CAP_SLICE_THREADS | AV_CODEC_CAP_FRAME_THREADS,
++    .caps_internal         = FF_CODEC_CAP_EXPORTS_CROPPING |
++                             FF_CODEC_CAP_ALLOCATE_PROGRESS | FF_CODEC_CAP_INIT_CLEANUP,
++    .p.profiles            = NULL_IF_CONFIG_SMALL(ff_hevc_profiles),
++};
++#endif
+diff --git a/libavcodec/hevcdec.h b/libavcodec/hevcdec.h
+index 6ef7d4f..b5f146d 100644
+--- a/libavcodec/hevcdec.h
++++ b/libavcodec/hevcdec.h
+@@ -593,6 +593,9 @@ typedef struct HEVCContext {
+                             ///< as a format defined in 14496-15
+     int apply_defdispwin;
+ 
++    int rpivid_level;       ///< rpivid hardware decode: -1 auto, RPIVID_LEVEL_* (rpivid_hevc.h)
++    int rpivid_failed;      ///< the block failed this stream: CPU decode from now on
++
+     int nal_length_size;    ///< Number of bytes used for nal length (1, 2 or 4)
+     int nuh_layer_id;
+ 
