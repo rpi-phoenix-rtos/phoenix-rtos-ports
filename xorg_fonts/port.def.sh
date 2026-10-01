@@ -116,7 +116,7 @@ p_build() {
 		( cd "$SRC/libpng-1.6.40" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
-		       CPPFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" \
+		       CPPFLAGS="--sysroot=$SYSROOT -I$PREFIX/include" CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 -fstack-protector-strong --sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" \
 		       LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" --with-zlib-prefix="$PREFIX" \
 		  && make -j4 && make install ) || b_die "xorg-fonts: libpng failed"
 		echo "xorg-fonts: libpng-1.6.40 OK"
@@ -182,12 +182,14 @@ p_build() {
 		_built libXfont2
 	fi
 
-	# --- expat (fontconfig's XML parser) ---
+	# --- expat (fontconfig's XML parser; also dbus's and wayland's) ---
+	# -fstack-protector-strong here and on libpng: libphoenix provides
+	# __stack_chk_guard and __stack_chk_fail, and both parse untrusted input.
 	if _need expat "$PREFIX/lib/libexpat.a"; then
 		_fetch_extract expat-2.5.0 "https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.bz2"
 		( cd "$SRC/expat-2.5.0" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
-		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT" \
+		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 -fstack-protector-strong --sysroot=$SYSROOT" \
 		       --without-docbook --without-examples --without-tests \
 		  && make -j4 && make install ) || b_die "xorg-fonts: expat failed"
 		echo "xorg-fonts: expat-2.5.0 OK"
