@@ -556,9 +556,11 @@ with open(dst, 'w') as f:
 PY
 
 	# --- wlroots 0.20 (drm + libinput + headless; gles2 + pixman; gbm; libseat) ---
+	# -Dicon_directory: the last entry of the xcursor theme search path, by default
+	# <prefix>/share/icons -- this build's staging prefix on the build host.
 	_meson_pkg wlroots wlroots-build -Dbackends=drm,libinput -Drenderers=gles2 -Dallocators=gbm \
 		-Dsession=enabled -Dxwayland=disabled -Dexamples=false -Dlibliftoff=disabled \
-		-Dcolor-management=disabled -Dxcb-errors=disabled -Dwerror=false
+		-Dcolor-management=disabled -Dxcb-errors=disabled -Dwerror=false -Dicon_directory=/usr/share/icons
 	grep -E 'drm-backend|libinput-backend|gles2-renderer|gbm-allocator|session|dmabuf_(linux|fallback)' \
 		"${out}/wlroots-build-setup.log" | sed 's/^/labwc_desktop: wlroots: /' || true
 
@@ -731,6 +733,15 @@ PY
 			n=$(grep -cF -- "${s}" <<<"${bs}" || true)
 			[ "${n}" = 0 ] || { echo "labwc_desktop: OLD-LANE string '${s}' in ${o}: ${n}"; bad=1; }
 		done
+	done
+	# no build path in the shipped programs (absolute, or left relative by -fmacro-prefix-map)
+	local needle
+	needle="$(basename "$(dirname "${B}")")/$(basename "${B}")"
+	for o in labwc-stripped foot-stripped fuzzel-stripped swaybg-stripped; do
+		if grep -qaF "${needle}" "${BIN}/${o}"; then
+			echo "labwc_desktop: ${o} names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${BIN}/${o}" | head -1)"
+			bad=1
+		fi
 	done
 	(cd "${BIN}" && sha256sum labwc-stripped foot-stripped fuzzel-stripped swaybg-stripped) >"${I}/SHA256SUMS"
 	cat "${I}/SHA256SUMS"
