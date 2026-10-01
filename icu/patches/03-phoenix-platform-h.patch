@@ -1,0 +1,23 @@
+--- a/common/unicode/platform.h
++++ b/common/unicode/platform.h
+@@ -602,6 +602,10 @@
+ #elif U_PLATFORM_IS_LINUX_BASED || U_PLATFORM_IS_DARWIN_BASED || \
+         U_PLATFORM == U_PF_EMSCRIPTEN
+ #   define U_CHARSET_IS_UTF8 1
++#elif defined(__phoenix__)
++    /* Phoenix: text is UTF-8, as on Linux. (The default codepage would otherwise
++     * come from nl_langinfo(CODESET), which libphoenix answers "ANSI_X3.4-1968".) */
++#   define U_CHARSET_IS_UTF8 1
+ #else
+ #   define U_CHARSET_IS_UTF8 0
+ #endif
+@@ -726,6 +730,9 @@
+ #       define U_HAVE_CHAR16_T 1
+ #   elif U_PLATFORM_IS_DARWIN_BASED || (U_PLATFORM == U_PF_CYGWIN && CYGWIN_VERSION_DLL_MAJOR < 3005)
+ #       define U_HAVE_CHAR16_T 0
++#   elif defined(__phoenix__) && !__has_include(<uchar.h>)
++        /* Phoenix: libphoenix has no C11 <uchar.h> (yet); ptypes.h then typedefs char16_t. */
++#       define U_HAVE_CHAR16_T 0
+ #   else
+         // conformant C11
+ #       define U_HAVE_CHAR16_T 1

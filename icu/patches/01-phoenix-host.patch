@@ -1,0 +1,40 @@
+--- a/acinclude.m4
++++ b/acinclude.m4
+@@ -34,6 +34,7 @@
+ 		icu_cv_host_frag=mh-linux-va
+ 	fi ;;
+ *-*-linux*|*-*-gnu|*-*-k*bsd*-gnu|*-*-kopensolaris*-gnu) icu_cv_host_frag=mh-linux ;;
++*-*-phoenix*)	icu_cv_host_frag=mh-linux ;;
+ i[[34567]]86-*-cygwin) 
+ 	if test "$GCC" = yes; then
+ 		icu_cv_host_frag=mh-cygwin
+--- a/configure.ac
++++ b/configure.ac
+@@ -613,7 +613,7 @@
+ # Check to see if genccode can generate simple assembly.
+ GENCCODE_ASSEMBLY=
+ case "${host}" in
+-*-linux*|*-kfreebsd*-gnu*|i*86-*-*bsd*|i*86-pc-gnu)
++*-linux*|*-kfreebsd*-gnu*|i*86-*-*bsd*|i*86-pc-gnu|*-phoenix*)
+     if test "$GCC" = yes; then
+         # We're using gcc, and the simple -a gcc command line works for genccode
+         GENCCODE_ASSEMBLY="-a gcc"
+--- a/configure
++++ b/configure
+@@ -5765,6 +5765,7 @@
+ 		icu_cv_host_frag=mh-linux-va
+ 	fi ;;
+ *-*-linux*|*-*-gnu|*-*-k*bsd*-gnu|*-*-kopensolaris*-gnu) icu_cv_host_frag=mh-linux ;;
++*-*-phoenix*)	icu_cv_host_frag=mh-linux ;;
+ i[34567]86-*-cygwin)
+ 	if test "$GCC" = yes; then
+ 		icu_cv_host_frag=mh-cygwin
+@@ -7008,7 +7009,7 @@
+ # Check to see if genccode can generate simple assembly.
+ GENCCODE_ASSEMBLY=
+ case "${host}" in
+-*-linux*|*-kfreebsd*-gnu*|i*86-*-*bsd*|i*86-pc-gnu)
++*-linux*|*-kfreebsd*-gnu*|i*86-*-*bsd*|i*86-pc-gnu|*-phoenix*)
+     if test "$GCC" = yes; then
+         # We're using gcc, and the simple -a gcc command line works for genccode
+         GENCCODE_ASSEMBLY="-a gcc"

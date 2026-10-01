@@ -1,0 +1,87 @@
+// ICU data filter for Phoenix-RTOS (ICU's data build tool, ICU_DATA_FILTER_FILE).
+// Schema: icu/source/python/icutools/databuilder/filtration_schema.json.
+// NB: ICU strips only comment lines that START with "//" (column 0); a comment
+// anywhere else breaks the parse.
+//
+// Sized for WebKit (WTF/JavaScriptCore/WebCore) and HarfBuzz's ICU bridge. What
+// they use was surveyed from the WPE WebKit 2.54.0 sources: ubrk (word, line,
+// sentence, character), ucol + usearch (sorting, find-in-page), unorm2
+// (NFC/NFD/NFKC/NFKD), uidna UTS #46 (URL host names), ucnv (TextCodecICU),
+// ucal/udat/udatpg/unum/unumberformatter/uplrules/ureldatefmt/ulistformatter/
+// uldnames/ucurr (JavaScriptCore Intl), uscript, ubidi and uchar properties.
+// Nothing uses utrans, uspoof, usprep or u_charName.
+//
+// The strategy is subtractive: everything stays unless excluded here.
+//
+// localeFilter: the locale data (the *_tree categories: locales, coll, brkitr,
+// curr, lang, region, unit, zone) of these languages, each with all of its
+// regional variants (en_GB, de_AT, zh_Hant_TW, ...). root is always included.
+//
+// conversion_mappings: the converter tables kept. ICU's algorithmic converters
+// (UTF-8/16/32, US-ASCII, ISO-8859-1, UTF-7, SCSU, BOCU-1, CESU-8,
+// IMAP-mailbox-name) need no table and are always present. The tables are, in
+// order:
+//   1. WebKit 2.54's TextCodecICU list (Source/WebCore/PAL/pal/text/
+//      TextCodecICU.cpp, encodingNames[]): ISO-8859-2, -4, -5, -10, -13, -14,
+//      -15, KOI8-R, macintosh, windows-1250, -1251, -1254, -1256, -1258,
+//      x-mac-cyrillic, x-mac-greek, x-mac-centraleurroman, x-mac-turkish,
+//      EUC-TW. (ISO-8859-16 is on that list too, but ICU ships no table for
+//      it.) WebKit decodes UTF-8/16, Latin-1, the other single-byte encodings
+//      and all the CJK ones with codecs of its own.
+//   2. The rest of the WHATWG single-byte set, for ICU users other than WebKit
+//      (a few kB each): ISO-8859-3, -6, -7, -8, -9, -11, KOI8-U, IBM866,
+//      windows-874, -1252, -1253, -1255, -1257.
+// NOT kept: the CJK tables (Shift_JIS ibm-943_P15A-2003, EUC-JP euc-jp-2007,
+// EUC-KR ibm-970_P110_P110-2006_U2, GB18030 gb18030-2022, and GBK/Big5/
+// windows-949 = windows-936-2000/windows-950-2000/windows-949-2000, which are
+// extension tables needing their <icu:base> tables ibm-1386_P100-2001/
+// ibm-1373_P100-2002/ibm-1363_P11B-1998 too, or they fail to open with
+// U_FILE_ACCESS_ERROR). WebKit decodes all of those itself (TextCodecCJK), and
+// they would cost ~1.3 MB. Add them here if another ICU user needs them.
+//
+// translit, confusables, stringprep, unames, rbnf_tree: transliterators
+// (utrans), spoof-check confusables (uspoof), StringPrep profiles (usprep;
+// IDNA here is UTS #46, whose uts46.nrm is part of "normalization", which
+// stays), Unicode character names (u_charName) and rule-based number spellout
+// (RBNF). Not used.
+//
+// brkitr_dictionaries: the Chinese/Japanese (cjdict) and Thai dictionaries
+// stay; Lao, Burmese and Khmer go (those scripts then break per cluster). The
+// LSTM and AdaBoost models are excluded by ICU by default.
+{
+  "strategy": "subtractive",
+  "localeFilter": {
+    "filterType": "language",
+    "includelist": [
+      "en", "de", "fr", "es", "it", "pt", "nl", "pl", "cs", "sk",
+      "sv", "da", "nb", "fi", "hu", "ro", "el", "tr", "uk", "ru",
+      "ar", "he", "ja", "ko", "zh"
+    ]
+  },
+  "featureFilters": {
+    "conversion_mappings": {
+      "includelist": [
+        "ibm-912_P100-1995", "ibm-914_P100-1995", "ibm-915_P100-1995",
+        "iso-8859_10-1998", "ibm-921_P100-1995", "iso-8859_14-1998",
+        "ibm-923_P100-1998", "ibm-878_P100-1996", "macos-0_2-10.2",
+        "ibm-5346_P100-1998", "ibm-5347_P100-1998", "ibm-5350_P100-1998",
+        "ibm-9448_X100-2005", "ibm-5354_P100-1998", "macos-7_3-10.2",
+        "macos-6_2-10.4", "macos-29-10.2", "macos-35-10.2", "euc-tw-2014",
+
+        "ibm-913_P100-2000", "ibm-1089_P100-1995", "ibm-9005_X110-2007",
+        "ibm-5012_P100-1999", "ibm-920_P100-1995", "iso-8859_11-2001",
+        "ibm-1168_P100-2002", "ibm-866_P100-1995", "windows-874-2000",
+        "ibm-5348_P100-1997", "ibm-5349_P100-1998", "ibm-9447_P100-2002",
+        "ibm-9449_P100-2002"
+      ]
+    },
+    "translit": "exclude",
+    "confusables": "exclude",
+    "stringprep": "exclude",
+    "unames": "exclude",
+    "rbnf_tree": "exclude",
+    "brkitr_dictionaries": {
+      "includelist": ["cjdict", "thaidict"]
+    }
+  }
+}

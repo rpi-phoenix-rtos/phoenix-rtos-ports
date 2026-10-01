@@ -1,0 +1,17 @@
+--- a/common/putil.cpp
++++ b/common/putil.cpp
+@@ -75,6 +75,14 @@
+ #include <locale.h>
+ #include <float.h>
+ 
++/* Phoenix: libphoenix's <locale.h> has no LC_MESSAGES (yet). Any category its
++ * setlocale() does not know makes it return NULL, which sends
++ * uprv_getPOSIXIDForCategory() to the environment (LC_ALL, LC_MESSAGES, LANG):
++ * the lookup POSIX describes. Drop this once libphoenix defines it. */
++#if defined(__phoenix__) && !defined(LC_MESSAGES)
++#define LC_MESSAGES 6
++#endif
++
+ #ifndef U_COMMON_IMPLEMENTATION
+ #error U_COMMON_IMPLEMENTATION not set - must be set for all ICU source files in common/ - see https://unicode-org.github.io/icu/userguide/icu/howtouseicu.html
+ #endif
