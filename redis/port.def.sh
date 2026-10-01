@@ -48,7 +48,8 @@ p_build() {
 	# Override the framework-exported CFLAGS on the command line: it carries
 	# -I<sysroot>/include, which holds the official lua 5.3.6 port's headers and
 	# would shadow Redis's bundled deps/lua (5.1) in eval.c (lua_open /
-	# LUA_GLOBALSINDEX). The cross gcc's built-in sysroot still resolves libphoenix.
+	# LUA_GLOBALSINDEX). libphoenix then comes from the toolchain's bundled copy, which
+	# rebuild-rpi4b-fast.sh refreshes from the sysroot right after the core stage.
 	# What it is replaced with reaches redis AND its bundled deps (hiredis, lua,
 	# linenoise, hdr_histogram, fpconv), unlike REDIS_CFLAGS:
 	# -fstack-protector-strong, whose __stack_chk_guard/__stack_chk_fail libphoenix
