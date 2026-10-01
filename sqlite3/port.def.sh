@@ -53,6 +53,10 @@ p_prepare() {
 p_build() {
 	cd "${PREFIX_PORT_WORKDIR}"
 
+	# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+	# __stack_chk_fail. SQL text and database files are both untrusted input.
+	CFLAGS+=" -fstack-protector-strong"
+
 	# libsqlite3.a + public headers (so other ports, e.g. CPython's _sqlite3
 	# module, can link against the official SQLite port instead of a private copy).
 	"${CROSS}gcc" ${CFLAGS} -O2 ${SQLITE_FEATURES} -c sqlite3.c -o sqlite3.o
