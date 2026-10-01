@@ -165,8 +165,11 @@ p_build() {
 	mkdir -p "${ZV}/include" "${ZV}/lib"
 	cp -a "${ZD}/include/zlib.h" "${ZD}/include/zconf.h" "${ZV}/include/"
 	cp -a "${ZD}/lib/libz.a" "${ZV}/lib/"
+	# -fstack-protector-strong: libphoenix provides __stack_chk_guard and __stack_chk_fail,
+	# and the demuxers and decoders parse untrusted files. --extra-cflags reaches the
+	# libraries and the fftools objects; FFmpeg's --toolchain=hardened would also make PIE.
 	local cfg_args=(--enable-cross-compile --arch=aarch64 --target-os=none --cross-prefix="${NL_CC%gcc}"
-		--cc="${NL_CC}" --extra-cflags="${NL_TFLAGS[*]} -O2 -g -I${ZV}/include" --extra-ldflags="${NL_TFLAGS[*]} -L${ZV}/lib"
+		--cc="${NL_CC}" --extra-cflags="${NL_TFLAGS[*]} -O2 -g -fstack-protector-strong -I${ZV}/include" --extra-ldflags="${NL_TFLAGS[*]} -L${ZV}/lib"
 		"${FF_COMMON[@]}" --enable-asm --disable-programs --disable-shared --enable-static)
 	local stamp
 	stamp="$( { printf '%s\n' "${cfg_args[@]}"; awk '{ print $3 }' <<<"${NL_LIBC_SYMS}" | LC_ALL=C sort -u; } |
