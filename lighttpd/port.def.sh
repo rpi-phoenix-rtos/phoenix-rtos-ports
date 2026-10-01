@@ -51,7 +51,9 @@ p_prepare() {
 
 	if [ ! -f "$PREFIX_PORT_WORKDIR/config.h" ]; then
 
-		LIGHTTPD_CFLAGS="-DLIGHTTPD_STATIC -DPHOENIX"
+		# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+		# __stack_chk_fail. Enabled per port, network- and parser-facing ones first.
+		LIGHTTPD_CFLAGS="-DLIGHTTPD_STATIC -DPHOENIX -fstack-protector-strong"
 
 		WITH_ZLIB="no"
 		b_use "zlib" && WITH_ZLIB="yes"
