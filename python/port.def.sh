@@ -74,7 +74,11 @@ p_common() {
 	# Every TU is compiled with the Phoenix bring-up shim -include'd first (early
 	# sys/time.h+resource.h+mman.h for complete struct timeval/rusage, missing
 	# _SC_* names, clock_getres/msync no-ops, O_NOFOLLOW=0, SOMAXCONN=128).
-	PY_CFLAGS="${CFLAGS} -include ${PREFIX_PORT}/phoenix-py-compat.h"
+	# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+	# __stack_chk_fail; the interpreter, its bundled expat/mpdecimal/HACL* and
+	# _curses all get it. _curses resolves both through python3's symbol table
+	# at dlopen time, like the rest of its libc and C-API references.
+	PY_CFLAGS="${CFLAGS} -fstack-protector-strong -include ${PREFIX_PORT}/phoenix-py-compat.h"
 }
 
 p_prepare() {
