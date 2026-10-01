@@ -98,6 +98,12 @@ p_prepare() {
 
 # _sdl2_kmsdrm_cmake <src> <build dir> <install prefix> <SDL_VULKAN ON|OFF>
 #                    [<pkg-config> <extra C flags> <SDL_WAYLAND ON|OFF>]
+# SDL_PTHREADS_SEM=OFF: SDL's semaphores stay the generic ones over its condition variables,
+# whose timed waits patch 0011 puts on CLOCK_MONOTONIC (what the games and ffplay have run
+# on). Since libphoenix has <semaphore.h> the option's probe passes and would select
+# src/thread/pthread/SDL_syssem.c instead: SDL_SemWaitTimeout() as sem_timedwait() on a
+# CLOCK_REALTIME deadline (the wall clock the boot moves from 1970), and two descriptors held
+# by every SDL semaphore (libphoenix's semaphores block on a pipe).
 _sdl2_kmsdrm_cmake() {
 	local src="$1" bd="$2" ip="$3" vk="$4" pkgc="${5:-${PREFIX_PORT_BUILD}/nl/pkg-config-sdl}" xcf="${6:-}" wl="${7:-OFF}"
 	local wl_opts=()
@@ -121,6 +127,7 @@ _sdl2_kmsdrm_cmake() {
 			-DPHOENIX=ON \
 			-DSDL_LIBC=ON \
 			-DSDL_PTHREADS=ON \
+			-DSDL_PTHREADS_SEM=OFF \
 			-DSDL_CLOCK_GETTIME=ON \
 			-DSDL_SHARED=OFF \
 			-DSDL_STATIC=ON \
