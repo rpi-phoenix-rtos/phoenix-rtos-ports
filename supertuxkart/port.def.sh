@@ -53,9 +53,12 @@ p_prepare() {
 	#       on unknown CMAKE_SYSTEM_NAME; add a Generic branch (treat as Linux but
 	#       with timers OFF: Phoenix rusage lacks ru_maxrss/minflt/majflt and has
 	#       no CLOCK_PROCESS_CPUTIME_ID, so util/timer.* would not compile).
-	#  0004 simde-common.h — Phoenix <fenv.h> is a poison-pill stub (#errors on
-	#       include); skip both fenv-detection blocks so simde uses its non-fenv
-	#       rounding fallback (SIMDE_HAVE_FENV_H left undefined).
+	#  0004 simde-common.h — skip both fenv-detection blocks so simde uses its
+	#       non-fenv rounding fallback (SIMDE_HAVE_FENV_H left undefined). Still
+	#       needed although libphoenix now implements <fenv.h> (it used to be
+	#       libmcs's #error stub): the toolchain's libstdc++ was configured without
+	#       _GLIBCXX_HAVE_FENV_H, so in C++ its <fenv.h>/<cfenv> wrappers include
+	#       nothing, and simde would see the header yet no FE_* or fe*() at all.
 	#  0005 vk_mem_alloc.h — Phoenix libc has no aligned_alloc/posix_memalign; add
 	#       a __phoenix__ vma_aligned_alloc/free using a base-stashing malloc.
 	#  0006 irrlicht/irrTypes.h — Irrlicht passes wchar_t* to swprintf's %s, which
