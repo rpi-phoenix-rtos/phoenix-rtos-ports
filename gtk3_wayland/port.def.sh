@@ -27,6 +27,7 @@
 	#                                xorg-drm build), with files/gtkphx_noegl.c as its
 	#                                default EGL: GTK here draws with cairo/wl_shm only
 	#   gtk3-hello                   the M7 test program (files/src/gtk3-hello.c)
+	#   gio-monitor-test             GIO file monitoring self-test (files/src/gio-monitor-test.c)
 	#
 	# Everything is configured for the TARGET's paths (--prefix /usr --sysconfdir /etc
 	# --localstatedir /var) and installed with DESTDIR into this port's prefix; the
@@ -58,7 +59,8 @@
 
 	# rootfs: also copy the staging tree (stage/) into the image rootfs.
 	# demos:  put the test programs in the staging tree too: gtk3-hello, gtk3-demo,
-	#         gtk3-widget-factory (built and verified either way; nothing ships them).
+	#         gtk3-widget-factory, gio-monitor-test (built and verified either way;
+	#         nothing ships them).
 	iuse="rootfs demos"
 
 	supports="phoenix>=3.3"
@@ -71,7 +73,8 @@
 #   deps/                        the private ports views + the Wayland/epoxy snapshots
 #   phoenix-aarch64{,-wl,-gtk}.cross, pkg-config-phoenix, host-bin/phx-{gcc,g++}
 #   data/glib-2.0/schemas/       gschemas.compiled (host-compiled)
-#   bin/                         gtk3-hello, gtk3-demo, gtk3-widget-factory (+ -stripped)
+#   bin/                         gtk3-hello, gtk3-demo, gtk3-widget-factory,
+#                                gio-monitor-test (+ -stripped)
 #   stage/ + stage.MANIFEST      the files for the target rootfs (new names only; the
 #                                bin/ programs only with USE demos)
 #   SHA256SUMS
@@ -551,10 +554,14 @@ PY
 		touch "${out}/pcre2.built"
 	fi
 
+	# file_monitor_backend=poll: Phoenix has no inotify/kqueue; GLib patch 0004 adds the
+	# stat()-polling GLocalFileMonitor (without it g_file_monitor_directory() fails and
+	# Thunar, xfdesktop and the panel never refresh). Named explicitly so that a glib
+	# without the patch fails at configure instead of building without file monitoring.
 	_meson_pkg glib glib-build -Dnls=disabled -Dlibmount=disabled -Dselinux=disabled -Dxattr=false \
 		-Dlibelf=disabled -Dsysprof=disabled -Dintrospection=disabled -Dtests=false -Dinstalled_tests=false \
 		-Ddocumentation=false -Dman-pages=disabled -Ddtrace=disabled -Dsystemtap=disabled \
-		-Dbsymbolic_functions=false -Dglib_debug=disabled -Dfile_monitor_backend=auto
+		-Dbsymbolic_functions=false -Dglib_debug=disabled -Dfile_monitor_backend=poll
 	_fix_glib_pc
 
 	_meson_pkg fribidi fribidi-build -Ddocs=false -Dbin=false -Dtests=false
@@ -622,6 +629,16 @@ PY
 		$("${PKGC}" --libs gtk-layer-shell-0 gtk+-3.0 gtk+-wayland-3.0) -Wl,--end-group >"${out}/gtk3-hello-link.log" 2>&1 ||
 		{ grep -v 'warning: .* is not fully supported' "${out}/gtk3-hello-link.log" | head -40; b_die "gtk3_wayland: gtk3-hello: link failed"; }
 	"${TC}-strip" -o "${BIN}/gtk3-hello-stripped" "${BIN}/gtk3-hello"
+	# gio-monitor-test: GIO alone, linked the same way
+	# shellcheck disable=2046
+	"${PHXCC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${TFLAGS[@]}" -I"${SYSD}/include" \
+		$("${PKGC}" --cflags gio-2.0 gio-unix-2.0) -c "${F}/src/gio-monitor-test.c" -o "${out}/obj/gio-monitor-test.o"
+	# shellcheck disable=2046
+	"${PHXCC}" "${TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 \
+		-o "${BIN}/gio-monitor-test" "${out}/obj/gio-monitor-test.o" -L"${SYSD}/lib" -Wl,--start-group \
+		$("${PKGC}" --libs gio-2.0 gio-unix-2.0) -Wl,--end-group >"${out}/gio-monitor-test-link.log" 2>&1 ||
+		{ grep -v 'warning: .* is not fully supported' "${out}/gio-monitor-test-link.log" | head -40; b_die "gtk3_wayland: gio-monitor-test: link failed"; }
+	"${TC}-strip" -o "${BIN}/gio-monitor-test-stripped" "${BIN}/gio-monitor-test"
 	# GTK's own demos, as meson linked them
 	local d b
 	for d in gtk-demo/gtk3-demo widget-factory/gtk3-widget-factory; do
@@ -632,6 +649,9 @@ PY
 
 	# --- verification (the tools build's gate) ---
 	local bad=0 o n interp syms x11 s m strs
+	n="$(grep -cE ' [Tt] g_poll_local_file_monitor_get_type$' <<<"$("${TC}-nm" "${BIN}/gio-monitor-test")" || true)"
+	echo "gtk3_wayland: GIO poll file monitor (GLib patch 0004) in gio-monitor-test: ${n}/1"
+	[ "${n}" = 1 ] || bad=1
 	for o in gtk3-hello gtk3-demo gtk3-widget-factory; do
 		und="$("${TC}-nm" -u "${BIN}/${o}" || true)"
 		n=$(grep -c . <<<"${und}" || true)
@@ -674,7 +694,7 @@ PY
 	local ST="${I}/stage"
 	rm -rf "${ST}"
 	if b_use demos; then
-		for o in gtk3-hello gtk3-demo gtk3-widget-factory; do
+		for o in gtk3-hello gtk3-demo gtk3-widget-factory gio-monitor-test; do
 			install -D -m 755 "${BIN}/${o}-stripped" "${ST}/bin/${o}"
 		done
 	fi
