@@ -291,11 +291,12 @@ p_build() {
 	local progs=(ffplay)
 
 	# --- 4. hevc-rpivid-check: the rpivid decoder against the CPU one (libavformat +
-	# libavcodec, no SDL); the glue's 8 MiB thread stacks as in the players ------------------
+	# libavcodec, no SDL); the glue's 8 MiB thread stacks and ffplay's 16 MiB main stack (the
+	# CPU decoder runs on the main thread with -t 1 and in the stream probe) -----------------
 	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" \
 		-c "${F}/rpivid/check/hevc-rpivid-check.c" -o "${VP_OUT}/hevc-rpivid-check.o"
 	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=pthread_create \
-		-Wl,-Map,"${VP_OUT}/hevc-rpivid-check.map" -o "${VP_OUT}/hevc-rpivid-check" "${VP_OUT}/hevc-rpivid-check.o" "${VP_GLUE_O}" \
+		-Wl,-z,stack-size=16777216 -Wl,-Map,"${VP_OUT}/hevc-rpivid-check.map" -o "${VP_OUT}/hevc-rpivid-check" "${VP_OUT}/hevc-rpivid-check.o" "${VP_GLUE_O}" \
 		-Wl,--start-group "${VP_FS}/libavformat/libavformat.a" "${VP_FS}/libavcodec/libavcodec.a" "${VP_FS}/libswresample/libswresample.a" \
 		"${VP_FS}/libavutil/libavutil.a" "${ZV}/lib/libz.a" -Wl,--end-group -lm \
 		>"${VP_OUT}/hevc-rpivid-check-link.log" 2>&1 ||

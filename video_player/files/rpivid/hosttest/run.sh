@@ -128,6 +128,9 @@ for c in "${clips[@]}"; do
 	if grep -q 'rpivid: CPU decode:' "${work}/${b}.hw.out"; then
 		echo "CPU       ${b}: $(grep -o 'rpivid: CPU decode: .*' "${work}/${b}.hw.out" | head -1)"
 		n_cpu=$((n_cpu + 1))
+	elif [ "${npic}" = 0 ] && grep -q 'continuing on the CPU decoder' "${work}/${b}.hw.out"; then
+		echo "CPU       ${b}: $(grep -o 'rpivid: picture POC [0-9-]*: .*' "${work}/${b}.hw.out" | head -1)"
+		n_cpu=$((n_cpu + 1))
 	elif ! grep -q '^PIC ' "${ref}" 2>/dev/null; then
 		echo "REF-SKIP  ${b}: ${npic} pictures on the hwaccel; reference: $(grep -E 'rejected|only|no |FAILED' "${work}/${b}.ref.out" | head -1)"
 		n_skip=$((n_skip + 1))

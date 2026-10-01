@@ -95,6 +95,9 @@ static pthread_mutex_t hw_lock = PTHREAD_MUTEX_INITIALIZER;
 static rpivid_hw_t *hw_owner;
 static int hw_wedged;
 static volatile uint32_t irq_active;
+/* the interrupt controller as the handler sees it: set before the handler is
+ * registered, cleared before it is removed (the kernel deletes it with the handle) */
+static volatile uint8_t *volatile isr_intc;
 
 
 #ifndef RPIVID_MMIO_HOOKS
@@ -200,13 +203,19 @@ static void *map_phys(uint32_t base, uint32_t size)
 
 static int hw_isr(unsigned int n, void *arg)
 {
-	rpivid_hw_t *hw = arg;
-	uint32_t ic = rd(hw->intc, ARG_IC_ICTRL), a = ic & (ACTIVE1_INT_SET | ACTIVE2_INT_SET);
+	volatile uint8_t *intc = isr_intc;
+	uint32_t ic, a;
 
 	(void)n;
+	(void)arg;
+	if (intc == NULL) {
+		return -1; /* not ours (any more) */
+	}
+	ic = rd(intc, ARG_IC_ICTRL);
+	a = ic & (ACTIVE1_INT_SET | ACTIVE2_INT_SET);
 	if (a != 0u) {
 		irq_active |= a;
-		wr(hw->intc, ARG_IC_ICTRL, ic & ~SET_ZERO_MASK);
+		wr(intc, ARG_IC_ICTRL, ic & ~SET_ZERO_MASK);
 	}
 	return 1;
 }
@@ -320,6 +329,8 @@ void rpivid_dma_free(rpivid_dma_t *d)
 static void hw_release(rpivid_hw_t *hw)
 {
 	if (hw->have_irq) {
+		isr_intc = NULL;
+		rpivid_dma_fence();
 		resourceDestroy(hw->irq_h);
 		resourceDestroy(hw->irq_cond);
 		resourceDestroy(hw->irq_mtx);
@@ -400,10 +411,13 @@ int rpivid_hw_open(rpivid_hw_t **out, char *why, size_t whylen)
 	wr(hw->intc, ARG_IC_ICTRL, rd(hw->intc, ARG_IC_ICTRL));
 	irq_active = 0;
 	if ((condCreate(&hw->irq_cond) == 0) && (mutexCreate(&hw->irq_mtx) == 0)) {
-		if (interrupt(RPIVID_IRQ, hw_isr, hw, hw->irq_cond, &hw->irq_h) >= 0) {
+		isr_intc = hw->intc;
+		rpivid_dma_fence();
+		if (interrupt(RPIVID_IRQ, hw_isr, NULL, hw->irq_cond, &hw->irq_h) >= 0) {
 			hw->have_irq = 1;
 		}
 		else {
+			isr_intc = NULL;
 			resourceDestroy(hw->irq_cond);
 			resourceDestroy(hw->irq_mtx);
 		}

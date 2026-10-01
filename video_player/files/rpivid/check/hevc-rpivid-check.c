@@ -34,6 +34,11 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef __phoenix__
+#include <unistd.h>
+#include <sys/threads.h>
+#endif
+
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
@@ -86,10 +91,34 @@ static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
 }
 
 
-/* process CPU time, where the C library has it (Phoenix-RTOS: no; use top) */
+/* The CPU time of this process's threads (decoder threads included while they exist:
+ * a pass reads it before closing its decoder). Phoenix-RTOS: the kernel's per-thread
+ * accounting, as top shows it. */
 static double cpu_seconds(void)
 {
-#ifdef CLOCK_PROCESS_CPUTIME_ID
+#if defined(__phoenix__)
+	int n = threadcount(), i;
+	threadinfo_t *ti;
+	pid_t me = getpid();
+	uint64_t us = 0;
+
+	if (n <= 0) {
+		return -1.0;
+	}
+	n += 16;
+	ti = av_malloc_array(n, sizeof(*ti));
+	if (ti == NULL) {
+		return -1.0;
+	}
+	n = threadsinfo(n, PH_THREADINFO_BASIC, ti);
+	for (i = 0; i < n; i++) {
+		if (ti[i].pid == me) {
+			us += (uint64_t)ti[i].cpuTime;
+		}
+	}
+	av_free(ti);
+	return (n > 0) ? (double)us / 1e6 : -1.0;
+#elif defined(CLOCK_PROCESS_CPUTIME_ID)
 	struct timespec t;
 
 	if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t) == 0) {
