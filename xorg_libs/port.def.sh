@@ -172,9 +172,23 @@ p_build() {
 	_xbuild libxcb-1.16             "$XARCHIVE/lib/libxcb-1.16.tar.xz" "--disable-mitshm"
 
 	# ---- libX11 (core Xlib) ----
+	# --datadir / --with-locale-lib-dir: the TARGET's. libX11 compiles them in (XErrorDB,
+	# XKeysymDB, Xcms.txt, the XLC locale database) and writes the locale dir into the
+	# Compose files it generates, whose `include "<dir>/en_US.UTF-8/Compose"` lines named
+	# the build host. Installed through DESTDIR (the data would otherwise go to the
+	# host's /usr/share), then landed in the prefix: the library half where it always
+	# was, the data under $PREFIX/share/X11, from where the locale DB is staged below.
+	local x11stage="${PREFIX_PORT_BUILD}/libX11-stage"
+	rm -rf "$x11stage"
 	XCFLAGS_EXTRA="-DMAXHOSTNAMELEN=256 -DXOS_USE_MTSAFE_PWDAPI -D_POSIX_THREAD_SAFE_FUNCTIONS=200809L" \
+	XMAKE_VARS="DESTDIR=$x11stage" \
 		_xbuild libX11-1.8.7 "$XBASE/lib/libX11-1.8.7.tar.gz" \
-		"--without-xmlto --disable-specs --disable-devel-docs xorg_cv_malloc0_returns_null=no"
+		"--without-xmlto --disable-specs --disable-devel-docs xorg_cv_malloc0_returns_null=no --datadir=/usr/share --with-locale-lib-dir=/usr/lib/X11/locale"
+	[ -f "$x11stage$PREFIX/lib/libX11.a" ] && [ -d "$x11stage/usr/share/X11/locale" ] ||
+		b_die "xorg-libs: libX11 did not install into $x11stage"
+	cp -a "$x11stage$PREFIX/." "$PREFIX/"
+	mkdir -p "$PREFIX/share/X11"
+	cp -a "$x11stage/usr/share/X11/." "$PREFIX/share/X11/"
 
 	# ---- extension / render libs ----
 	_xbuild libXext-1.3.5     "$XBASE/lib/libXext-1.3.5.tar.gz"     "xorg_cv_malloc0_returns_null=no"
@@ -209,8 +223,18 @@ p_build() {
 		_xbuild libICE-1.1.1 "$XBASE/lib/libICE-1.1.1.tar.gz" "xorg_cv_malloc0_returns_null=no"
 	XCFLAGS_EXTRA="-DMAXHOSTNAMELEN=256 -DO_NOFOLLOW=0" \
 		_xbuild libSM-1.2.4  "$XBASE/lib/libSM-1.2.4.tar.gz"  "xorg_cv_malloc0_returns_null=no --without-libuuid"
+	# --datadir / --with-xfile-search-path: the target's, for the XtErrorDB path and the
+	# default resource-file search path libXt compiles in (upstream's default list, with
+	# sysconfdir=/etc, datadir=/usr/share and libdir=/usr/lib). Nothing of libXt installs
+	# under datadir, and no consumer installs into xt.pc's appdefaultdir.
+	local xtpath="" d t
+	for d in /etc/X11 /usr/share/X11 /usr/lib/X11; do
+		for t in %L/%T/%N%C%S %l/%T/%N%C%S %T/%N%C%S %L/%T/%N%S %l/%T/%N%S %T/%N%S; do
+			xtpath="${xtpath:+$xtpath:}$d/$t"
+		done
+	done
 	XCFLAGS_EXTRA="$PWD_DEFS" \
-		_xbuild libXt-1.3.1  "$XBASE/lib/libXt-1.3.1.tar.gz"  "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes"
+		_xbuild libXt-1.3.1  "$XBASE/lib/libXt-1.3.1.tar.gz"  "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes --datadir=/usr/share --with-xfile-search-path=$xtpath"
 	# BITMAP_DEFINES override: libXmu bakes -DBITMAPDIR="$(includedir)/X11/bitmaps"
 	# into the library, and includedir is the HOST buildroot prefix -- a path that
 	# does not exist on the Pi, so XmuLocateBitmapFile never finds a pixmap and
@@ -234,12 +258,16 @@ p_build() {
 	fi
 
 	# libXaw (Athena widgets; lib-only: tools pull deferred libc syms)
+	# PROJECT_ROOT: the %P of libXaw's bitmap search path, compiled in as $(prefix) --
+	# the build host's. /usr gives /usr/include/X11/bitmaps, where xbitmaps is staged.
 	if _need libXaw "$PREFIX/lib/libXaw7.a"; then
 		_fetch_extract libXaw-1.0.16 "$XBASE/lib/libXaw-1.0.16.tar.gz"
 		( cd "$SRC/libXaw-1.0.16" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
 		       xorg_cv_malloc0_returns_null=no ac_cv_lib_m_hypot=yes CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" \
 		       CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 $PWD_DEFS" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
+		  && sed -i 's|-DPROJECT_ROOT=\\"$(prefix)\\"|-DPROJECT_ROOT=\\"/usr\\"|' src/Makefile \
+		  && grep -qF -- '-DPROJECT_ROOT=\"/usr\"' src/Makefile \
 		  && make install ) || b_die "xorg-libs: libXaw build failed"
 		[ -f "$PREFIX/lib/libXaw7.a" ] && echo "xorg-libs: libXaw-1.0.16 OK" || b_die "xorg-libs: libXaw did not install"
 		_built libXaw
@@ -284,6 +312,22 @@ p_build() {
 		cp -a "$PREFIX/include/X11/bitmaps" "${PREFIX_FS}/root/usr/include/X11/bitmaps"
 		echo "xorg-libs: staged xbitmaps -> /usr/include/X11/bitmaps ($(ls -1 "$PREFIX/include/X11/bitmaps" | wc -l | tr -d ' ') pixmaps)"
 	fi
+
+	# No build path compiled into the libraries built here (checked on a --strip-debug
+	# copy: the debug info names the work tree by design, and is stripped from the
+	# shipped programs). The needle also catches a path left relative by
+	# -fmacro-prefix-map.
+	local a needle nodebug="${PREFIX_PORT_BUILD}/nodebug.a"
+	needle="$(basename "$(dirname "$PREFIX")")/$(basename "$PREFIX")"
+	for a in libXau libXdmcp libxcb libX11 libXext libXrender libXrandr libxkbfile \
+		libxcb-util libxcb-image libxcb-render-util libxcb-keysyms libxcb-icccm libxcb-ewmh \
+		libpixman-1 libICE libSM libXt libXmu libXpm libXaw7; do
+		"${CROSS}strip" --strip-debug -o "$nodebug" "$PREFIX/lib/$a.a"
+		if grep -qaF "$needle" "$nodebug"; then
+			b_die "xorg-libs: $a.a compiles in a build path: $(grep -ao -- "[[:print:]]*$needle[[:print:]]*" "$nodebug" | head -1)"
+		fi
+	done
+	rm -f "$nodebug"
 
 	echo "xorg-libs: LAYER 1 complete (staged into $PREFIX/{lib,include})"
 }
