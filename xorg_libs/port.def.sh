@@ -324,7 +324,7 @@ p_build() {
 		libpixman-1 libICE libSM libXt libXmu libXpm libXaw7; do
 		"${CROSS}strip" --strip-debug -o "$nodebug" "$PREFIX/lib/$a.a"
 		if grep -qaF "$needle" "$nodebug"; then
-			b_die "xorg-libs: $a.a compiles in a build path: $(grep -ao -- "[[:print:]]*$needle[[:print:]]*" "$nodebug" | head -1)"
+			b_die "xorg-libs: $a.a compiles in a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "$nodebug" | head -1)"
 		fi
 	done
 	rm -f "$nodebug"

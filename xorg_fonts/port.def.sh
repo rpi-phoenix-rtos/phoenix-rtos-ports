@@ -355,7 +355,7 @@ p_build() {
 	for a in libfreetype libfontenc libXfont2 libexpat libfontconfig libXft libcairo; do
 		"${CROSS}strip" --strip-debug -o "$nodebug" "$PREFIX/lib/$a.a"
 		if grep -qaF "$needle" "$nodebug"; then
-			b_die "xorg-fonts: $a.a compiles in a build path: $(grep -ao -- "[[:print:]]*$needle[[:print:]]*" "$nodebug" | head -1)"
+			b_die "xorg-fonts: $a.a compiles in a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "$nodebug" | head -1)"
 		fi
 	done
 	rm -f "$nodebug"
