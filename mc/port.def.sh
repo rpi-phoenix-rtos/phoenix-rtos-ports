@@ -100,10 +100,14 @@ p_build() {
 	local xcflags="${CFLAGS} -O2 -DNCURSES_WIDECHAR=0 ${ginc} -I${PREFIX_H} -I${PREFIX_H}/ncurses -include ${PREFIX_PORT}/mc-phoenix-shim.h"
 	local xldflags="${LDFLAGS} -static -L${PREFIX_A}"
 
+	# --prefix=/usr: the prefix is compiled in (LIBEXECDIR, the ext.d helper dir in
+	# mc.ext.ini, the syntax dir named in Syntax) and nothing here runs `make install`,
+	# so it is the target's. --disable-configure-args: `mc -V` would print the whole
+	# configure line, every build-host -I/-L/--sysroot in it.
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/config.status" ]; then
 		(cd "${PREFIX_PORT_WORKDIR}" && ./configure \
-			--host="${HOST}" --build=x86_64-pc-linux-gnu --prefix="${PREFIX_PORT_INSTALL}" \
-			--datadir=/usr/share --sysconfdir=/etc \
+			--host="${HOST}" --build=x86_64-pc-linux-gnu --prefix=/usr \
+			--datadir=/usr/share --sysconfdir=/etc --disable-configure-args \
 			--cache-file=mc.cache \
 			--with-screen=ncurses \
 			--with-ncurses-includes="${PREFIX_H}" \
@@ -126,6 +130,17 @@ p_build() {
 
 	mkdir -p "${PREFIX_PROG_STRIPPED}"
 	$STRIP -o "${PREFIX_PROG_STRIPPED}/mc" "${PREFIX_PORT_WORKDIR}/src/mc"
+
+	# Neither the program (stripped: the debug info names the work tree by design) nor
+	# the data files below may name a build directory; the needle also catches a path
+	# left relative by -fmacro-prefix-map.
+	local f needle
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	for f in "${PREFIX_PROG_STRIPPED}/mc" "${PREFIX_PORT_WORKDIR}/misc/mc.ext.ini" "${PREFIX_PORT_WORKDIR}/misc/syntax/Syntax"; do
+		if grep -qaF "${needle}" "${f}"; then
+			b_die "mc: $(basename "${f}") names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${f}" | head -1)"
+		fi
+	done
 	b_install "${PREFIX_PROG_TO_INSTALL}/mc" /bin
 
 	# Runtime share data: without the on-disk default skin mc falls back to a
