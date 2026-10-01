@@ -1,0 +1,800 @@
+From 82fa1a3a5538cdfaa720741c43f81a41014c2954 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Thu, 1 Oct 2026 03:03:47 +0200
+Subject: [PATCH] gio: add a polling local file monitor for systems without
+ notification
+
+On a kernel with no file change notification at all (no inotify, kqueue
+or FEN -- Phoenix-RTOS) GIO has no GLocalFileMonitor implementation, so
+g_file_monitor_directory() and g_file_monitor_file() on a local path fail
+with "Unable to find default local file monitor type". File managers,
+desktops and panels then never see a file appear, disappear or change.
+GPollFileMonitor does not help: it is used only for single non-local
+files.
+
+Add a "poll" backend, selected by -Dfile_monitor_backend=poll and by
+"auto" when none of the others is available, and registered at priority
+10 (inotify is 20) so that a real backend still wins.
+
+A file is stat()ed every tick. A directory is polled in two tiers, since
+on such systems every call is a message to a filesystem server and the
+lstat() of a path is the expensive one: every tick the entries are read
+and compared by name and d_ino (created, deleted, renamed, replaced;
+only new entries are lstat()ed), and every fourth tick every entry is
+lstat()ed for content (size, mtime) and attribute changes. The
+directory's own mtime is not used to skip the readdir: not every
+filesystem updates it on link/unlink (Phoenix-RTOS ext2 does not) and
+statfs() cannot tell them apart. Large directories are polled less often
+so that the cost of one monitor stays bounded.
+
+The poller is a GSource on GLib's worker context, as the notification
+backends' readers are, so that synchronous stat() calls -- network
+round trips on an NFS root -- never stall the application's main loop;
+the events reach the monitor's context through the thread-safe
+g_file_monitor_source_handle_event(). The tick is GIO_POLL_INTERVAL_MS
+(100..60000 ms, default 1000).
+---
+ docs/reference/gio/overview.md   |  10 +-
+ gio/giomodule.c                  |   4 +
+ gio/meson.build                  |  10 +
+ gio/poll/gpolllocalfilemonitor.c | 629 +++++++++++++++++++++++++++++++
+ gio/poll/meson.build             |  27 ++
+ meson.options                    |   2 +-
+ 6 files changed, 678 insertions(+), 4 deletions(-)
+ create mode 100644 gio/poll/gpolllocalfilemonitor.c
+ create mode 100644 gio/poll/meson.build
+
+diff --git a/docs/reference/gio/overview.md b/docs/reference/gio/overview.md
+index f8c0386..e346f2d 100644
+--- a/docs/reference/gio/overview.md
++++ b/docs/reference/gio/overview.md
+@@ -268,9 +268,13 @@ environment.
+   [class@Gio.FileMonitor] implementation to override the default for debugging
+   purposes. The [class@Gio.FileMonitor] implementation for local files that is included
+   in GIO on Linux has the name `inotify`, others that are built are built as
+-  modules (depending on the platform) are called `kqueue` and `win32`. The
+-  special value `help` can be used to print a list of available
+-  implementations to standard output.
++  modules (depending on the platform) are called `kqueue` and `win32`. On a
++  system without kernel change notification the implementation is `poll`,
++  which polls with `stat()`. The special value `help` can be used to print a
++  list of available implementations to standard output.
++- `GIO_POLL_INTERVAL_MS`.  The tick of the `poll` file monitor, in
++  milliseconds (100 to 60000, default 1000). Large directories are polled
++  less often than this.
+ - `GIO_USE_VOLUME_MONITOR`.  This variable can be set to the name of a
+   [class@Gio.VolumeMonitor] implementation to override the default for debugging
+   purposes. The [class@Gio.VolumeMonitor] implementation for local files that is
+diff --git a/gio/giomodule.c b/gio/giomodule.c
+index 7311775..f90605a 100644
+--- a/gio/giomodule.c
++++ b/gio/giomodule.c
+@@ -1074,6 +1074,7 @@ _g_io_module_get_default (const gchar         *extension_point,
+ extern GType g_inotify_file_monitor_get_type (void);
+ extern GType g_kqueue_file_monitor_get_type (void);
+ extern GType g_win32_file_monitor_get_type (void);
++extern GType g_poll_local_file_monitor_get_type (void);
+ 
+ extern GType _g_unix_volume_monitor_get_type (void);
+ extern GType _g_local_vfs_get_type (void);
+@@ -1370,6 +1371,9 @@ _g_io_modules_ensure_loaded (void)
+ #if defined(FILE_MONITOR_BACKEND_KQUEUE)
+       g_type_ensure (g_kqueue_file_monitor_get_type ());
+ #endif
++#if defined(FILE_MONITOR_BACKEND_POLL)
++      g_type_ensure (g_poll_local_file_monitor_get_type ());
++#endif
+ #ifdef G_OS_WIN32
+       g_type_ensure (_g_win32_volume_monitor_get_type ());
+       g_type_ensure (g_win32_file_monitor_get_type ());
+diff --git a/gio/meson.build b/gio/meson.build
+index a3e6f18..cd018e1 100644
+--- a/gio/meson.build
++++ b/gio/meson.build
+@@ -828,6 +828,9 @@ if file_monitor_backend == 'auto'
+     file_monitor_backend = 'kqueue'
+   elif host_system == 'windows'
+     file_monitor_backend = 'win32'
++  else
++    # No change notification from the kernel (Phoenix-RTOS): poll.
++    file_monitor_backend = 'poll'
+   endif
+ endif
+ 
+@@ -859,6 +862,13 @@ if file_monitor_backend == 'win32'
+   internal_deps += [ giowin32_lib ]
+ endif
+ 
++# stat() polling, for systems without any of the above
++if file_monitor_backend == 'poll'
++  glib_conf.set('FILE_MONITOR_BACKEND_POLL', 1)
++  subdir('poll')
++  internal_deps += [ poll_monitor_lib ]
++endif
++
+ if have_bash
+   bash_comp_inst_dir = ''
+   if bash_comp_dep.found()
+diff --git a/gio/poll/gpolllocalfilemonitor.c b/gio/poll/gpolllocalfilemonitor.c
+new file mode 100644
+index 0000000..a537c87
+--- /dev/null
++++ b/gio/poll/gpolllocalfilemonitor.c
+@@ -0,0 +1,629 @@
++/* GIO - GLib Input, Output and Streaming Library
++ *
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * SPDX-License-Identifier: LGPL-2.1-or-later
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General
++ * Public License along with this library; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*
++ * A polling GLocalFileMonitor, for systems whose kernel has no file change
++ * notification at all (no inotify, kqueue or FEN), such as Phoenix-RTOS.
++ * Without any backend g_file_monitor_directory() fails with "Unable to find
++ * default local file monitor type", and file managers, desktops and panels
++ * never see a file appear.
++ *
++ * It is registered at a lower priority than the notification backends, so a
++ * system that has one keeps using it.
++ *
++ * A file is watched by stat()ing it on every tick.
++ *
++ * A directory is watched in two tiers, because on such systems every call is
++ * a message to a filesystem server and lstat() of a path is the expensive one
++ * (on Phoenix-RTOS libc it costs two messages per path component):
++ *
++ *  - every tick the entries are read (one readdir per entry) and compared by
++ *    name and d_ino, which finds created, deleted, renamed and replaced
++ *    entries; only the new ones are lstat()ed;
++ *  - every SWEEP_TICKS ticks every entry is lstat()ed as well, which finds
++ *    content (size, mtime) and attribute (mode, owner, ctime) changes.
++ *
++ * The directory's own mtime is not used to skip the readdir: POSIX requires
++ * link(), unlink() and rename() to update it, but not every filesystem does
++ * (Phoenix-RTOS ext2 updates only the entry's inode), and statfs() there
++ * cannot tell the filesystems apart.
++ *
++ * A large directory is polled less often so that the cost of one monitor stays
++ * bounded: the tick is stretched beyond ENTRIES_PER_TICK entries and the sweep
++ * beyond ENTRIES_PER_SWEEP.
++ *
++ * The polling runs on GLib's worker thread, as the notification backends do,
++ * so that synchronous stat() calls (network round trips on an NFS root) never
++ * stall the application's main loop. Events reach the monitor's own context
++ * through g_file_monitor_source_handle_event(), which is thread-safe.
++ *
++ * The tick is GIO_POLL_INTERVAL_MS milliseconds (100 to 60000, default
++ * DEFAULT_INTERVAL_MS).
++ */
++
++#include "config.h"
++
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <dirent.h>
++#include <errno.h>
++#include <string.h>
++
++#include <glib-object.h>
++#include <gio/gfilemonitor.h>
++#include <gio/glocalfilemonitor.h>
++#include <gio/giomodule.h>
++#include "glib-private.h"
++
++#define DEFAULT_INTERVAL_MS 1000
++#define MIN_INTERVAL_MS     100
++#define MAX_INTERVAL_MS     60000
++
++/* A full sweep (lstat of every entry) every SWEEP_TICKS ticks. */
++#define SWEEP_TICKS 4
++
++/* Beyond these the tick and the sweep are stretched in proportion. */
++#define ENTRIES_PER_TICK  256
++#define ENTRIES_PER_SWEEP 64
++
++/* The stretched tick is never longer than this (unless the base tick is). */
++#define MAX_SCALED_INTERVAL (30 * G_TIME_SPAN_SECOND)
++
++#define G_TYPE_POLL_LOCAL_FILE_MONITOR (g_poll_local_file_monitor_get_type ())
++#define G_POLL_LOCAL_FILE_MONITOR(o)   (G_TYPE_CHECK_INSTANCE_CAST ((o), G_TYPE_POLL_LOCAL_FILE_MONITOR, GPollLocalFileMonitor))
++
++typedef struct
++{
++  GLocalFileMonitor parent_instance;
++
++  GSource *poller; /* (owned) (nullable): NULL once cancelled */
++} GPollLocalFileMonitor;
++
++typedef GLocalFileMonitorClass GPollLocalFileMonitorClass;
++
++GType g_poll_local_file_monitor_get_type (void);
++
++G_DEFINE_TYPE_WITH_CODE (GPollLocalFileMonitor, g_poll_local_file_monitor, G_TYPE_LOCAL_FILE_MONITOR,
++                         g_io_extension_point_implement (G_LOCAL_FILE_MONITOR_EXTENSION_POINT_NAME,
++                                                         g_define_type_id, "poll", 10))
++
++/* What a poll compares. */
++typedef struct
++{
++  guint64 ino;
++  gint64  size;
++  gint64  mtime;      /* ns */
++  gint64  ctime;      /* ns */
++  guint32 mode;
++  guint32 uid;
++  guint32 gid;
++  guint32 nlink;
++} PollStat;
++
++/* A directory entry. */
++typedef struct
++{
++  guint64  d_ino;     /* as readdir() reported it; 0 when unknown */
++  gboolean have_stat;
++  PollStat st;
++} PollEntry;
++
++/* The poller: a GSource on the worker context, woken by its ready time. It
++ * holds everything a tick needs, so it outlives the monitor safely: cancel
++ * only destroys it, and GLib finalizes it once a running tick returns. */
++typedef struct
++{
++  GSource             source;
++
++  GFileMonitorSource *fms;          /* (owned) where the events go */
++  gchar              *path;         /* the directory, or the file */
++  gchar              *child;        /* file mode: the basename the events name (NULL for hard-link mode) */
++  gboolean            is_directory;
++  gboolean            exists;
++  PollStat            self;         /* file mode: the file */
++  GHashTable         *entries;      /* directory mode: name -> PollEntry */
++  guint               ticks;
++} PollSource;
++
++static gint64
++poll_base_interval (void)
++{
++  static gsize initialized;
++  static gint64 interval;
++
++  if (g_once_init_enter (&initialized))
++    {
++      const gchar *env = g_getenv ("GIO_POLL_INTERVAL_MS");
++      guint64 ms = DEFAULT_INTERVAL_MS;
++
++      if (env != NULL && !g_ascii_string_to_unsigned (env, 10, MIN_INTERVAL_MS, MAX_INTERVAL_MS, &ms, NULL))
++        {
++          g_warning ("GIO_POLL_INTERVAL_MS=%s is not a number of milliseconds in %u..%u; using %u",
++                     env, MIN_INTERVAL_MS, MAX_INTERVAL_MS, DEFAULT_INTERVAL_MS);
++          ms = DEFAULT_INTERVAL_MS;
++        }
++
++      interval = (gint64) ms * G_TIME_SPAN_MILLISECOND;
++      g_once_init_leave (&initialized, 1);
++    }
++
++  return interval;
++}
++
++static guint
++poll_entry_count (PollSource *ps)
++{
++  return ps->entries != NULL ? g_hash_table_size (ps->entries) : 0;
++}
++
++static gint64
++poll_interval (PollSource *ps)
++{
++  gint64 interval = poll_base_interval ();
++  guint n = poll_entry_count (ps);
++
++  if (n > ENTRIES_PER_TICK)
++    interval = MIN (interval * n / ENTRIES_PER_TICK, MAX (interval, MAX_SCALED_INTERVAL));
++
++  return interval;
++}
++
++static gboolean
++poll_sweep_due (PollSource *ps)
++{
++  guint period = SWEEP_TICKS * MAX (1, poll_entry_count (ps) / ENTRIES_PER_SWEEP);
++
++  return ps->ticks % period == 0;
++}
++
++static gboolean
++poll_stat (const gchar *path,
++           gboolean     follow,
++           PollStat    *out)
++{
++  struct stat st;
++
++  if ((follow ? stat (path, &st) : lstat (path, &st)) != 0)
++    return FALSE;
++
++  memset (out, 0, sizeof *out);
++  out->ino = st.st_ino;
++  out->size = st.st_size;
++#if defined (HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC)
++  out->mtime = (gint64) st.st_mtim.tv_sec * 1000000000 + st.st_mtim.tv_nsec;
++  out->ctime = (gint64) st.st_ctim.tv_sec * 1000000000 + st.st_ctim.tv_nsec;
++#else
++  out->mtime = (gint64) st.st_mtime * 1000000000;
++  out->ctime = (gint64) st.st_ctime * 1000000000;
++#endif
++  out->mode = st.st_mode;
++  out->uid = st.st_uid;
++  out->gid = st.st_gid;
++  out->nlink = st.st_nlink;
++
++  return TRUE;
++}
++
++/* The event that turns @old into @new, or NO_EVENT. The content of a
++ * directory entry is not compared: a parent's monitor does not report changes
++ * inside a subdirectory (inotify does not either). */
++#define NO_EVENT (-1)
++
++static gint
++poll_stat_compare (const PollStat *old,
++                   const PollStat *new,
++                   gboolean        dir_contents)
++{
++  if (old->ino != new->ino || (old->mode & S_IFMT) != (new->mode & S_IFMT))
++    return G_FILE_MONITOR_EVENT_CREATED; /* replaced, e.g. renamed over */
++
++  if ((dir_contents || !S_ISDIR (new->mode)) && (old->size != new->size || old->mtime != new->mtime))
++    return G_FILE_MONITOR_EVENT_CHANGED;
++
++  if (old->mode != new->mode || old->uid != new->uid || old->gid != new->gid)
++    return G_FILE_MONITOR_EVENT_ATTRIBUTE_CHANGED;
++
++  if (!S_ISDIR (new->mode) && (old->nlink != new->nlink || old->ctime != new->ctime))
++    return G_FILE_MONITOR_EVENT_ATTRIBUTE_CHANGED;
++
++  return NO_EVENT;
++}
++
++static void
++poll_emit (PollSource        *ps,
++           GFileMonitorEvent  event,
++           const gchar       *child,
++           const gchar       *rename_to)
++{
++  g_file_monitor_source_handle_event (ps->fms, event, child, rename_to, NULL, g_get_monotonic_time ());
++}
++
++static gboolean
++poll_entry_stat (GString     *path,
++                 gsize        dirlen,
++                 const gchar *name,
++                 PollEntry   *entry)
++{
++  g_string_truncate (path, dirlen);
++  g_string_append (path, name);
++  entry->have_stat = poll_stat (path->str, FALSE, &entry->st);
++
++  return entry->have_stat;
++}
++
++/* Whether a failed stat()/opendir() means that the path is not there, as
++ * opposed to a transient failure (EIO, EMFILE, a timed-out NFS call) that must
++ * not be reported as a deletion. */
++static gboolean
++poll_errno_is_absent (int errsv)
++{
++  return errsv == ENOENT || errsv == ENOTDIR;
++}
++
++/* The directory's entries, name -> PollEntry (not yet stat()ed), or NULL with
++ * errno set if it cannot be read. */
++static GHashTable *
++poll_read_dir (const gchar *path)
++{
++  GHashTable *entries;
++  struct dirent *de;
++  DIR *dir;
++  int errsv;
++
++  dir = opendir (path);
++  if (dir == NULL)
++    return NULL;
++
++  entries = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
++  for (;;)
++    {
++      PollEntry *entry;
++
++      errno = 0;
++      de = readdir (dir);
++      if (de == NULL)
++        break;
++
++      if (de->d_name[0] == '.' && (de->d_name[1] == '\0' || (de->d_name[1] == '.' && de->d_name[2] == '\0')))
++        continue;
++
++      entry = g_new0 (PollEntry, 1);
++      entry->d_ino = de->d_ino;
++      g_hash_table_insert (entries, g_strdup (de->d_name), entry);
++    }
++  errsv = errno;
++  closedir (dir);
++
++  if (errsv != 0)
++    {
++      /* A partial list would read as deletions. */
++      g_hash_table_unref (entries);
++      errno = errsv;
++      return NULL;
++    }
++
++  return entries;
++}
++
++/* lstat() every entry: the initial snapshot. */
++static void
++poll_stat_all (PollSource *ps)
++{
++  GHashTableIter iter;
++  gpointer name, entry;
++  GString *path;
++  gsize dirlen;
++
++  path = g_string_new (ps->path);
++  if (path->len == 0 || path->str[path->len - 1] != '/')
++    g_string_append_c (path, '/');
++  dirlen = path->len;
++
++  g_hash_table_iter_init (&iter, ps->entries);
++  while (g_hash_table_iter_next (&iter, &name, &entry))
++    poll_entry_stat (path, dirlen, name, entry);
++
++  g_string_free (path, TRUE);
++}
++
++static void
++poll_directory (PollSource *ps)
++{
++  GHashTable *entries;
++  GHashTableIter iter;
++  gpointer key, value;
++  GPtrArray *gone;
++  GString *path;
++  gboolean sweep;
++  gsize dirlen;
++  guint i;
++
++  entries = poll_read_dir (ps->path);
++  if (entries == NULL)
++    {
++      if (!poll_errno_is_absent (errno))
++        return; /* try again on the next tick */
++
++      if (ps->exists)
++        {
++          g_hash_table_iter_init (&iter, ps->entries);
++          while (g_hash_table_iter_next (&iter, &key, NULL))
++            poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, key, NULL);
++          poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, NULL, NULL);
++          g_hash_table_remove_all (ps->entries);
++          ps->exists = FALSE;
++        }
++      return;
++    }
++
++  if (!ps->exists)
++    {
++      poll_emit (ps, G_FILE_MONITOR_EVENT_CREATED, NULL, NULL);
++      ps->exists = TRUE;
++    }
++
++  sweep = poll_sweep_due (ps);
++
++  path = g_string_new (ps->path);
++  if (path->len == 0 || path->str[path->len - 1] != '/')
++    g_string_append_c (path, '/');
++  dirlen = path->len;
++
++  /* The names that are no longer there (keys of ps->entries). */
++  gone = g_ptr_array_new ();
++  g_hash_table_iter_init (&iter, ps->entries);
++  while (g_hash_table_iter_next (&iter, &key, NULL))
++    if (!g_hash_table_contains (entries, key))
++      g_ptr_array_add (gone, key);
++
++  g_hash_table_iter_init (&iter, entries);
++  while (g_hash_table_iter_next (&iter, &key, &value))
++    {
++      const gchar *name = key;
++      PollEntry *entry = value;
++      PollEntry *old = g_hash_table_lookup (ps->entries, name);
++      const gchar *from = NULL;
++
++      if (old != NULL && old->d_ino == entry->d_ino)
++        {
++          /* The same file: compare its attributes only on a sweep. */
++          entry->have_stat = old->have_stat;
++          entry->st = old->st;
++
++          if (sweep)
++            {
++              PollStat st = entry->st;
++              gboolean had_stat = entry->have_stat;
++
++              if (poll_entry_stat (path, dirlen, name, entry) && had_stat)
++                {
++                  gint event = poll_stat_compare (&st, &entry->st, FALSE);
++
++                  if (event != NO_EVENT)
++                    poll_emit (ps, (GFileMonitorEvent) event, name, NULL);
++                }
++            }
++          continue;
++        }
++
++      /* A new name, or a name that now holds another file: renamed from a
++       * name that went away in the same tick, if its d_ino matches. */
++      poll_entry_stat (path, dirlen, name, entry);
++
++      for (i = 0; entry->d_ino != 0 && i < gone->len; i++)
++        {
++          PollEntry *g = gone->pdata[i] != NULL ? g_hash_table_lookup (ps->entries, gone->pdata[i]) : NULL;
++
++          if (g != NULL && g->d_ino == entry->d_ino)
++            {
++              from = gone->pdata[i];
++              gone->pdata[i] = NULL;
++              break;
++            }
++        }
++
++      if (from != NULL)
++        poll_emit (ps, G_FILE_MONITOR_EVENT_RENAMED, from, name);
++      else
++        poll_emit (ps, G_FILE_MONITOR_EVENT_CREATED, name, NULL);
++    }
++
++  for (i = 0; i < gone->len; i++)
++    if (gone->pdata[i] != NULL)
++      poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, gone->pdata[i], NULL);
++
++  g_ptr_array_unref (gone);
++  g_string_free (path, TRUE);
++
++  g_hash_table_unref (ps->entries);
++  ps->entries = entries;
++}
++
++/* A file, or a dangling symlink. FALSE with errno set if neither. */
++static gboolean
++poll_file_stat (const gchar *path,
++                PollStat    *out)
++{
++  return poll_stat (path, TRUE, out) || poll_stat (path, FALSE, out);
++}
++
++static void
++poll_file (PollSource *ps)
++{
++  PollStat st;
++  gboolean exists = poll_file_stat (ps->path, &st);
++
++  if (!exists && !poll_errno_is_absent (errno))
++    return; /* try again on the next tick */
++
++  if (exists && !ps->exists)
++    poll_emit (ps, G_FILE_MONITOR_EVENT_CREATED, ps->child, NULL);
++  else if (!exists && ps->exists)
++    poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, ps->child, NULL);
++  else if (exists)
++    {
++      gint event = poll_stat_compare (&ps->self, &st, TRUE);
++
++      if (event != NO_EVENT)
++        poll_emit (ps, (GFileMonitorEvent) event, ps->child, NULL);
++    }
++
++  ps->exists = exists;
++  if (exists)
++    ps->self = st;
++}
++
++static gboolean
++poll_source_dispatch (GSource     *source,
++                      GSourceFunc  callback,
++                      gpointer     user_data)
++{
++  PollSource *ps = (PollSource *) source;
++
++  /* The monitor is gone (cancel destroys this source too; this is a guard). */
++  if (g_source_is_destroyed ((GSource *) ps->fms))
++    return G_SOURCE_REMOVE;
++
++  ps->ticks++;
++  if (ps->is_directory)
++    poll_directory (ps);
++  else
++    poll_file (ps);
++
++  g_source_set_ready_time (source, g_get_monotonic_time () + poll_interval (ps));
++
++  return G_SOURCE_CONTINUE;
++}
++
++static void
++poll_source_finalize (GSource *source)
++{
++  PollSource *ps = (PollSource *) source;
++
++  g_clear_pointer (&ps->entries, g_hash_table_unref);
++  g_free (ps->child);
++  g_free (ps->path);
++  g_source_unref ((GSource *) ps->fms);
++}
++
++static GSourceFuncs poll_source_funcs = {
++  NULL, NULL,
++  poll_source_dispatch,
++  poll_source_finalize,
++  NULL, NULL
++};
++
++static gboolean
++g_poll_local_file_monitor_is_supported (void)
++{
++  return TRUE;
++}
++
++static void
++g_poll_local_file_monitor_start (GLocalFileMonitor  *local_monitor,
++                                 const gchar        *dirname,
++                                 const gchar        *basename,
++                                 const gchar        *filename,
++                                 GFileMonitorSource *source)
++{
++  GPollLocalFileMonitor *monitor = G_POLL_LOCAL_FILE_MONITOR (local_monitor);
++  PollSource *ps;
++
++  g_assert (monitor->poller == NULL);
++
++  ps = (PollSource *) g_source_new (&poll_source_funcs, sizeof (PollSource));
++  g_source_set_static_name ((GSource *) ps, "GPollLocalFileMonitor");
++  ps->fms = (GFileMonitorSource *) g_source_ref ((GSource *) source);
++
++  if (filename != NULL)
++    ps->path = g_strdup (filename); /* G_FILE_MONITOR_WATCH_HARD_LINKS: events name the file itself */
++  else if (basename != NULL)
++    {
++      ps->path = g_build_filename (dirname, basename, NULL);
++      ps->child = g_strdup (basename);
++    }
++  else
++    {
++      ps->path = g_strdup (dirname);
++      ps->is_directory = TRUE;
++    }
++
++  /* The initial snapshot, taken now so that a change right after
++   * g_file_monitor_*() returns is reported. */
++  if (ps->is_directory)
++    {
++      ps->entries = poll_read_dir (ps->path);
++      ps->exists = ps->entries != NULL;
++      if (ps->entries == NULL)
++        ps->entries = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
++      else
++        poll_stat_all (ps);
++    }
++  else
++    ps->exists = poll_file_stat (ps->path, &ps->self);
++
++  g_source_set_ready_time ((GSource *) ps, g_get_monotonic_time () + poll_interval (ps));
++  g_source_attach ((GSource *) ps, GLIB_PRIVATE_CALL (g_get_worker_context) ());
++  monitor->poller = (GSource *) ps;
++}
++
++static gboolean
++g_poll_local_file_monitor_cancel (GFileMonitor *file_monitor)
++{
++  GPollLocalFileMonitor *monitor = G_POLL_LOCAL_FILE_MONITOR (file_monitor);
++
++  if (monitor->poller != NULL)
++    {
++      g_source_destroy (monitor->poller);
++      g_clear_pointer (&monitor->poller, g_source_unref);
++    }
++
++  return TRUE;
++}
++
++static void
++g_poll_local_file_monitor_finalize (GObject *object)
++{
++  g_assert (G_POLL_LOCAL_FILE_MONITOR (object)->poller == NULL);
++
++  G_OBJECT_CLASS (g_poll_local_file_monitor_parent_class)->finalize (object);
++}
++
++static void
++g_poll_local_file_monitor_init (GPollLocalFileMonitor *monitor)
++{
++}
++
++static void
++g_poll_local_file_monitor_class_init (GPollLocalFileMonitorClass *klass)
++{
++  GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
++  GFileMonitorClass *file_monitor_class = G_FILE_MONITOR_CLASS (klass);
++  GLocalFileMonitorClass *local_file_monitor_class = G_LOCAL_FILE_MONITOR_CLASS (klass);
++
++  local_file_monitor_class->is_supported = g_poll_local_file_monitor_is_supported;
++  local_file_monitor_class->start = g_poll_local_file_monitor_start;
++  /* The directory's own disappearance is reported by the poll (DELETED for
++   * the directory), so GLocalFileMonitor need not watch the mount table. */
++  local_file_monitor_class->mount_notify = TRUE;
++  file_monitor_class->cancel = g_poll_local_file_monitor_cancel;
++
++  gobject_class->finalize = g_poll_local_file_monitor_finalize;
++}
+diff --git a/gio/poll/meson.build b/gio/poll/meson.build
+new file mode 100644
+index 0000000..a94f693
+--- /dev/null
++++ b/gio/poll/meson.build
+@@ -0,0 +1,27 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++#
++# This library is free software; you can redistribute it and/or
++# modify it under the terms of the GNU Lesser General Public
++# License as published by the Free Software Foundation; either
++# version 2.1 of the License, or (at your option) any later version.
++#
++# This library is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++# Lesser General Public License for more details.
++#
++# You should have received a copy of the GNU Lesser General Public
++# License along with this library; if not, see <http://www.gnu.org/licenses/>.
++
++poll_monitor_lib = static_library('pollmonitor',
++  sources : ['gpolllocalfilemonitor.c'],
++  include_directories : [configinc, glibinc],
++  dependencies : [
++    gioenumtypes_dep,
++    libglib_dep,
++    libgobject_dep,
++    gmodule_inc_dep,
++  ],
++  gnu_symbol_visibility : 'hidden',
++  pic : true,
++  c_args : [gio_c_args, gio_c_args_internal])
+diff --git a/meson.options b/meson.options
+index 5ebbe4d..888194b 100644
+--- a/meson.options
++++ b/meson.options
+@@ -154,6 +154,6 @@ option('introspection',
+ 
+ option('file_monitor_backend',
+        type : 'combo',
+-       choices : ['auto', 'inotify', 'kqueue', 'libinotify-kqueue', 'win32'],
++       choices : ['auto', 'inotify', 'kqueue', 'libinotify-kqueue', 'win32', 'poll'],
+        value : 'auto',
+        description : 'The name of the system API to use as a GFileMonitor backend')
+-- 
+2.53.0
+

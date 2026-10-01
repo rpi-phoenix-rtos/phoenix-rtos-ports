@@ -488,35 +488,23 @@ EOF
 	# GIO's own gdbus (from the GTK stack)
 	_st 755 "${BIN}/gdbus-stripped" bin/gdbus
 
-	# --- the XFCE session in one command: /bin/xfce-session (m7i-xfce-demo / m7l-session2), on
-	# the programs staged above, labwc and foot from labwc_desktop and the GPU servers started
-	# at boot; labwc's GLES2 renderer (the desktop composited on the V3D). The session's labwc,
-	# panel and fuzzel configs and .desktop files come from the tools' demo tree, with the
-	# image's program names.
-	# TODO(TD-26): the demo's own path names (/usr/lib/xfce-demo, /etc/xdg/*-demo) and the
-	# rewrite below go when the session's files are named for the image.
+	# --- the XFCE session in one command: /bin/xfce-session, on the programs staged above,
+	# labwc and foot from labwc_desktop and the GPU servers started at boot; labwc's GLES2
+	# renderer (the desktop composited on the V3D). Its own files: labwc's configuration
+	# (/etc/xdg/labwc-xfce, above), the `loginctl` the panel's Log Out runs (first on the
+	# session's PATH), and the panel layout, fuzzel.ini and .desktop files that come first in
+	# its XDG_CONFIG_DIRS / XDG_DATA_DIRS.
 	_st 755 "${F}/pi/xfce-session" bin/xfce-session
-	_st 755 "${F}/pi/xfce-demo-loginctl" usr/lib/xfce-demo/bin/loginctl
-	local demo_sed=(-e 's|/usr/lib/xfce-demo/bin/thunar|/bin/thunar|g'
-		-e 's|/usr/lib/xfce-demo/bin/xfce4-|/bin/xfce4-|g'
-		-e 's|/usr/lib/xfce-demo/bin/xfdesktop|/bin/xfdesktop|g'
-		-e 's|/bin/foot-2|/bin/foot|g' -e 's|/bin/fuzzel-2|/bin/fuzzel|g')
-	_st_demo() {  # source target-path: a config file, program paths rewritten for the image
-		mkdir -p "$(dirname "${ST}/$2")"
-		sed "${demo_sed[@]}" "$1" >"${ST}/$2"
-		chmod 644 "${ST}/$2"
-	}
-	for f in rc.xml menu.xml autostart environment; do
-		_st_demo "${F}/conf/labwc-xfce-demo/${f}" "etc/xdg/labwc-xfce-demo/${f}"
+	_st 755 "${F}/pi/xfce-session-loginctl" usr/lib/xfce-session/bin/loginctl
+	_st 644 "${F}/conf/xfce-session/xfce4-panel.xml" etc/xdg/xfce-session/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
+	_st 644 "${F}/conf/xfce-session/fuzzel.ini" etc/xdg/xfce-session/fuzzel/fuzzel.ini
+	for f in "${F}"/conf/xfce-session/applications/*.desktop; do
+		_st 644 "${f}" "usr/share/xfce-session/applications/$(basename "${f}")"
 	done
-	_st_demo "${F}/conf/xfce-demo/xfce4-panel.xml" etc/xdg/xfce-demo/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml
-	_st_demo "${F}/conf/xfce-demo/fuzzel.ini" etc/xdg/xfce-demo/fuzzel/fuzzel.ini
-	for f in "${F}"/conf/xfce-demo/applications/*.desktop; do
-		_st_demo "${f}" "usr/share/xfce-demo/applications/$(basename "${f}")"
-	done
-	if grep -rnE '/bin/(foot|fuzzel|labwc)-2|xfce-demo/bin/(thunar|xfce4-|xfdesktop)' \
-			"${ST}/etc/xdg/labwc-xfce-demo" "${ST}/etc/xdg/xfce-demo" "${ST}/usr/share/xfce-demo"; then
-		b_die "xfce_wayland: a demo config still names a program this image does not have (above)"
+	# nothing staged may name a program or path of the tools' hand-staged demo session
+	if grep -rnIE '/bin/(foot|fuzzel|labwc)-2|xfce-demo' "${ST}/bin" "${ST}/etc" "${ST}/usr/lib/xfce-session" \
+			"${ST}/usr/share/xfce-session" "${ST}/usr/share/applications"; then
+		b_die "xfce_wayland: a staged file names a program or path this image does not have (above)"
 	fi
 
 	(cd "${ST}" && find . -type f -printf '%P\n' | sort | xargs sha256sum) >"${I}/stage.MANIFEST"

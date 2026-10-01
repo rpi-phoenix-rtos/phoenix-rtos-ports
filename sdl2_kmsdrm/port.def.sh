@@ -302,7 +302,7 @@ _sdl2_kmsdrm_stage_session() {
 		install -m 644 "${PREFIX_PORT}/games/labwc-xfce-games/${f}" "${r}/etc/xdg/labwc-xfce-games/${f}"
 	done
 	# nothing may name a hand-staged program of the tools sessions
-	if grep -nE '(foot|fuzzel|labwc|xfce-session|xfce-desktop)-2|-low\b|-wl2|-drm2|xfce-demo/bin/(thunar|xfce4-|xfdesktop)|simple-egl' \
+	if grep -nE '(foot|fuzzel|labwc|xfce-session|xfce-desktop)-2|-low\b|-wl2|-drm2|xfce-demo|simple-egl' \
 			"${r}/etc/xdg/labwc-xfce-games"/* "${r}/bin/game-window.sh" "${r}/bin/game-window-autostart.sh" "${r}/bin/game-window-quit.sh"; then
 		b_die "sdl2_kmsdrm: the games session names a program this image does not have (above)"
 	fi

@@ -15,8 +15,8 @@
 #define ECANCELED 125
 #endif
 
-/* --- pthread cancellation *type* (Phoenix has setcancelstate + pthread_cancel,
- * but not setcanceltype). Redis uses it only in makeThreadKillable() for the
+/* --- pthread cancellation *type*. Older libphoenix lacked setcanceltype (current
+ * libphoenix has it). Redis uses it only in makeThreadKillable() for the
  * crash-report fast-memory-test thread — non-core, so a no-op is acceptable. --- */
 #ifndef PTHREAD_CANCEL_DEFERRED
 #define PTHREAD_CANCEL_DEFERRED 0

@@ -2,7 +2,7 @@
 <!--
   labwc under the video desktop session on Phoenix-RTOS (XFCE + a video in a window,
   /bin/xfce-session with CONF_DIR=/etc/xdg/labwc-xfce-video): /etc/xdg/labwc-xfce-video/rc.xml.
-  labwc-xfce-demo/rc.xml plus window rules that lay the desktop out (Thunar top left, foot
+  labwc-xfce/rc.xml plus window rules that lay the desktop out (Thunar top left, foot
   below it, the player on the right, under the 30 px panel).
     Super (tap)             application finder
     Super+Return            terminal (foot)

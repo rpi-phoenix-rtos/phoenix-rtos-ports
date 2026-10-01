@@ -263,6 +263,37 @@ p_build() {
 	mkdir -p "${PREFIX_FS}/root/usr/local/lib/python3.14"
 	cp -a "${PREFIX_PORT_WORKDIR}/Lib/." "${PREFIX_FS}/root/usr/local/lib/python3.14/"
 
+	# The build-time configuration module sysconfig imports on POSIX. Without it
+	# `import sysconfig` works but every query (get_config_var, get_paths,
+	# `python3 -m sysconfig`, and so pip/setuptools) dies with
+	#   ModuleNotFoundError: No module named '_sysconfigdata__phoenix_'
+	# `make python` does not produce it; upstream's `make all` does, through the
+	# pybuilddir.txt target, which runs the HOST python's sysconfig over the
+	# configured Makefile + pyconfig.h. In a cross build the target has nothing
+	# to do with it -- the host python only parses text -- so it is the same file
+	# a native build would install. The name is _sysconfigdata_<ABIFLAGS>_
+	# <MACHDEP>_<MULTIARCH>, and the interpreter looks it up as
+	# _sysconfigdata_<sys.abiflags>_<sys.platform>_<_multiarch>, both from the
+	# same Makefile values (ABIFLAGS and MULTIARCH empty, MACHDEP=phoenix).
+	#
+	# The rm is required: the target has no prerequisites in a cross build, so
+	# an incremental rebuild would otherwise keep a file generated from an older
+	# Makefile. Only the .py is installed. Upstream also installs a .json copy and
+	# build-details.json, but nothing in the stdlib reads either; neither does
+	# sysconfig open the Makefile or pyconfig.h at run time, so no config-3.14/
+	# directory is needed. Like upstream's, the module records the build host's
+	# paths in the compile/link-flag variables (CFLAGS, LDFLAGS, CONFIG_ARGS,
+	# abs_builddir...); the install paths (prefix, LIBDEST...) are /usr/local.
+	local sysconfigdata="_sysconfigdata__phoenix_.py" staged_sysconfigdata
+	rm -f "${PREFIX_PORT_WORKDIR}/pybuilddir.txt"
+	make -C "${PREFIX_PORT_WORKDIR}" pybuilddir.txt
+	b_install "${PREFIX_PORT_WORKDIR}/$(cat "${PREFIX_PORT_WORKDIR}/pybuilddir.txt")/${sysconfigdata}" /usr/local/lib/python3.14
+
+	staged_sysconfigdata="${PREFIX_FS}/root/usr/local/lib/python3.14/${sysconfigdata}"
+	[ -f "${staged_sysconfigdata}" ] || b_die "python: ${sysconfigdata} is not in the staged stdlib"
+	grep -qE "^[[:space:]]*'prefix': '/usr/local',$" "${staged_sysconfigdata}" ||
+		b_die "python: ${sysconfigdata}: prefix is not /usr/local"
+
 	# _curses — the ONE extension module built as a dlopen-able .so instead of
 	# being folded statically into the interpreter like the step-4 modules.
 	#

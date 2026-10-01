@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   labwc root menu of the games desktop session (XFCE + windowed GPU games):
-  /etc/xdg/labwc-xfce-games/menu.xml, = labwc-xfce-demo/menu.xml plus the Games entries. Opens on a right click on the desktop background
+  /etc/xdg/labwc-xfce-games/menu.xml, = labwc-xfce/menu.xml plus the Games entries. Opens on a right click on the desktop background
   when xfdesktop does not claim the click. Log Out ends the session in order (as the
   panel's button); Exit stops labwc at once.
 -->
@@ -30,7 +30,7 @@
   <item label="SuperTuxKart (window)"><action name="Execute" command="/bin/bash /bin/game-window.sh stk" /></item>
   <separator />
   <item label="Reconfigure"><action name="Reconfigure" /></item>
-  <item label="Log Out"><action name="Execute" command="/usr/lib/xfce-demo/bin/loginctl terminate-session" /></item>
+  <item label="Log Out"><action name="Execute" command="/usr/lib/xfce-session/bin/loginctl terminate-session" /></item>
   <item label="Exit"><action name="Exit" /></item>
 </menu>
 

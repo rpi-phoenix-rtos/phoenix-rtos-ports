@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  labwc root menu under XFCE on Phoenix-RTOS (M7 m7h-xfce): stage as
-  /etc/xdg/labwc-xfce/menu.xml. Right click on the desktop background opens it when
-  xfdesktop does not claim the click.
+  labwc root menu of the XFCE session on Phoenix-RTOS: /etc/xdg/labwc-xfce/menu.xml.
+  Opens on a right click on the desktop background when xfdesktop does not claim the
+  click. Log Out ends the session in order (as the panel's button, through the session's
+  `loginctl`, /usr/lib/xfce-session/bin/loginctl); Exit stops labwc at once.
 -->
 <openbox_menu>
 
@@ -24,6 +25,7 @@
   <item label="Midnight Commander"><action name="Execute" command="/bin/foot -e /bin/mc" /></item>
   <separator />
   <item label="Reconfigure"><action name="Reconfigure" /></item>
+  <item label="Log Out"><action name="Execute" command="/usr/lib/xfce-session/bin/loginctl terminate-session" /></item>
   <item label="Exit"><action name="Exit" /></item>
 </menu>
 

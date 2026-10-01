@@ -329,7 +329,7 @@ p_build() {
 		install -D -m 644 "${F}/image/video-demo.desktop" "${ST}/usr/share/applications/video-demo.desktop"
 	fi
 	# nothing installed may name a program of the tools' hand-staged sessions
-	if grep -rnE '(ffplay-(wl|drm)|video-play)2|-low\b|rpi4-kms-g[0-9]|(xfce-session|foot|fuzzel|labwc)-2|xfce-demo/bin/(thunar|xfce4-|xfdesktop)|/usr/share/m10' \
+	if grep -rnE '(ffplay-(wl|drm)|video-play)2|-low\b|rpi4-kms-g[0-9]|(xfce-session|foot|fuzzel|labwc)-2|xfce-demo|/usr/share/m10' \
 			"${ST}/bin" "${ST}/etc" "${ST}/usr/share/applications" 2>/dev/null; then
 		b_die "video_player: an installed file names a program or path this image does not have (above)"
 	fi

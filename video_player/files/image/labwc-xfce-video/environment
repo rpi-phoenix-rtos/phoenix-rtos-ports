@@ -1,5 +1,5 @@
 # labwc environment of the video desktop session (XFCE + a video in a window) on Phoenix-RTOS:
-# /etc/xdg/labwc-xfce-video/environment, = labwc-xfce-demo/environment. Set for labwc and every client it starts, over what
+# /etc/xdg/labwc-xfce-video/environment, = labwc-xfce/environment. Set for labwc and every client it starts, over what
 # the session script exported. Only the fixed settings: PATH, TZ, XDG_CONFIG_DIRS,
 # XDG_DATA_DIRS, XDG_*_HOME and DBUS_SESSION_BUS_ADDRESS come from the script (its knobs).
 XKB_DEFAULT_LAYOUT=us

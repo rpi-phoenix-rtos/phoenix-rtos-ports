@@ -24,9 +24,14 @@
 #   1. patches/${version}/ drops the Linux link flags (-rdynamic/-ldl/-pthread/-lrt) --
 #      pthread/dl/rt live in libphoenix and -rdynamic is meaningless for a static
 #      link. (uname -s runs on the Linux BUILD host, so Redis picks its Linux branch.)
+#      02 maps EAI_FAMILY to EAFNOSUPPORT so an IPv6 listen on an IPv4-only stack is
+#      skipped; 03 restores SIG_DFL on entry to the crash handler (harmless where
+#      SA_RESETHAND works) and skips INFO when crashing before initServer().
 #   2. phoenix-compat.h (-include'd) shims a handful of Linux/glibc divergences that
 #      only feed Redis's crash-report/watchdog diagnostics (setcanceltype, setitimer,
-#      dladdr, a couple of errno constants) -- not the core data path.
+#      dladdr, a couple of errno constants) -- not the core data path. (A
+#      setcancelstate guard for the --daemonize child is no longer needed:
+#      libphoenix keeps pthread_self() valid across fork() since f36de2b.)
 # MALLOC=libc skips jemalloc (hard to cross-compile; libphoenix malloc is fine). The
 # event loop auto-falls back to ae_select on Phoenix (no epoll/kqueue).
 
