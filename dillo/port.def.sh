@@ -86,8 +86,9 @@ WRAPEOF
 	# GCC 14 promotes -Wincompatible-pointer-types / -Wint-conversion to hard
 	# errors; demote to warnings so the build completes. Force-include the shim
 	# (AI_* getaddrinfo hint macros). All headers/libs (fltk, X, image
-	# codecs, mbedtls) live in PREFIX_H/PREFIX_A.
-	local xcflags="${CFLAGS} -I${PREFIX_H} -include ${PREFIX_PORT}/dillo-phoenix-shim.h -O2 -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+	# codecs, mbedtls) live in PREFIX_H/PREFIX_A. -fstack-protector-strong (C and
+	# C++): libphoenix provides __stack_chk_guard and __stack_chk_fail.
+	local xcflags="${CFLAGS} -I${PREFIX_H} -include ${PREFIX_PORT}/dillo-phoenix-shim.h -O2 -fstack-protector-strong -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
 	local xldflags="${CFLAGS} ${LDFLAGS} -L${PREFIX_A}"
 
 	# Prepend the framework bin/ so Dillo's configure picks up the FRAMEWORK
