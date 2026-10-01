@@ -58,6 +58,10 @@ p_prepare() {
 
 	b_use "mbedtls" && CONFIGURE_PARAMS+=(--without-ssl --with-mbedtls)
 
+	# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+	# __stack_chk_fail. Enabled per port, network- and parser-facing ones first.
+	CFLAGS+=" -fstack-protector-strong"
+
 	if [ ! -f "$PREFIX_PORT_WORKDIR/config.status" ]; then
 		(cd "$PREFIX_PORT_WORKDIR" && "$PREFIX_PORT_WORKDIR/configure" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
 			"${CONFIGURE_PARAMS[@]}")
