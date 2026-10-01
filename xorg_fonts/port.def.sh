@@ -216,6 +216,7 @@ p_build() {
 		  && PKG_CONFIG="$PKGC" ./configure --host="$XHOST" --build=x86_64-pc-linux-gnu \
 		       --prefix="$PREFIX" --disable-shared --enable-static --disable-docs \
 		       --with-cache-dir=/var/cache/fontconfig --with-default-fonts=/usr/share/fonts/truetype --sysconfdir=/etc \
+		       --with-templatedir=/usr/share/fontconfig/conf.avail \
 		       CC="$TCGCC" AR="$TCAR" RANLIB="$TCRANLIB" CC_FOR_BUILD=gcc \
 		       ac_cv_func_random=no ac_cv_func_initstate=no ac_cv_func_setstate=no ac_cv_func_random_r=no \
        ac_cv_member_struct_statfs_f_flags=no ac_cv_member_struct_statfs_f_fstypename=no \
@@ -225,6 +226,9 @@ p_build() {
 		       CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make \
 		  && make DESTDIR="$fcstage" install ) || b_die "xorg-fonts: fontconfig failed"
+		# --with-templatedir: the target's conf.avail, compiled into the library (FcInit
+		# reads it), which by default is ${datadir}/fontconfig/conf.avail of the build
+		# host. The DESTDIR install below keeps the templates out of the host's /usr.
 		# Land lib + headers + .pc into $PREFIX (DESTDIR install avoids the on-host
 		# fc-cache run; the .pc prefix must be rewritten from the DESTDIR path).
 		cp "$fcstage$PREFIX/lib/libfontconfig.a" "$PREFIX/lib/" || b_die "xorg-fonts: no libfontconfig.a"
@@ -341,6 +345,20 @@ p_build() {
 		cp -a "$FONTSTAGE/usr/share/fonts/X11" "${PREFIX_FS}/root/usr/share/fonts/"
 		echo "xorg-fonts: staged X11 core fonts -> /usr/share/fonts/X11 ($(find "$FONTSTAGE/usr/share/fonts/X11" -name '*.pcf.gz' | wc -l) pcf, $(du -sh "$FONTSTAGE/usr/share/fonts/X11" | cut -f1))"
 	fi
+
+	# No build path compiled into the libraries built here (checked on a --strip-debug
+	# copy: the debug info names the work tree by design, and is stripped from the
+	# shipped programs). The needle also catches a path left relative by
+	# -fmacro-prefix-map.
+	local a needle nodebug="${PREFIX_PORT_BUILD}/nodebug.a"
+	needle="$(basename "$(dirname "$PREFIX")")/$(basename "$PREFIX")"
+	for a in libfreetype libfontenc libXfont2 libexpat libfontconfig libXft libcairo; do
+		"${CROSS}strip" --strip-debug -o "$nodebug" "$PREFIX/lib/$a.a"
+		if grep -qaF "$needle" "$nodebug"; then
+			b_die "xorg-fonts: $a.a compiles in a build path: $(grep -ao -- "[[:print:]]*$needle[[:print:]]*" "$nodebug" | head -1)"
+		fi
+	done
+	rm -f "$nodebug"
 
 	echo "xorg-fonts: LAYER 2 (glib-free tier) complete -> $PREFIX/{lib,include}"
 }
