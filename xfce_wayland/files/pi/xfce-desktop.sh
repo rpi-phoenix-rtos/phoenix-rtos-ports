@@ -23,7 +23,7 @@
 #   5  the session's clients; hold with heartbeats that also list the org.xfce.* names
 #      on the bus (which XFCE programs registered), until HOLD seconds are over, a logout is
 #      requested (the file $XFCE_LOGOUT_FLAG appears: the panel's Log Out through the
-#      xfce-demo `loginctl` stand-in) or labwc exits
+#      session's `loginctl` stand-in) or labwc exits
 #   6  stop: `thunar --quit`; `xfce4-panel --quit` and `xfdesktop --quit` (over the bus: the
 #      panel saves its layout); SIGTERM to an autostarted foot (its pid in
 #      $XDG_RUNTIME_DIR/foot.pid), labwc, xfconfd (its pid from the bus, however it was
@@ -87,7 +87,7 @@ export PATH=${XFCE_BIN:+${XFCE_BIN}:}/bin:/usr/bin
 export XDG_RUNTIME_DIR=/tmp/xdg
 export XDG_CONFIG_DIRS=${XFCE_CONFIG_DIRS:-/etc/xdg}   # (knob: the host test points it elsewhere)
 export XDG_DATA_DIRS=${XFCE_DATA_DIRS:-/usr/share}
-# the panel's Log Out (through the xfce-demo loginctl stand-in) creates this file
+# the panel's Log Out (through the session's loginctl stand-in) creates this file
 export XFCE_LOGOUT_FLAG=${XDG_RUNTIME_DIR}/xfce-logout
 # the programs write their settings, caches and state here, not on the NFS root
 XFCE_HOME=${XFCE_HOME:-/tmp/xfce-home}

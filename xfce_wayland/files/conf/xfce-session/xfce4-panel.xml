@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  xfce4-panel layout of the XFCE demo session on Phoenix-RTOS (M7 m7i-xfce-demo,
-  /bin/xfce-session): stage as /etc/xdg/xfce-demo/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml.
-  /etc/xdg/xfce-demo comes first in the session's XDG_CONFIG_DIRS, so xfconfd takes this
-  channel over the m7h one in /etc/xdg (property by property; every property of that file is
-  set here). One 30 px panel on the top edge: the applications menu; launchers for the
-  terminal (foot-2) and Thunar (the demo's .desktop files in /usr/share/xfce-demo/applications)
-  and the application finder (its own .desktop file; its bare Exec finds the demo binary
-  first on the session's PATH); the window buttons (libxfce4windowing:
+  xfce4-panel layout of the XFCE session on Phoenix-RTOS (/bin/xfce-session):
+  /etc/xdg/xfce-session/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml.
+  /etc/xdg/xfce-session comes first in the session's XDG_CONFIG_DIRS, so xfconfd takes this
+  channel over the plain one in /etc/xdg (property by property; every property of that file
+  is set here). One 30 px panel on the top edge: the applications menu; launchers for the
+  terminal (foot) and Thunar (the session's .desktop files in
+  /usr/share/xfce-session/applications) and the application finder (its own .desktop file,
+  found by its bare Exec on the session's PATH); the window buttons (libxfce4windowing:
   wlr-foreign-toplevel); a spacer; the clock (GLib's local time: the session's TZ); and
   Log Out (the actions plugin: without a session manager on the bus it runs
-  `loginctl terminate-session`, the demo's stand-in in /usr/lib/xfce-demo/bin, which ends
-  the session in order). configver = XFCE4_PANEL_CONFIG_VERSION (2): no migrate helper.
+  `loginctl terminate-session`, the session's stand-in in /usr/lib/xfce-session/bin, which
+  ends the session in order). configver = XFCE4_PANEL_CONFIG_VERSION (2): no migrate helper.
 -->
 <channel name="xfce4-panel" version="1.0">
   <property name="configver" type="int" value="2"/>
@@ -46,12 +46,12 @@
     </property>
     <property name="plugin-3" type="string" value="launcher">
       <property name="items" type="array">
-        <value type="string" value="/usr/share/xfce-demo/applications/foot.desktop"/>
+        <value type="string" value="/usr/share/xfce-session/applications/foot.desktop"/>
       </property>
     </property>
     <property name="plugin-4" type="string" value="launcher">
       <property name="items" type="array">
-        <value type="string" value="/usr/share/xfce-demo/applications/thunar.desktop"/>
+        <value type="string" value="/usr/share/xfce-session/applications/thunar.desktop"/>
       </property>
     </property>
     <property name="plugin-9" type="string" value="launcher">

@@ -1,7 +1,0 @@
-# labwc autostart of the XFCE demo session on Phoenix-RTOS (M7 m7i-xfce-demo): stage as
-# /etc/xdg/labwc-xfce-demo/autostart. labwc runs it with `sh` (busybox) once the compositor
-# is up. The session script has already started dbus-daemon and xfconfd and exported
-# DBUS_SESSION_BUS_ADDRESS, XDG_*, PATH, TZ; each program's stderr goes to a log the script
-# prints at the end.
-/usr/lib/xfce-demo/bin/xfdesktop > /tmp/xfce-logs/xfdesktop.log 2>&1 &
-/usr/lib/xfce-demo/bin/xfce4-panel > /tmp/xfce-logs/xfce4-panel.log 2>&1 &

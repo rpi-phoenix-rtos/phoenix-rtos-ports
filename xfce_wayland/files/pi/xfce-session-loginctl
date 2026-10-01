@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# The XFCE demo session's `loginctl` (staged as /usr/lib/xfce-demo/bin/loginctl, first on the
-# session's PATH). Phoenix-RTOS has no logind and the demo no xfce4-session; without a
+# The XFCE session's `loginctl` (staged as /usr/lib/xfce-session/bin/loginctl, first on the
+# session's PATH). Phoenix-RTOS has no logind and the session no xfce4-session; without a
 # session manager on the bus, xfce4-panel's actions plugin offers Log Out only when a
 # `loginctl` is on PATH, and runs `loginctl terminate-session ''`. Here that means: end the
 # XFCE session (xfce-desktop.sh then asks Thunar, the panel and xfdesktop to quit, stops
@@ -22,13 +22,13 @@ case "$1" in
 			# no session script: end the compositor (= `labwc --exit`)
 			kill -TERM "${LABWC_PID}"
 		else
-			echo "loginctl (xfce-demo): no session to terminate" >&2
+			echo "loginctl (xfce-session): no session to terminate" >&2
 			exit 1
 		fi
-		echo "loginctl (xfce-demo): logout requested"
+		echo "loginctl (xfce-session): logout requested"
 		;;
 	*)
-		echo "loginctl (xfce-demo): '$1' is not supported" >&2
+		echo "loginctl (xfce-session): '$1' is not supported" >&2
 		exit 1
 		;;
 esac

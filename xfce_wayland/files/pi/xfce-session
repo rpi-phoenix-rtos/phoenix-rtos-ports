@@ -21,7 +21,7 @@
 #   XFCE_AUTOSTART  programs to open once the panel is up, e.g.
 #              atril,quake3:120,video (see /bin/xfce-autostart.sh); XFCE_AUTOSTART_DELAY
 #              seconds before the first one (default 5)
-#   CONF_DIR   labwc's configuration (default /etc/xdg/labwc-xfce-demo); the games and the video
+#   CONF_DIR   labwc's configuration (default /etc/xdg/labwc-xfce); the games and the video
 #              sessions: /etc/xdg/labwc-xfce-games (GAME_LIST), /etc/xdg/labwc-xfce-video
 #   RENDERER   labwc's renderer: gles2 (default: GPU composition on the V3D) | pixman
 #   TZ         POSIX TZ string (default Europe/Warsaw: CET-1CEST,M3.5.0,M10.5.0/3); GLib's
@@ -42,8 +42,9 @@
 # psh wires a program's stdout to the console but not always its stderr (as startx)
 exec 2>&1
 
-# the session's own programs: the panel's Log Out runs `loginctl` (the xfce-demo stand-in)
-DEMO=/usr/lib/xfce-demo/bin
+# the session's own programs, first on its PATH: the panel's Log Out runs `loginctl` (the
+# session's stand-in)
+SESSION_BIN=/usr/lib/xfce-session/bin
 SESSION_SCRIPT=${SESSION_SCRIPT:-/bin/xfce-desktop.sh}
 
 export HOLD=${HOLD:-0}
@@ -51,21 +52,21 @@ export RENDERER=${RENDERER:-gles2}
 export TZ=${TZ:-CET-1CEST,M3.5.0,M10.5.0/3}
 export VERBOSE=${VERBOSE:-0}
 export LABWC=${LABWC:-/bin/labwc}
-export CONF_DIR=${CONF_DIR:-/etc/xdg/labwc-xfce-demo}
-export XFCE_BIN=${XFCE_BIN:-${DEMO}}
+export CONF_DIR=${CONF_DIR:-/etc/xdg/labwc-xfce}
+export XFCE_BIN=${XFCE_BIN:-${SESSION_BIN}}
 export THUNAR=${THUNAR:-/bin/thunar}
 export PANEL=${PANEL:-/bin/xfce4-panel}
 export XFDESKTOP=${XFDESKTOP:-/bin/xfdesktop}
 # settings saved by the session's programs (the panel layout on quit), apart from other XFCE
 # sessions of the same boot
-export XFCE_HOME=${XFCE_HOME:-/tmp/xfce-demo-home}
+export XFCE_HOME=${XFCE_HOME:-/tmp/xfce-session-home}
 # the session's panel layout and fuzzel.ini, then XFCE's defaults
-export XFCE_CONFIG_DIRS=${XFCE_CONFIG_DIRS:-/etc/xdg/xfce-demo:/etc/xdg}
+export XFCE_CONFIG_DIRS=${XFCE_CONFIG_DIRS:-/etc/xdg/xfce-session:/etc/xdg}
 # the session's .desktop files (terminal = foot, files = Thunar) shadow the ones of the same
 # name in /usr/share/applications
-export XFCE_DATA_DIRS=${XFCE_DATA_DIRS:-/usr/share/xfce-demo:/usr/share}
+export XFCE_DATA_DIRS=${XFCE_DATA_DIRS:-/usr/share/xfce-session:/usr/share}
 # when HOLD is over: the Log Out button's own command
-export LOGOUT_CMD=${LOGOUT_CMD:-${DEMO}/loginctl terminate-session}
+export LOGOUT_CMD=${LOGOUT_CMD:-${SESSION_BIN}/loginctl terminate-session}
 
 echo "XFCE-SESSION start hold=${HOLD} renderer=${RENDERER} tz=${TZ} labwc=${LABWC} conf=${CONF_DIR} session=${SESSION_SCRIPT}"
 
