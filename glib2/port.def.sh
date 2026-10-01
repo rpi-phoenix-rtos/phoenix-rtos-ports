@@ -105,9 +105,12 @@ p_build() {
 	local xcppflags="${CFLAGS} -I${PREFIX_H} -I${stubs}/include"
 	local xldflags="${LDFLAGS} -L${PREFIX_A} -L${stubs}/lib"
 
+	# --with-charsetalias-dir: libcharset compiles the directory of charset.alias into
+	# libglib-2.0.a, by default ${libdir} -- the build host's prefix.
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/config.status" ]; then
 		(cd "${PREFIX_PORT_WORKDIR}" && ./configure \
 			--host="${HOST}" --build=x86_64-pc-linux-gnu --prefix="${PREFIX_PORT_INSTALL}" \
+			--with-charsetalias-dir=/usr/lib \
 			--cache-file=glib2.cache \
 			--enable-static --disable-shared --disable-nls --disable-libmount \
 			--disable-selinux --disable-dtrace --disable-systemtap --disable-coverage \
@@ -133,12 +136,22 @@ p_build() {
 	make -C "${PREFIX_PORT_WORKDIR}/gmodule" || echo "[glib2] warn: gmodule build issues"
 	make -C "${PREFIX_PORT_WORKDIR}/gobject" || echo "[glib2] warn: gobject build issues"
 
-	# Stage libraries into PREFIX_A.
-	local la
+	# Stage libraries into PREFIX_A, none with a build path compiled in (checked on a
+	# --strip-debug copy: the debug info names the work tree by design, and is stripped
+	# from the shipped programs; the needle also catches a path -fmacro-prefix-map left
+	# relative).
+	local la needle nodebug="${PREFIX_PORT_BUILD}/nodebug.a"
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
 	for la in glib/.libs/libglib-2.0.a gthread/.libs/libgthread-2.0.a \
 	          gmodule/.libs/libgmodule-2.0.a gobject/.libs/libgobject-2.0.a; do
-		[ -f "${PREFIX_PORT_WORKDIR}/${la}" ] && cp -a "${PREFIX_PORT_WORKDIR}/${la}" "${PREFIX_A}/"
+		[ -f "${PREFIX_PORT_WORKDIR}/${la}" ] || continue
+		"${CROSS}strip" --strip-debug -o "${nodebug}" "${PREFIX_PORT_WORKDIR}/${la}"
+		if grep -qaF "${needle}" "${nodebug}"; then
+			b_die "glib2: $(basename "${la}") compiles in a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${nodebug}" | head -1)"
+		fi
+		cp -a "${PREFIX_PORT_WORKDIR}/${la}" "${PREFIX_A}/"
 	done
+	rm -f "${nodebug}"
 
 	# Headers: glib's `make install` runs an install-data-local hook that fails in
 	# this cross env and aborts header recursion, so stage explicitly + deterministic
