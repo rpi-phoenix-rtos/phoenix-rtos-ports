@@ -39,6 +39,11 @@ p_prepare() {
 		#   - ac_cv_func_wcswidth=yes  -> HAVE_WCSWIDTH (drops lib/sh/wcswidth.c)
 		cp -a "$PREFIX_PORT/config.cache" "$PREFIX_PORT_WORKDIR/config.cache"
 
+		# DEBUGGER_START_FILE (the bashdb entry point `bash --debugger` sources) defaults
+		# to ${datadir}/bashdb/...: the build host's prefix. config.cache leaves this
+		# precious variable out, as it does CFLAGS, so setting it here passes the
+		# cache's consistency check.
+		#
 		# -fcommon: termcap's PC/UP/BC/ospeed are tentative-definition globals
 		# shared across translation units; gcc>=10 defaults to -fno-common, which
 		# would turn them into multiple-definition link errors.
@@ -47,7 +52,8 @@ p_prepare() {
 			--host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" \
 			--cache-file=config.cache CC="${HOST}-gcc" \
 			CFLAGS="${CFLAGS} -std=gnu17 -fcommon -Wno-error=implicit-function-declaration -Wno-error=implicit-int" LDFLAGS="${CFLAGS} ${LDFLAGS} -Wl,--allow-multiple-definition" \
-			--without-bash-malloc --enable-static-link --disable-nls)
+			--without-bash-malloc --enable-static-link --disable-nls \
+			DEBUGGER_START_FILE=/usr/share/bashdb/bashdb-main.inc)
 	fi
 }
 
@@ -59,6 +65,13 @@ p_build() {
 		CFLAGS_FOR_BUILD="-g -DCROSS_COMPILING -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
 
 	$STRIP -o "$PREFIX_PROG_STRIPPED/bash" "$PREFIX_PORT_WORKDIR/bash"
+	# checked on the stripped program (the debug info names the work tree by design);
+	# the needle also catches a path left relative by -fmacro-prefix-map
+	local needle
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	if grep -qaF "${needle}" "$PREFIX_PROG_STRIPPED/bash"; then
+		b_die "bash: the program names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "$PREFIX_PROG_STRIPPED/bash" | head -1)"
+	fi
 	cp -a "$PREFIX_PORT_WORKDIR/bash" "$PREFIX_PROG/bash"
 
 	b_install "$PREFIX_PROG_TO_INSTALL/bash" /bin
