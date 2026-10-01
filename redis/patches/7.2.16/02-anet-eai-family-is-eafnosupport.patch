@@ -1,0 +1,13 @@
+--- a/src/anet.c
++++ b/src/anet.c
+@@ -462,6 +462,10 @@
+ 
+     if ((rv = getaddrinfo(bindaddr,_port,&hints,&servinfo)) != 0) {
+         anetSetError(err, "%s", gai_strerror(rv));
++        /* A resolver without the address family (an IPv4-only stack) answers
++         * EAI_FAMILY; report it as EAFNOSUPPORT so the caller treats the
++         * listen like a socket() that has no IPv6 and skips it. */
++        if (rv == EAI_FAMILY) errno = EAFNOSUPPORT;
+         return ANET_ERR;
+     }
+     for (p = servinfo; p != NULL; p = p->ai_next) {
