@@ -1,0 +1,255 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Thu, 1 Oct 2026 17:00:01 +0200
+Subject: [PATCH] util/disk_cache, v3d, v3dv: the on-disk shader cache on
+ Phoenix-RTOS
+
+What the multi-file cache (the default type) needs to build and to be
+correct on a static Phoenix-RTOS program:
+
+* disk_cache_os.c: the index is kept in process memory. Its file was
+  mapped MAP_SHARED so that processes share the total-size counter and
+  the put_key()/has_key() set, but Phoenix has no shared file mappings
+  (MAP_SHARED is MAP_PRIVATE): stores through the mapping would never
+  reach the file. The entries are files written to a temporary name,
+  locked and renamed into place, and are shared as before; what becomes
+  per process is the size counter (the size limit bounds what one
+  process adds) and has_key() (a miss costs a compile).
+* disk_cache_os.c: libphoenix has no dirfd() (its DIR holds no
+  descriptor), so the LRU walk stats an entry by its path there, and no
+  _SC_GETPW_R_SIZE_MAX, for which the existing 512-byte fallback is
+  used.
+* disk_cache.c: drop the unused <ftw.h> (libphoenix has none).
+* v3d: v3d_disk_cache_init() asserts on the ELF build-id note, which
+  util/build_id.h only provides with dl_iterate_phdr. Without it,
+  identify the build as v3dv's init_uuids() does (patch 0011): BLAKE3 of
+  "v3d " PACKAGE_VERSION MESA_GIT_SHA1, with git_sha1.h now a
+  dependency of libv3d.
+* v3d, v3dv: that identity is only as good as MESA_GIT_SHA1, and a build
+  from a tarball has none, so every build would share one identity and
+  run the QPU code another build left in the cache. Keep the cache off
+  then. The Phoenix port sets MESA_GIT_SHA1_OVERRIDE to a digest of the
+  source tree, toolchain and flags.
+
+Systems with a build-id or with shared file mappings are unchanged.
+---
+ src/broadcom/vulkan/v3dv_device.c        | 10 ++++
+ src/gallium/drivers/v3d/meson.build      |  1 +
+ src/gallium/drivers/v3d/v3d_disk_cache.c | 22 +++++++++
+ src/util/disk_cache.c                    |  1 -
+ src/util/disk_cache_os.c                 | 62 ++++++++++++++++++++++--
+ 5 files changed, 91 insertions(+), 5 deletions(-)
+
+diff --git a/src/broadcom/vulkan/v3dv_device.c b/src/broadcom/vulkan/v3dv_device.c
+index 06b36b6..f7b9444 100644
+--- a/src/broadcom/vulkan/v3dv_device.c
++++ b/src/broadcom/vulkan/v3dv_device.c
+@@ -938,6 +938,16 @@ static void
+ v3dv_physical_device_init_disk_cache(struct v3dv_physical_device *device)
+ {
+ #ifdef ENABLE_SHADER_CACHE
++#if !HAVE_BUILD_ID
++   /* init_uuids() identified this build by its version string alone: with
++    * no git SHA1 in it, every build would share one identity and load the
++    * entries of another, so keep the cache off.
++    */
++   if (sizeof(MESA_GIT_SHA1) <= 1) {
++      device->disk_cache = NULL;
++      return;
++   }
++#endif
+    char timestamp[BLAKE3_HEX_LEN];
+    _mesa_blake3_format(timestamp, device->driver_build_sha1);
+ 
+diff --git a/src/gallium/drivers/v3d/meson.build b/src/gallium/drivers/v3d/meson.build
+index d228bdd..46b8f4d 100644
+--- a/src/gallium/drivers/v3d/meson.build
++++ b/src/gallium/drivers/v3d/meson.build
+@@ -60,6 +60,7 @@ libv3d = static_library(
+   [
+     files_libv3d,
+     v3d_xml_pack,
++    sha1_h,
+   ],
+   include_directories : [
+     inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_broadcom,
+diff --git a/src/gallium/drivers/v3d/v3d_disk_cache.c b/src/gallium/drivers/v3d/v3d_disk_cache.c
+index 10515d0..7759175 100644
+--- a/src/gallium/drivers/v3d/v3d_disk_cache.c
++++ b/src/gallium/drivers/v3d/v3d_disk_cache.c
+@@ -29,7 +29,9 @@
+ #include "v3d_screen.h"
+ 
+ #include "util/blob.h"
++#include "util/build_id.h"
+ #include "util/u_upload_mgr.h"
++#include "git_sha1.h"
+ 
+ #ifdef ENABLE_SHADER_CACHE
+ 
+@@ -52,6 +54,7 @@ v3d_key_size(mesa_shader_stage stage)
+ 
+ void v3d_disk_cache_init(struct v3d_screen *screen)
+ {
++#if HAVE_BUILD_ID
+         const struct build_id_note *note =
+                 build_id_find_nhdr_for_addr(v3d_disk_cache_init);
+         assert(note && build_id_length(note) == BUILD_ID_EXPECTED_HASH_LENGTH);
+@@ -61,6 +64,25 @@ void v3d_disk_cache_init(struct v3d_screen *screen)
+ 
+         char timestamp[BLAKE3_HEX_LEN];
+         _mesa_sha1_format(timestamp, id_sha1);
++#else
++        /* No ELF build-id note to find at run time (no dl_iterate_phdr,
++         * e.g. the static programs of Phoenix-RTOS): identify the build by
++         * its version string, as v3dv's init_uuids() does. Entries of a
++         * different build must never load, so the build system has to make
++         * MESA_GIT_SHA1 change with the compiled code (on Phoenix the port
++         * recipe sets MESA_GIT_SHA1_OVERRIDE to a digest of the source tree,
++         * toolchain and flags). Without a git SHA1 the cache stays off.
++         */
++        static const char build_str[] = "v3d " PACKAGE_VERSION MESA_GIT_SHA1;
++        if (sizeof(MESA_GIT_SHA1) <= 1)
++                return;
++
++        blake3_hash id;
++        _mesa_blake3_compute(build_str, sizeof(build_str) - 1, id);
++
++        char timestamp[BLAKE3_HEX_LEN];
++        _mesa_blake3_format(timestamp, id);
++#endif
+ 
+         screen->disk_cache =
+                 disk_cache_create(v3d_screen_get_name((struct pipe_screen *) screen),
+diff --git a/src/util/disk_cache.c b/src/util/disk_cache.c
+index 1f43388..a564e95 100644
+--- a/src/util/disk_cache.c
++++ b/src/util/disk_cache.c
+@@ -24,7 +24,6 @@
+ #ifdef ENABLE_SHADER_CACHE
+ 
+ #include <ctype.h>
+-#include <ftw.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+diff --git a/src/util/disk_cache_os.c b/src/util/disk_cache_os.c
+index 66a3f5b..a23b0e0 100644
+--- a/src/util/disk_cache_os.c
++++ b/src/util/disk_cache_os.c
+@@ -224,6 +224,27 @@ free_lru_file_list(struct list_head *lru_file_list)
+    free(lru_file_list);
+ }
+ 
++/* fstatat() of a directory entry. libphoenix has no dirfd() (its DIR holds
++ * no descriptor), so on Phoenix-RTOS the entry is reached by its path.
++ */
++static int
++lru_stat_entry(DIR *dir, const char *dir_path, const char *name,
++               struct stat *st, int flags)
++{
++#if DETECT_OS_PHOENIX
++   char *path;
++   int ret;
++
++   if (asprintf(&path, "%s/%s", dir_path, name) == -1)
++      return -1;
++   ret = (flags & AT_SYMLINK_NOFOLLOW) ? lstat(path, st) : stat(path, st);
++   free(path);
++   return ret;
++#else
++   return fstatat(dirfd(dir), name, st, flags);
++#endif
++}
++
+ /* Given a directory path and predicate function, create a linked list of entrys
+  * with the oldest access time in that directory for which the predicate
+  * returns true.
+@@ -245,8 +266,6 @@ choose_lru_file_matching(const char *dir_path,
+    if (dir == NULL)
+       return NULL;
+ 
+-   const int dir_fd = dirfd(dir);
+-
+    /* First count the number of files in the directory */
+    unsigned total_file_count = 0;
+    while ((dir_ent = readdir(dir)) != NULL) {
+@@ -257,7 +276,8 @@ choose_lru_file_matching(const char *dir_path,
+ #else
+       struct stat st;
+ 
+-      if (fstatat(dir_fd, dir_ent->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
++      if (lru_stat_entry(dir, dir_path, dir_ent->d_name, &st,
++                         AT_SYMLINK_NOFOLLOW) == 0) {
+          if (S_ISREG(st.st_mode)) {
+             total_file_count++;
+          }
+@@ -282,7 +302,7 @@ choose_lru_file_matching(const char *dir_path,
+          break;
+ 
+       struct stat sb;
+-      if (fstatat(dir_fd, dir_ent->d_name, &sb, 0) == 0) {
++      if (lru_stat_entry(dir, dir_path, dir_ent->d_name, &sb, 0) == 0) {
+          struct lru_file *entry = NULL;
+          if (!list_is_empty(lru_file_list))
+             entry = list_first_entry(lru_file_list, struct lru_file, node);
+@@ -956,8 +976,10 @@ disk_cache_generate_cache_dir(void *mem_ctx, const char *gpu_name,
+       size_t buf_size;
+       struct passwd pwd, *result;
+ 
++#ifdef _SC_GETPW_R_SIZE_MAX
+       buf_size = sysconf(_SC_GETPW_R_SIZE_MAX);
+       if (buf_size == -1)
++#endif
+          buf_size = 512;
+ 
+       /* Loop until buf_size is large enough to query the directory */
+@@ -1101,6 +1123,37 @@ disk_cache_touch_cache_user_marker(char *path)
+    free(marker_path);
+ }
+ 
++#if DETECT_OS_PHOENIX
++/* Phoenix-RTOS has no shared file mappings: MAP_SHARED is MAP_PRIVATE, so
++ * stores through a mapping of the index file would never reach the file or
++ * another process. Keep the index in process memory instead. The cache
++ * entries themselves are files and are shared as usual; what becomes
++ * per-process is the total-size counter (it starts at 0 in each process, so
++ * the size limit bounds what one process adds) and the put_key()/has_key()
++ * set (has_key() may miss a key another process stored, which only costs a
++ * compile).
++ */
++bool
++disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
++{
++   size_t size = sizeof(*cache->size) + CACHE_INDEX_MAX_KEYS * CACHE_KEY_SIZE;
++
++   cache->index_mmap = calloc(1, size);
++   if (cache->index_mmap == NULL)
++      return false;
++   cache->index_mmap_size = size;
++
++   cache->size = (p_atomic_uint64_t *) cache->index_mmap;
++   cache->stored_keys = cache->index_mmap + sizeof(uint64_t);
++   return true;
++}
++
++void
++disk_cache_destroy_mmap(struct disk_cache *cache)
++{
++   free(cache->index_mmap);
++}
++#else
+ bool
+ disk_cache_mmap_cache_index(void *mem_ctx, struct disk_cache *cache)
+ {
+@@ -1182,6 +1235,7 @@ disk_cache_destroy_mmap(struct disk_cache *cache)
+ {
+    munmap(cache->index_mmap, cache->index_mmap_size);
+ }
++#endif /* DETECT_OS_PHOENIX */
+ 
+ void *
+ disk_cache_db_load_item(struct disk_cache *cache, const cache_key key,
+-- 
+2.53.0
+

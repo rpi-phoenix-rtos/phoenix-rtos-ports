@@ -43,6 +43,7 @@
 # (patches/, = tools/gpu-lane/mesa-drm/patches/mesa/), the same compat shim
 # (glue/compat/, = tools/gpu-lane/mesa-drm/compat/), the same meson options and compiler
 # flags per variant. kmscube (the default build's test program there) is the kmscube_drm port.
+# One difference: the on-disk shader cache is ON here (patch 0018, see _mesa_drm_build_identity).
 #
 # What a consumer finds in ${PORT_DEP_mesa_drm}:
 #   <v>/prefix/          `ninja install`: EGL/GLES/KHR/gbm(/GL, vulkan) headers, lib/*.a, *.pc
@@ -60,6 +61,9 @@
 #   vulkan/phxvk/        phxvk_loader.{c,h}: the static Vulkan-loader stand-in (glue/phxvk/,
 #                        = tools/gpu-lane/vulkan-drm/phxvk/), compiled into each Vulkan program
 #   <v>/opengl.txt       opengl=true|false (the Mesa build's desktop-GL setting)
+#   <v>/shader-cache-id.txt  the build identity compiled in as MESA_GIT_SHA1 (" (git-<id>)",
+#                        also in GL_VERSION); a program whose `strings` show another id carries
+#                        another build of the driver
 #   compat/libmesadrm-compat.a, compat/include (Mesa + apps), compat/app-include (apps only)
 #   src-include/         the Mesa source tree's include/ (GL/, GLES*/, EGL/, KHR/, vulkan/)
 #   zlib-prefix/, x11-prefix/ (x11)   the private dependency views Mesa was configured with
@@ -84,6 +88,34 @@ _mesa_drm_gl_archives() {
 			src/c11/impl/libmesa_util_c11.a; do
 		echo "${a}"
 	done
+}
+
+# The identity of what this port compiles, for the on-disk shader cache. Every cache entry is
+# keyed and checked against the driver's build identity; upstream takes it from the ELF build-id
+# note, which a static Phoenix program cannot look up (no dl_iterate_phdr), so patch 0018 (v3d)
+# and 0011 (v3dv) use the version string, PACKAGE_VERSION + MESA_GIT_SHA1, and keep the cache
+# off when the latter is empty. A tarball has no git SHA1: the build sets it through Mesa's own
+# MESA_GIT_SHA1_OVERRIDE (bin/git_sha1_gen.py, which keeps the first 10 hex digits) to a digest
+# of everything that decides the compiled code -- the patched source tree, this port's recipe and
+# glue, the sysroot headers and the compiler itself. A stale entry is not a miss but wrong QPU
+# code (2026-08-28: a gcc-14 cache under a gcc-16 Mesa drew coloured speckle), so the digest
+# errs towards changing: any edit to those inputs gives every program one cold start.
+_mesa_drm_build_identity() {
+	local m="${PREFIX_PORT_BUILD}/build-identity.txt" cc1 cc1plus d
+	cc1="$("${NL_CC}" -print-prog-name=cc1)"
+	cc1plus="$("${NL_CXX}" -print-prog-name=cc1plus)"
+	[ -f "${cc1}" ] && [ -f "${cc1plus}" ] || b_die "no cc1/cc1plus for ${NL_CC} (got '${cc1}', '${cc1plus}')"
+	# the inputs, one "sha256  path" line each, kept next to the build: diff two of them to see
+	# why the identity changed (__pycache__: written into the source tree by Mesa's generators)
+	: > "${m}"
+	for d in "${PREFIX_PORT_WORKDIR}" "${PREFIX_PORT}" "${NL_SYSROOT}/include"; do
+		echo "# ${d}" >> "${m}"
+		(set -o pipefail; cd "${d}" && find . -type f ! -path '*/__pycache__/*' ! -name '*.pyc' -print0 |
+			LC_ALL=C sort -z | xargs -0 -r sha256sum) >> "${m}" || b_die "cannot hash ${d}"
+	done
+	"${NL_CC}" -v >> "${m}" 2>&1 || b_die "${NL_CC} -v failed"
+	sha256sum "${cc1}" "${cc1plus}" >> "${m}" || b_die "cannot hash ${cc1} ${cc1plus}"
+	sha256sum < "${m}" | cut -d' ' -f1
 }
 
 # _mesa_drm_variant <gles|gl|wayland|x11|vulkan>
@@ -129,17 +161,35 @@ _mesa_drm_variant() {
 	nl_meson_cross "${PREFIX_PORT_BUILD}/nl/cross-${v}.txt" "${PREFIX_PORT_BUILD}/nl/pkg-config-${v}" \
 		"'-I${PREFIX_PORT}/glue/compat/include'" "'-L${PREFIX_BUILD%/}/lib'" "" \
 		"has_function_posix_memalign = false"
-	if [ ! -f "${mb}/build.ninja" ]; then
-		meson setup "${mb}" "${PREFIX_PORT_WORKDIR}" --cross-file "${PREFIX_PORT_BUILD}/nl/cross-${v}.txt" \
-			--prefix "${out}/prefix" --buildtype=debugoptimized -Db_ndebug=true --wrap-mode=nodownload \
-			"${api_opts[@]}" -Dplatforms="${platforms}" \
-			-Dllvm=disabled -Dspirv-tools=disabled -Dvideo-codecs= -Dgallium-va=disabled \
-			-Dshader-cache=disabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled \
-			-Dlibunwind=disabled -Dvalgrind=disabled -Dlmsensors=disabled -Dperfetto=false \
-			-Dbuild-tests=false -Dtools=
+	local setup=(--cross-file "${PREFIX_PORT_BUILD}/nl/cross-${v}.txt"
+		--prefix "${out}/prefix" --buildtype=debugoptimized -Db_ndebug=true --wrap-mode=nodownload
+		"${api_opts[@]}" -Dplatforms="${platforms}"
+		-Dllvm=disabled -Dspirv-tools=disabled -Dvideo-codecs= -Dgallium-va=disabled
+		-Dshader-cache=enabled -Dxmlconfig=disabled -Dexpat=disabled -Dzstd=disabled
+		-Dlibunwind=disabled -Dvalgrind=disabled -Dlmsensors=disabled -Dperfetto=false
+		-Dbuild-tests=false -Dtools=)
+	# a build directory configured with other options is reconfigured from scratch: meson setup
+	# is skipped for an existing one, which would keep the old options without a word
+	if [ -f "${mb}/build.ninja" ] && ! printf '%s\n' "${setup[@]}" | cmp -s - "${mb}/phx-meson-setup.txt"; then
+		echo "mesa_drm: ${v}: meson options changed, reconfiguring ${mb}"
+		rm -rf "${mb}"
 	fi
-	ninja -C "${mb}" all "${extra_targets[@]}"
-	ninja -C "${mb}" install
+	if [ ! -f "${mb}/build.ninja" ]; then
+		meson setup "${mb}" "${PREFIX_PORT_WORKDIR}" "${setup[@]}"
+		printf '%s\n' "${setup[@]}" > "${mb}/phx-meson-setup.txt"
+	fi
+
+	# the shader-cache identity (see _mesa_drm_build_identity), per variant (its cross file);
+	# given to EVERY ninja run: git_sha1.h is regenerated on each one (10 hex digits: what
+	# git_sha1_gen.py keeps)
+	local id
+	id="$({ echo "${MESA_DRM_BUILD_ID:?}"; echo "variant ${v}"; cat "${PREFIX_PORT_BUILD}/nl/cross-${v}.txt"; } |
+		sha256sum | cut -c1-10)"
+	MESA_GIT_SHA1_OVERRIDE="${id}" ninja -C "${mb}" all "${extra_targets[@]}"
+	MESA_GIT_SHA1_OVERRIDE="${id}" ninja -C "${mb}" install
+	grep -qF "(git-${id})" "${mb}/src/git_sha1.h" || b_die "${v}: ${mb}/src/git_sha1.h does not carry the build identity ${id}"
+	echo "${id}" > "${out}/shader-cache-id.txt"
+	echo "mesa_drm: ${v}: shader-cache identity ${id}"
 	ln -sfn "${mb}" "${out}/mesa-build"
 	echo "opengl=${opengl}" > "${out}/opengl.txt"
 
@@ -264,6 +314,11 @@ p_build() {
 	# their programs' -I as <mesa out>/mesa-src/include (quakespasm_drm)
 	rm -rf "${PREFIX_PORT_INSTALL}/src-include"
 	cp -a "${PREFIX_PORT_WORKDIR}/include" "${PREFIX_PORT_INSTALL}/src-include"
+
+	# the build identity of the shader disk cache, common part (each variant adds its own)
+	local MESA_DRM_BUILD_ID
+	MESA_DRM_BUILD_ID="$(_mesa_drm_build_identity)"
+	[ "${#MESA_DRM_BUILD_ID}" = 64 ] || b_die "mesa_drm: no build identity"
 
 	_mesa_drm_variant gles
 	if b_use opengl; then _mesa_drm_variant gl; fi
