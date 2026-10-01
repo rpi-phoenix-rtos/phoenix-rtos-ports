@@ -29,22 +29,6 @@ static inline int phoenix_pthread_setcanceltype(int type, int *oldtype) {
 }
 #define pthread_setcanceltype phoenix_pthread_setcanceltype
 
-/* --- pthread_self() is NULL in a fork()ed child. The child runs on a new
- * kernel thread (new tid), but libphoenix's fork() does not re-key the copied
- * main-thread record to it, and pthread_setcancelstate() -- unlike its
- * setcanceltype/testcancel/setspecific siblings -- dereferences the NULL
- * without a check. `--daemonize yes` forks before initServer(), whose
- * makeThreadKillable() then faulted. Threads created after the fork are
- * registered normally, so only the forking (main) thread needs the guard. --- */
-static inline int phoenix_pthread_setcancelstate(int state, int *oldstate) {
-    if (pthread_self() == (pthread_t)0) {
-        if (oldstate) *oldstate = PTHREAD_CANCEL_ENABLE;
-        return 0;
-    }
-    return pthread_setcancelstate(state, oldstate);
-}
-#define pthread_setcancelstate phoenix_pthread_setcancelstate
-
 /* --- crash-report / watchdog bits debug.c needs (all non-core diagnostics) --- */
 #include <sys/time.h>
 #include <signal.h>
