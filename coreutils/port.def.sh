@@ -44,8 +44,11 @@ p_prepare() {
 		# gl_cv_c_inline_effective test fails, HAVE_INLINE stays undefined, and the
 		# gnulib extern-inline helpers (mbszero &c.) are neither inlined at call
 		# sites nor emitted out-of-line -> undefined references at link.
+		# --prefix=/usr: stdbuf compiles in where it looks for libstdbuf.so
+		# ($(libexecdir)/coreutils, $(libdir)/coreutils), and nothing here runs
+		# `make install` (see p_build), so the prefix is the target's.
 		(cd "${PREFIX_PORT_WORKDIR}" && CONFIG_SITE="${PREFIX_PORT}/config.site" ./configure \
-			--host="${HOST}" --build=x86_64-pc-linux-gnu --prefix="${PREFIX_PORT_INSTALL}" \
+			--host="${HOST}" --build=x86_64-pc-linux-gnu --prefix=/usr \
 			CC="${HOST}-gcc" AR="${HOST}-ar" RANLIB="${HOST}-ranlib" \
 			CFLAGS="${CFLAGS} -O2" LDFLAGS="${CFLAGS} ${LDFLAGS} -static" \
 			--disable-nls --disable-acl --disable-xattr --without-selinux --disable-libcap)
@@ -53,7 +56,8 @@ p_prepare() {
 }
 
 p_build() {
-	local n=0 f name
+	local n=0 f name needle
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
 
 	# All 104 tools build (stty included — see header: patch 0004 + libphoenix now
 	# defines the four termios input flags IUCLC/IXANY/IMAXBEL/XCASE). -k is kept
@@ -106,6 +110,12 @@ p_build() {
 		"${CROSS}readelf" -h "${f}" 2>/dev/null | grep -q 'AArch64' || continue
 		cp -a "${f}" "${PREFIX_PROG}/${name}"
 		${STRIP} -o "${PREFIX_PROG_STRIPPED}/${name}" "${PREFIX_PROG}/${name}"
+		# no build path in a shipped tool (checked stripped: the debug info names the
+		# work tree by design; the needle also catches a path -fmacro-prefix-map left
+		# relative)
+		if grep -qaF "${needle}" "${PREFIX_PROG_STRIPPED}/${name}"; then
+			b_die "coreutils: ${name} names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${PREFIX_PROG_STRIPPED}/${name}" | head -1)"
+		fi
 		b_install "${PREFIX_PROG_TO_INSTALL}/${name}" /usr/bin
 		n=$((n + 1))
 	done
