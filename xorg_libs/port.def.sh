@@ -147,6 +147,14 @@ p_build() {
 		make install || b_die "xorg-libs: $nv host build failed"
 		echo "xorg-libs: $nv OK (host)"
 	}
+	# _need <component> <artifact>: build a lib-only component unless its artifact is in
+	# the shared prefix AND this port's build directory records building it (_built).
+	# When the recipe changes the framework cleans the build directory, not the shared
+	# prefix; a guard on the artifact alone then kept the old library, so an edited
+	# configure line never reached an incremental build. (_xbuild needs no marker: it
+	# keys on config.status, which the clean removes.)
+	_need() { [ ! -f "$2" ] || [ ! -f "${PREFIX_PORT_BUILD}/built/$1" ]; }
+	_built() { mkdir -p "${PREFIX_PORT_BUILD}/built" && touch "${PREFIX_PORT_BUILD}/built/$1"; }
 	# _libonly_pc <name-version> — copy an in-tree .pc into the prefix (lib-only installs)
 	_copy_pc() { local pc; pc=$(find "$SRC/$1" -name "$2" 2>/dev/null | head -1); [ -n "$pc" ] && cp "$pc" "$PREFIX/lib/pkgconfig/"; }
 
@@ -182,7 +190,7 @@ p_build() {
 	_xbuild xcb-util-wm-0.4.2          "$XCBB/xcb-util-wm-0.4.2.tar.gz"
 
 	# ---- pixman (software rasteriser; lib-only: test utils clash with sys/time.h) ----
-	if [ ! -f "$PREFIX/lib/libpixman-1.a" ]; then
+	if _need pixman "$PREFIX/lib/libpixman-1.a"; then
 		_fetch_extract pixman-0.42.2 "$XBASE/lib/pixman-0.42.2.tar.gz"
 		( cd "$SRC/pixman-0.42.2" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static --disable-gtk \
@@ -191,6 +199,7 @@ p_build() {
 		  && make -C pixman install ) || b_die "xorg-libs: pixman build failed"
 		_copy_pc pixman-0.42.2 pixman-1.pc
 		echo "xorg-libs: pixman-0.42.2 OK (lib only)"
+		_built pixman
 	fi
 
 	# ---- toolkit base: ICE/SM/Xt/Xmu/Xpm/Xaw ----
@@ -212,7 +221,7 @@ p_build() {
 		_xbuild libXmu-1.2.1 "$XBASE/lib/libXmu-1.2.1.tar.gz" "xorg_cv_malloc0_returns_null=yes ac_cv_lib_m_hypot=yes"
 
 	# libXpm (lib-only: sxpm/cxpm tools need getpwuid_r)
-	if [ ! -f "$PREFIX/lib/libXpm.a" ]; then
+	if _need libXpm "$PREFIX/lib/libXpm.a"; then
 		_fetch_extract libXpm-3.5.17 "$XBASE/lib/libXpm-3.5.17.tar.gz"
 		( cd "$SRC/libXpm-3.5.17" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
@@ -221,10 +230,11 @@ p_build() {
 		  && make -C src install && make install-data ) || b_die "xorg-libs: libXpm build failed"
 		_copy_pc libXpm-3.5.17 xpm.pc
 		echo "xorg-libs: libXpm-3.5.17 OK (lib only)"
+		_built libXpm
 	fi
 
 	# libXaw (Athena widgets; lib-only: tools pull deferred libc syms)
-	if [ ! -f "$PREFIX/lib/libXaw7.a" ]; then
+	if _need libXaw "$PREFIX/lib/libXaw7.a"; then
 		_fetch_extract libXaw-1.0.16 "$XBASE/lib/libXaw-1.0.16.tar.gz"
 		( cd "$SRC/libXaw-1.0.16" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
@@ -232,6 +242,7 @@ p_build() {
 		       CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT -I$PREFIX/include -std=gnu17 $PWD_DEFS" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make install ) || b_die "xorg-libs: libXaw build failed"
 		[ -f "$PREFIX/lib/libXaw7.a" ] && echo "xorg-libs: libXaw-1.0.16 OK" || b_die "xorg-libs: libXaw did not install"
+		_built libXaw
 	fi
 
 	# ---- runtime DATA the libraries need on the target ----
@@ -260,11 +271,12 @@ p_build() {
 	# XmuLocateBitmapFile, which searches /usr/include/X11/bitmaps. Without them
 	# xlogo and xcalc warn `Cannot convert string "xlogo32"/"calculator" to type
 	# Pixmap` and run without their icon. Architecture-independent data.
-	if [ ! -f "$PREFIX/include/X11/bitmaps/xlogo32" ]; then
+	if _need xbitmaps "$PREFIX/include/X11/bitmaps/xlogo32"; then
 		_fetch_extract xbitmaps-1.1.3 "$XARCHIVE/data/xbitmaps-1.1.3.tar.gz"
 		( cd "$SRC/xbitmaps-1.1.3" \
 		  && ./configure --prefix="$PREFIX" \
 		  && make install ) || b_die "xorg-libs: xbitmaps build failed"
+		_built xbitmaps
 	fi
 	if [ -d "$PREFIX/include/X11/bitmaps" ]; then
 		mkdir -p "${PREFIX_FS}/root/usr/include/X11"
