@@ -40,13 +40,17 @@ p_build() {
 	local CF="-DBYTE_ORDER=1234 -DLITTLE_ENDIAN=1234 -DBIG_ENDIAN=4321 -DAF_LOCAL=AF_UNIX"
 	CF+=" -include ${PREFIX_PORT}/phoenix-compat.h"
 
-	# Override the framework-exported CFLAGS with CFLAGS= : it carries
+	# Override the framework-exported CFLAGS on the command line: it carries
 	# -I<sysroot>/include, which holds the official lua 5.3.6 port's headers and
 	# would shadow Redis's bundled deps/lua (5.1) in eval.c (lua_open /
 	# LUA_GLOBALSINDEX). The cross gcc's built-in sysroot still resolves libphoenix.
+	# What it is replaced with reaches redis AND its bundled deps (hiredis, lua,
+	# linenoise, hdr_histogram, fpconv), unlike REDIS_CFLAGS:
+	# -fstack-protector-strong, whose __stack_chk_guard/__stack_chk_fail libphoenix
+	# provides.
 	make -C . \
 		CC="${CROSS}gcc" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
-		CFLAGS= \
+		CFLAGS="-fstack-protector-strong" \
 		MALLOC=libc BUILD_TLS=no USE_SYSTEMD=no \
 		OPTIMIZATION=-O2 LDFLAGS="-static" \
 		REDIS_CFLAGS="${CF}" -j4
