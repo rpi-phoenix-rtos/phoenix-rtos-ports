@@ -63,8 +63,29 @@ p_prepare() {
 }
 
 p_build() {
-	make -C "$PREFIX_PORT_WORKDIR" all
+	# No build-host path in the libraries (every TLS user links them):
+	#  - the compiler flags that `openssl version -f` prints come from crypto/buildinf.h,
+	#    generated once from $(CC) $(LIB_CFLAGS): generate it first from the flags with
+	#    the path-bearing ones (sysroot, -I, -iprefix, prefix maps) left out;
+	#  - ENGINESDIR/MODULESDIR, the default engine and provider dirs ($(libdir)/...,
+	#    unused with no-module/no-dynamic-engine but compiled in), are the target's --
+	#    on the build's command line only: install_sw creates them on the build host.
+	local f flags=() needle
+	for f in ${CFLAGS}; do
+		case "$f" in */* | -iprefix) ;; *) flags+=("$f") ;; esac
+	done
+	make -C "$PREFIX_PORT_WORKDIR" crypto/buildinf.h CFLAGS="${flags[*]}"
+	make -C "$PREFIX_PORT_WORKDIR" all ENGINESDIR=/usr/lib/engines-3 MODULESDIR=/usr/lib/ossl-modules
 	make -C "$PREFIX_PORT_WORKDIR" install_sw
+
+	# checked on the program (stripped: the debug info names the work tree by design);
+	# the needle also catches a path left relative by -fmacro-prefix-map
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	$STRIP -o "${PREFIX_PORT_BUILD}/openssl.check" "$PREFIX_PORT_INSTALL/bin/openssl"
+	if grep -qaF "$needle" "${PREFIX_PORT_BUILD}/openssl.check"; then
+		b_die "openssl: the program names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${PREFIX_PORT_BUILD}/openssl.check" | head -1)"
+	fi
+	rm -f "${PREFIX_PORT_BUILD}/openssl.check"
 
 	cp -a "$PREFIX_PORT_INSTALL/bin/openssl" "$PREFIX_PROG"
 	$STRIP -o "$PREFIX_PROG_STRIPPED/openssl" "$PREFIX_PROG/openssl"
