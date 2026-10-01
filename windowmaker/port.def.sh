@@ -101,11 +101,16 @@ p_build() {
 	local cf="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=${SYSROOT} -std=gnu17 -I${WMAKER_DEPS}/include ${pwddefs} ${gapdefs} -DWMAKER_SHELL=\\\"${wmshell}\\\""
 	local xclosure="-lXft -lfontconfig -lexpat -lfreetype -lXrender -lXpm -lXext -lXmu -lXt -lSM -lICE -lX11 -lxcb -lXau -lXdmcp -lpng16 -lz -lftw -lm"
 
+	# --bindir=/bin: the menus and WMState launch WPrefs from ${bindir}, which with
+	# --prefix at the dependency prefix was the build host's. /bin is where this port
+	# stages wmaker and its helpers. --prefix itself must stay: configure adds
+	# -I${includedir}/-L${libdir} to every compile and link, so --prefix=/usr would
+	# build against the HOST's /usr/include.
 	(cd "${PREFIX_PORT_WORKDIR}" && \
 		PKG_CONFIG="pkg-config --static" \
 		PKG_CONFIG_PATH="${WMAKER_DEPS}/lib/pkgconfig:${WMAKER_DEPS}/share/pkgconfig" \
 		PKG_CONFIG_LIBDIR="${WMAKER_DEPS}/lib/pkgconfig:${WMAKER_DEPS}/share/pkgconfig" \
-		./configure --host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" --datarootdir=/usr/share --sysconfdir=/etc \
+		./configure --host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" --bindir=/bin --datarootdir=/usr/share --sysconfdir=/etc \
 			--disable-shared \
 			--enable-png --disable-jpeg --disable-tiff --disable-gif --disable-webp \
 			--disable-magick --disable-shm --disable-xinerama --disable-nls --disable-xlocale \
@@ -141,12 +146,30 @@ p_build() {
 
 	# Install + stage WindowMaker's RUNTIME DATA so the on-target wmaker finds its
 	# compiled DATADIR (/usr/share/WindowMaker + /usr/share/WINGs) and SYSCONFDIR
-	# (/etc/WindowMaker) — set via --prefix=/usr --sysconfdir=/etc above. Without
+	# (/etc/WindowMaker) — set via --datarootdir=/usr/share --sysconfdir=/etc above. Without
 	# this the port shipped only the binary and wmaker fell back to bare compiled
 	# defaults (no styles/pixmaps/icons, "could not load widget images" warnings).
 	local stage="${PREFIX_PORT_BUILD}/install-stage"
 	rm -rf "$stage"
 	make -C "${PREFIX_PORT_WORKDIR}" install DESTDIR="$stage" >/dev/null 2>&1 || b_die "windowmaker: make install failed"
+
+	# Nothing shipped may name a build directory: the staged data, and the programs
+	# (checked stripped: the debug info names the work tree by design). The needle
+	# also catches a path left relative by -fmacro-prefix-map.
+	local needle hit _wmbin
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	hit="$(find "$stage/usr/share/WindowMaker" "$stage/usr/share/WINGs" "$stage/etc/WindowMaker" \
+		-type f -exec grep -laF "${needle}" {} + || true)"
+	hit="${hit%%$'\n'*}"
+	[ -z "${hit}" ] || b_die "windowmaker: ${hit#"$stage"} names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${hit}" | head -1)"
+	for _wmbin in src/wmaker util/wmsetbg util/wdwrite; do
+		"${CROSS}strip" -o "${PREFIX_PORT_BUILD}/wm.check" "${PREFIX_PORT_WORKDIR}/${_wmbin}"
+		if grep -qaF "${needle}" "${PREFIX_PORT_BUILD}/wm.check"; then
+			b_die "windowmaker: ${_wmbin} names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${PREFIX_PORT_BUILD}/wm.check" | head -1)"
+		fi
+	done
+	rm -f "${PREFIX_PORT_BUILD}/wm.check"
+
 	mkdir -p "${PREFIX_FS}/root/usr/share" "${PREFIX_FS}/root/etc"
 	cp -a "$stage/usr/share/WindowMaker" "${PREFIX_FS}/root/usr/share/"
 	cp -a "$stage/usr/share/WINGs"       "${PREFIX_FS}/root/usr/share/"
