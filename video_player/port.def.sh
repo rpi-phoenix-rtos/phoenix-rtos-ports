@@ -115,6 +115,34 @@ _vp_link() {
 	"${NL_STRIP}" -o "${bin}.stripped" "${bin}"
 }
 
+# _vp_public_configuration <configure args...>: FFMPEG_CONFIGURATION, the configure line
+# that `ffplay -buildconf` and every program's banner print, formatted as configure formats
+# it but without the build host's paths: a program option keeps the program's name, a flag
+# list loses its path-bearing flags (--sysroot, -B, -I, -L)
+_vp_public_configuration() {
+	local v l r w out=""
+	local -a words keep
+	for v in "$@"; do
+		r="${v#*=}"
+		l="${v%"$r"}"
+		case "$v" in
+		--cc=*/* | --cross-prefix=*/*) r="${r##*/}" ;;
+		*=*/*)
+			read -ra words <<<"$r"
+			keep=()
+			for w in "${words[@]}"; do
+				case "$w" in */*) ;; *) keep+=("$w") ;; esac
+			done
+			r="${keep[*]}"
+			;;
+		*/*) continue ;;
+		esac
+		case "$r" in *[!A-Za-z0-9_/.+-]*) r="'${r}'" ;; esac
+		out="${out# } ${l}${r}"
+	done
+	printf '%s\n' "${out}"
+}
+
 # _vp_verify_ffplay <name>: tools build-ffplay.sh step 5, the checks of both its variants
 _vp_verify_ffplay() {
 	local name="$1" bin="${VP_OUT}/$1" bad=0 s syms n
@@ -187,8 +215,16 @@ p_build() {
 			fi
 		done
 		echo "video_player: config.h: flipped ${flipped} libm HAVE_* flag(s) 0->1"
+		# FFMPEG_CONFIGURATION is the whole configure line, the toolchain, sysroot and
+		# zlib-view paths in it; the libraries and ffplay compile it in. Its public form:
+		local pubcfg
+		pubcfg="$(_vp_public_configuration "${cfg_args[@]}")"
+		case "${pubcfg}" in *[\"\\\|\&]*) b_die "video_player: cannot put this configure line in config.h: ${pubcfg}" ;; esac
+		sed -i "s|^#define FFMPEG_CONFIGURATION .*|#define FFMPEG_CONFIGURATION \"${pubcfg}\"|" "${VP_FS}/config.h"
 		echo "${stamp}" >"${VP_OUT}/configure.stamp"
 	fi
+	grep -qE '^#define FFMPEG_CONFIGURATION "[^/]+"$' "${VP_FS}/config.h" ||
+		b_die "video_player: config.h: FFMPEG_CONFIGURATION names a path: $(grep '^#define FFMPEG_CONFIGURATION' "${VP_FS}/config.h")"
 	local d
 	for d in HAVE_PTHREADS HAVE_NEON CONFIG_AVFILTER CONFIG_SWSCALE CONFIG_SWRESAMPLE CONFIG_HEVC_DECODER CONFIG_H264_DECODER \
 			CONFIG_AAC_DECODER CONFIG_MOV_DEMUXER CONFIG_SCALE_FILTER CONFIG_ARESAMPLE_FILTER CONFIG_ZLIB \
