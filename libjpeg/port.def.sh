@@ -49,6 +49,10 @@ p_build() {
 	# IDCT/colour-convert/upsample/Huffman kernels land in libjpeg.a. At run time
 	# JSIMD_FORCENONE=1 in the environment falls back to the C paths (A/B switch).
 	# WITH_TURBOJPEG stays off: it pulls extra libs/programs no consumer needs.
+	#
+	# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+	# __stack_chk_fail. Images are untrusted input.
+	CFLAGS+=" -fstack-protector-strong"
 	LDFLAGS="${CFLAGS} $LDFLAGS"
 
 	if [ ! -f "${PREFIX_PORT_WORKDIR}/build/Makefile" ]; then
