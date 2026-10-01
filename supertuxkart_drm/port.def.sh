@@ -212,6 +212,12 @@ p_build() {
 		log "  first-stack string '$s': $n"
 		[ "$n" = 0 ] || bad=1
 	done
+	# no build path in the shipped program (absolute, or left relative by -fmacro-prefix-map)
+	local needle
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	n="$(grep -acF -- "$needle" "$elf.stripped" || true)"
+	log "  build-path strings: $n"
+	if [ "$n" != 0 ]; then grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "$elf.stripped" | head -3 | sed 's/^/[stk-drm]     /'; bad=1; fi
 	# silent duplicates: global symbols defined by STK's own link inputs AND the new stack
 	stk_in="$( cd "$stkbuild" && tr ' ' '\n' < "$linktxt" | grep -E '\.(obj|a)$' | grep -vxF "${SDL_A}" )"
 	dups="$( { ( cd "$stkbuild" && while IFS= read -r f; do "$nm" -g --defined-only "$f" 2>/dev/null; done <<< "$stk_in" ) \

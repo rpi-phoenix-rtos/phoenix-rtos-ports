@@ -113,8 +113,11 @@ p_build() {
 	#     (STK's Irrlicht/GE select GLES purely by preprocessor define and never
 	#     find_package a GL lib, so no headers are on the include path otherwise);
 	#   * a force-included compat header supplying a few BSD socket constants that
-	#     libphoenix omits but bundled enet/dnsc reference (macro-only, C+C++ safe).
-	CFLAGS="-I${SP}/include/SDL2 ${CFLAGS} -I${GLINC} -include ${PREFIX_PORT}/stk_phoenix_compat.h"
+	#     libphoenix omits but bundled enet/dnsc reference (macro-only, C+C++ safe);
+	#   * -fmacro-prefix-map of the source tree, AFTER the framework's own map (the last
+	#     matching map wins): __FILE__ in asserts and log calls becomes src/..., lib/...
+	#     instead of a path left relative to the framework's top dir (.buildroot/_build/...).
+	CFLAGS="-I${SP}/include/SDL2 ${CFLAGS} -I${GLINC} -include ${PREFIX_PORT}/stk_phoenix_compat.h -fmacro-prefix-map=${PREFIX_PORT_WORKDIR%/}/="
 
 	# Fold CFLAGS into LDFLAGS so link-time configure probes (STK's
 	# std::atomic<uint64_t> check, shaderc's compiler-flag checks) carry the
@@ -139,12 +142,16 @@ p_build() {
 		#   * -DUSE_GLES2=ON       (the arm/aarch64 auto-default is UNIX-gated)
 		#   * bundled enet         (system-enet branch is UNIX-gated AND skipped
 		#                           when USE_IPV6=ON anyway; USE_SYSTEM_ENET=OFF)
+		# STK_INSTALL_DATA_DIR, absolute, is the SUPERTUXKART_DATADIR compiled in (the
+		# data dir used when $SUPERTUXKART_DATADIR is unset): the image's, not
+		# CMAKE_INSTALL_PREFIX's. Nothing here runs `make install`.
 		# CMAKE_POLICY_VERSION_MINIMUM=3.5 is mandatory under host cmake 4.x
 		# (STK's cmake_minimum_required(2.8.4) is otherwise rejected).
 		(cd "${build}" && cmake \
 			-DCMAKE_TOOLCHAIN_FILE="${PREFIX_PORT}/aarch64-phoenix.cmake" \
 			-DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
 			-DCMAKE_INSTALL_PREFIX="${PREFIX_PORT_INSTALL}" \
+			-DSTK_INSTALL_DATA_DIR=/usr/share/supertuxkart \
 			-DCMAKE_BUILD_TYPE=STKRelease \
 			\
 			-DUSE_GLES2=ON \
