@@ -1,0 +1,36 @@
+--- a/src/debug.c
++++ b/src/debug.c
+@@ -2120,6 +2120,17 @@
+     UNUSED(secret);
+     UNUSED(info);
+ 
++    /* The handler is installed with SA_RESETHAND, but not every kernel honours
++     * that flag. With SA_NODEFER also set, a fault inside the crash report
++     * itself then re-enters this handler, recursively, until the stack is gone.
++     * Restore the default action by hand (a no-op where SA_RESETHAND works) so
++     * a second fault terminates the process instead. */
++    struct sigaction dfl;
++    sigemptyset(&dfl.sa_mask);
++    dfl.sa_flags = 0;
++    dfl.sa_handler = SIG_DFL;
++    sigaction(sig, &dfl, NULL);
++
+     bugReportStart();
+     serverLog(LL_WARNING,
+         "Redis %s crashed by signal: %d, si_code: %d", REDIS_VERSION, sig, info->si_code);
+@@ -2172,8 +2183,13 @@
+ }
+ 
+ void printCrashReport(void) {
+-    /* Log INFO and CLIENT LIST */
+-    logServerInfo();
++    /* Log INFO and CLIENT LIST. INFO walks server.db, which initServer() has
++     * not allocated yet if the crash happened earlier in startup. */
++    if (server.db)
++        logServerInfo();
++    else
++        serverLogRaw(LL_WARNING|LL_RAW,
++            "\n------ INFO OUTPUT ------\n(skipped: crashed before the server was initialized)\n");
+ 
+     /* Log the current client */
+     logCurrentClient(server.current_client, "CURRENT");

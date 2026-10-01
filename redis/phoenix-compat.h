@@ -15,8 +15,8 @@
 #define ECANCELED 125
 #endif
 
-/* --- pthread cancellation *type* (Phoenix has setcancelstate + pthread_cancel,
- * but not setcanceltype). Redis uses it only in makeThreadKillable() for the
+/* --- pthread cancellation *type*. Older libphoenix lacked setcanceltype (current
+ * libphoenix has it). Redis uses it only in makeThreadKillable() for the
  * crash-report fast-memory-test thread — non-core, so a no-op is acceptable. --- */
 #ifndef PTHREAD_CANCEL_DEFERRED
 #define PTHREAD_CANCEL_DEFERRED 0
@@ -28,6 +28,22 @@ static inline int phoenix_pthread_setcanceltype(int type, int *oldtype) {
     (void)type; if (oldtype) *oldtype = PTHREAD_CANCEL_DEFERRED; return 0;
 }
 #define pthread_setcanceltype phoenix_pthread_setcanceltype
+
+/* --- pthread_self() is NULL in a fork()ed child. The child runs on a new
+ * kernel thread (new tid), but libphoenix's fork() does not re-key the copied
+ * main-thread record to it, and pthread_setcancelstate() -- unlike its
+ * setcanceltype/testcancel/setspecific siblings -- dereferences the NULL
+ * without a check. `--daemonize yes` forks before initServer(), whose
+ * makeThreadKillable() then faulted. Threads created after the fork are
+ * registered normally, so only the forking (main) thread needs the guard. --- */
+static inline int phoenix_pthread_setcancelstate(int state, int *oldstate) {
+    if (pthread_self() == (pthread_t)0) {
+        if (oldstate) *oldstate = PTHREAD_CANCEL_ENABLE;
+        return 0;
+    }
+    return pthread_setcancelstate(state, oldstate);
+}
+#define pthread_setcancelstate phoenix_pthread_setcancelstate
 
 /* --- crash-report / watchdog bits debug.c needs (all non-core diagnostics) --- */
 #include <sys/time.h>
