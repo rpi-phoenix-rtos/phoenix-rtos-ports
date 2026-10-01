@@ -354,11 +354,16 @@ p_build() {
 	"${CROSS}nm" -D "${curses_so}" | grep -q PyInit__curses || \
 		b_die "PyInit__curses missing from $(basename "${curses_so}")"
 
-	# Onto sys.path (the stdlib dir is the prefix the interpreter was configured
-	# with). Installed AFTER the stdlib copy above on purpose: should that copy
-	# ever gain delete semantics, an earlier install would be wiped without a
-	# word. NOT stripped — the dynamic symbols are the module's whole ABI.
-	b_install "${curses_so}" /usr/local/lib/python3.14
+	# Into lib-dynload, where CPython keeps extension modules and which is on
+	# sys.path. The directory also has to exist: getpath locates exec_prefix by it,
+	# and without one every start printed "Could not find platform dependent
+	# libraries <exec_prefix>". Installed AFTER the stdlib copy above on purpose:
+	# should that copy ever gain delete semantics, an earlier install would be
+	# wiped without a word. A copy left in the stdlib dir by an earlier build would
+	# come first on sys.path, so it is removed. NOT stripped — the dynamic symbols
+	# are the module's whole ABI.
+	rm -f "${stdlib}"/_curses*.so
+	b_install "${curses_so}" /usr/local/lib/python3.14/lib-dynload
 
 	# No staged stdlib file names a build directory, except two known ones:
 	# ${sysconfigdata} records the build's flags by design (see above), and _curses
