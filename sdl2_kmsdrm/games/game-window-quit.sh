@@ -36,5 +36,5 @@ if [ -f "${R}/game-window.pid" ]; then
 else
 	echo "GAME-WINDOW quit: no game running"
 fi
-/usr/lib/xfce-demo/bin/loginctl terminate-session
+/usr/lib/xfce-session/bin/loginctl terminate-session
 echo "GAME-WINDOW quit: logout requested rc=$?"

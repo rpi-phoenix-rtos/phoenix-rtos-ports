@@ -2,7 +2,7 @@
 <!--
   labwc under the games desktop session on Phoenix-RTOS (XFCE + windowed GPU games,
   /bin/xfce-session with CONF_DIR=/etc/xdg/labwc-xfce-games): /etc/xdg/labwc-xfce-games/rc.xml.
-  labwc-xfce-demo/rc.xml plus window rules that lay the desktop out (Thunar top left, foot
+  labwc-xfce/rc.xml plus window rules that lay the desktop out (Thunar top left, foot
   below it, the game window on the right: 1280x720 content next to a 620 px wide left column
   on the 1920x1080 output, under the 30 px panel) and Super+G = Quake in a window.
     Super (tap)             application finder

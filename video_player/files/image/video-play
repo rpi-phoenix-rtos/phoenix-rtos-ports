@@ -85,7 +85,7 @@ case "${MODE}" in
 		export SDL_VIDEODRIVER=wayland
 		# the xdg-toplevel app_id (labwc window rules), as /bin/game-window.sh does
 		export SDL_VIDEO_WAYLAND_WMCLASS=${SDL_VIDEO_WAYLAND_WMCLASS:-ffplay}
-		# the session's settings (xfce-desktop.sh / labwc-xfce-demo/environment)
+		# the session's settings (xfce-desktop.sh / labwc-xfce/environment)
 		export XDG_SESSION_TYPE=wayland
 		export XKB_DEFAULT_LAYOUT=${XKB_DEFAULT_LAYOUT:-us}
 		FS=${FS:-0}
