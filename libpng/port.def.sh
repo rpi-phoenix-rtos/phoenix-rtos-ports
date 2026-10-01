@@ -39,10 +39,12 @@ p_prepare() {
 		# libpng finds zlib via the framework install prefix (PREFIX_H/PREFIX_A):
 		# CPPFLAGS carries -I because libpng's pnglibconf preprocessing rules use
 		# $(CPPFLAGS), not $(CFLAGS), for the zlib.h include.
+		# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+		# __stack_chk_fail. Images are untrusted input.
 		(cd "$PREFIX_PORT_WORKDIR" && "./configure" --host="${HOST}" \
 			--prefix="$PREFIX_PORT_INSTALL" --libdir="$PREFIX_A" --includedir="$PREFIX_H" \
 			--disable-shared --enable-static \
-			CPPFLAGS="${CFLAGS} -I${PREFIX_H}" CFLAGS="${CFLAGS} -I${PREFIX_H}" \
+			CPPFLAGS="${CFLAGS} -I${PREFIX_H}" CFLAGS="${CFLAGS} -fstack-protector-strong -I${PREFIX_H}" \
 			LDFLAGS="${LDFLAGS} -L${PREFIX_A}")
 	fi
 }
