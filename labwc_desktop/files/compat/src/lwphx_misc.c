@@ -7,19 +7,8 @@
 
 #include <dirent.h>
 #include <errno.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
-
-/* Thread names are a debugging aid; Phoenix-RTOS threads have none. Linux limits
- * a name to 15 bytes and refuses longer ones with ERANGE: keep that contract. */
-int pthread_setname_np(pthread_t thread, const char *name)
-{
-	(void)thread;
-	return (strlen(name) > 15u) ? ERANGE : 0;
-}
-
 
 /* realloc() of nmemb * size, refusing a product that overflows (OpenBSD/glibc). */
 void *reallocarray(void *ptr, size_t nmemb, size_t size)

@@ -484,7 +484,7 @@ EOF
 	done
 	rm -f "${P}/lib/libwlphx-compat.a" "${P}/lib/liblwphx-compat.a"
 	"${TC}-gcc-ar" rcs "${P}/lib/libwlphx-compat.a" "${out}/compat-obj/"wlphx_*.o
-	for f in lwphx_shm lwphx_pty lwphx_uchar lwphx_threads lwphx_locale lwphx_sem lwphx_wchar lwphx_epoll_pwait lwphx_misc lwphx_read; do
+	for f in lwphx_shm lwphx_pty lwphx_uchar lwphx_threads lwphx_wchar lwphx_epoll_pwait lwphx_misc lwphx_read; do
 		"${TC}-gcc" "${CFL[@]}" -c "${F}/compat/src/${f}.c" -o "${out}/compat-obj/${f}.o"
 	done
 	"${TC}-gcc-ar" rcs "${P}/lib/liblwphx-compat.a" "${out}/compat-obj/"lwphx_*.o

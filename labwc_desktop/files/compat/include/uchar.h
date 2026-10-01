@@ -2,9 +2,14 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 /*
- * labwc-drm compat: C11 <uchar.h> (libphoenix has none; foot uses char32_t).
- * mbrtoc32()/c32rtomb() convert UTF-8 regardless of the locale (libphoenix has
- * only the C locale; Wayland text is UTF-8): compat/src/lwphx_uchar.c. Programs
+ * labwc-drm compat: C11 <uchar.h> for foot and fuzzel, in place of libphoenix's
+ * (not included). libphoenix's conversions follow its only locale, C, in which
+ * a byte is the code point of the same value; these mbrtoc32()/c32rtomb()
+ * convert UTF-8 regardless of the locale (Wayland text is UTF-8):
+ * compat/src/lwphx_uchar.c. The compat archive comes before libphoenix on every
+ * link, so these definitions are the ones used; a program that also called
+ * mbrtoc16() or c16rtomb() would pull in libphoenix's uchar object as well and
+ * fail to link (multiple definition), which none built here does. Programs
  * sizing buffers with MB_CUR_MAX (1 in libphoenix) must be built with
  * -DLWPHX_UTF8_MB_CUR_MAX (compat/include/stdlib.h), which makes it 4.
  */
