@@ -100,7 +100,17 @@ p_build() {
 		tar xf "$SRC/$fname" || b_die "xorg-fonts: $nv extract failed"
 	}
 
+	# _need <component> <artifact>: build the component unless its artifact is in the
+	# shared prefix AND this port's build directory records building it (_built). When
+	# the recipe changes the framework cleans the build directory, not the shared
+	# prefix; a guard on the artifact alone then kept the old library, so an edited
+	# configure line never reached an incremental build.
+	_need() { [ ! -f "$2" ] || [ ! -f "${PREFIX_PORT_BUILD}/built/$1" ]; }
+	_built() { mkdir -p "${PREFIX_PORT_BUILD}/built" && touch "${PREFIX_PORT_BUILD}/built/$1"; }
+
 	# --- libpng (needs zlib, already staged) ---
+	# Guarded on the artifact alone, not _need: the libpng port installs the same
+	# libpng16.a into the same prefix, and this build only fills in for it.
 	if [ ! -f "$PREFIX/lib/libpng16.a" ]; then
 		_fetch_extract libpng-1.6.40 "https://download.sourceforge.net/libpng/libpng-1.6.40.tar.gz"
 		( cd "$SRC/libpng-1.6.40" \
@@ -129,7 +139,7 @@ p_build() {
 	# docs/misc/2026-09-04-port-determinism-audit.md finding 1.
 
 	# --- freetype (minimal: break the freetype<->harfbuzz cycle) ---
-	if [ ! -f "$PREFIX/lib/libfreetype.a" ]; then
+	if _need freetype "$PREFIX/lib/libfreetype.a"; then
 		_fetch_extract freetype-2.13.2 "https://downloads.sourceforge.net/freetype/freetype-2.13.2.tar.gz"
 		( cd "$SRC/freetype-2.13.2" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
@@ -138,10 +148,11 @@ p_build() {
 		       --without-zlib --without-png --without-harfbuzz --without-bzip2 --without-brotli \
 		  && make -j4 && make install ) || b_die "xorg-fonts: freetype failed"
 		echo "xorg-fonts: freetype-2.13.2 OK"
+		_built freetype
 	fi
 
 	# --- libfontenc (server-side font-encoding lib; needs zlib + xorgproto from L1) ---
-	if [ ! -f "$PREFIX/lib/libfontenc.a" ]; then
+	if _need libfontenc "$PREFIX/lib/libfontenc.a"; then
 		_fetch_extract libfontenc-1.1.8 "$XBASE/lib/libfontenc-1.1.8.tar.gz"
 		( cd "$SRC/libfontenc-1.1.8" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
@@ -149,12 +160,13 @@ p_build() {
 		       CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make -j4 && make install ) || b_die "xorg-fonts: libfontenc failed"
 		echo "xorg-fonts: libfontenc-1.1.8 OK"
+		_built libfontenc
 	fi
 
 	# --- libXfont2 (server-side font lib; needed by xorg-server). Lib-only: its
 	#     in-tree font tools fail to link (deferred libc syms), so install .a + headers.
 	#     -DO_NOFOLLOW=0 -DNOFILES_MAX=256 + the cross malloc0/hypot run-test cache. ---
-	if [ ! -f "$PREFIX/lib/libXfont2.a" ]; then
+	if _need libXfont2 "$PREFIX/lib/libXfont2.a"; then
 		_fetch_extract libXfont2-2.0.6 "$XBASE/lib/libXfont2-2.0.6.tar.gz"
 		( cd "$SRC/libXfont2-2.0.6" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
@@ -167,10 +179,11 @@ p_build() {
 		cp "$SRC/libXfont2-2.0.6/.libs/libXfont2.a" "$PREFIX/lib/"
 		( cd "$SRC/libXfont2-2.0.6" && make install-data >/dev/null 2>&1 ) || true
 		echo "xorg-fonts: libXfont2-2.0.6 OK (lib only)"
+		_built libXfont2
 	fi
 
 	# --- expat (fontconfig's XML parser) ---
-	if [ ! -f "$PREFIX/lib/libexpat.a" ]; then
+	if _need expat "$PREFIX/lib/libexpat.a"; then
 		_fetch_extract expat-2.5.0 "https://github.com/libexpat/libexpat/releases/download/R_2_5_0/expat-2.5.0.tar.bz2"
 		( cd "$SRC/expat-2.5.0" \
 		  && ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
@@ -178,10 +191,11 @@ p_build() {
 		       --without-docbook --without-examples --without-tests \
 		  && make -j4 && make install ) || b_die "xorg-fonts: expat failed"
 		echo "xorg-fonts: expat-2.5.0 OK"
+		_built expat
 	fi
 
 	# --- fontconfig (needs freetype + expat; two Phoenix inline patches; needs gperf) ---
-	if [ ! -f "$PREFIX/lib/libfontconfig.a" ]; then
+	if _need fontconfig "$PREFIX/lib/libfontconfig.a"; then
 		_fetch_extract fontconfig-2.14.2 "https://www.freedesktop.org/software/fontconfig/release/fontconfig-2.14.2.tar.xz" "https://mirrors.mit.edu/macports/distfiles/fontconfig/fontconfig-2.14.2.tar.xz"
 		local fc="$SRC/fontconfig-2.14.2"
 		# (a) fccache.c: libphoenix <sys/time.h> defines a non-standard VALUE-based
@@ -215,10 +229,11 @@ p_build() {
 		cp -r "$fcstage$PREFIX/include/fontconfig" "$PREFIX/include/"
 		cp "$fcstage$PREFIX/lib/pkgconfig/fontconfig.pc" "$PREFIX/lib/pkgconfig/"
 		echo "xorg-fonts: fontconfig-2.14.2 OK"
+		_built fontconfig
 	fi
 
 	# --- libXft (freetype + fontconfig + libXrender + libX11, all staged) ---
-	if [ ! -f "$PREFIX/lib/libXft.a" ]; then
+	if _need libXft "$PREFIX/lib/libXft.a"; then
 		_fetch_extract libXft-2.3.8 "$XBASE/lib/libXft-2.3.8.tar.gz"
 		( cd "$SRC/libXft-2.3.8" \
 		  && PKG_CONFIG="$PKGC" ./configure --host="$XHOST" --prefix="$PREFIX" --disable-shared --enable-static \
@@ -229,10 +244,11 @@ p_build() {
 		       CFLAGS="-O2 -mcpu=cortex-a72 -mtune=cortex-a72 --sysroot=$SYSROOT -I$PREFIX/include -std=gnu17" LDFLAGS="--sysroot=$SYSROOT -L$PREFIX/lib" \
 		  && make install ) || b_die "xorg-fonts: libXft failed"
 		echo "xorg-fonts: libXft-2.3.8 OK"
+		_built libXft
 	fi
 
 	# --- cairo (core lib only: skip the -pthread util) ---
-	if [ ! -f "$PREFIX/lib/libcairo.a" ]; then
+	if _need cairo "$PREFIX/lib/libcairo.a"; then
 		_fetch_extract cairo-1.16.0 "https://cairographics.org/releases/cairo-1.16.0.tar.xz" "https://mirrors.mit.edu/macports/distfiles/cairo/cairo-1.16.0.tar.xz"
 		( cd "$SRC/cairo-1.16.0" \
 		  && ax_cv_c_float_words_bigendian=no \
@@ -249,6 +265,7 @@ p_build() {
 		# cairo.pc lands from `make -C src install`? ensure it's present
 		[ -f "$PREFIX/lib/pkgconfig/cairo.pc" ] || { pc=$(find "$SRC/cairo-1.16.0" -name cairo.pc | head -1); [ -n "$pc" ] && cp "$pc" "$PREFIX/lib/pkgconfig/"; }
 		echo "xorg-fonts: cairo-1.16.0 OK"
+		_built cairo
 	fi
 
 	# --- X11 CORE FONT DATA (noarch) ------------------------------------------
