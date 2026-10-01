@@ -260,8 +260,17 @@ p_build() {
 	# so the interpreter finds `encodings` etc. at startup. Whole tree, matching
 	# the ad-hoc `cp -r Lib/*`. NB: never `make install` — --prefix=/usr/local
 	# would target the build host.
-	mkdir -p "${PREFIX_FS}/root/usr/local/lib/python3.14"
-	cp -a "${PREFIX_PORT_WORKDIR}/Lib/." "${PREFIX_FS}/root/usr/local/lib/python3.14/"
+	local stdlib="${PREFIX_FS}/root/usr/local/lib/python3.14"
+	mkdir -p "${stdlib}"
+	cp -a "${PREFIX_PORT_WORKDIR}/Lib/." "${stdlib}/"
+	# ...without byte-code from the build. The build host's python imports sysconfig's
+	# closure (re, enum, json, encodings...) from ./Lib for `make pybuilddir.txt` and
+	# leaves Lib/**/__pycache__ behind, whose co_filename is the build tree: the image
+	# shipped 26 such .pyc, so tracebacks through those modules named the builder's
+	# work dir. The interpreter compiles them on first import, as it already does for
+	# the rest of the stdlib, recording the /usr/local/lib/python3.14 paths. The prune
+	# also drops .pyc an earlier build staged.
+	find "${stdlib}" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 	# The build-time configuration module sysconfig imports on POSIX. Without it
 	# `import sysconfig` works but every query (get_config_var, get_paths,
@@ -350,4 +359,15 @@ p_build() {
 	# ever gain delete semantics, an earlier install would be wiped without a
 	# word. NOT stripped — the dynamic symbols are the module's whole ABI.
 	b_install "${curses_so}" /usr/local/lib/python3.14
+
+	# No staged stdlib file names a build directory, except two known ones:
+	# ${sysconfigdata} records the build's flags by design (see above), and _curses
+	# carries the relative __FILE__ of CPython's inline headers. The needle also
+	# catches a path left relative by -fmacro-prefix-map.
+	local needle hit
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	hit="$(find "${stdlib}" -type f ! -name "${sysconfigdata}" ! -name "_curses*" \
+		-exec grep -laF "${needle}" {} + || true)"
+	hit="${hit%%$'\n'*}"
+	[ -z "${hit}" ] || b_die "python: ${hit#"${stdlib}/"} names a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${hit}" | head -1)"
 }
