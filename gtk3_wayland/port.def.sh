@@ -297,14 +297,19 @@ unset PKG_CONFIG_PATH
 exec /usr/bin/pkg-config --static${PKGC_DEFINE_PREFIX} "\$@"
 EOF
 		chmod +x "${pkgc}"
-		local flags="'--sysroot=${S}/', '-B${S}/lib/', '-mcpu=cortex-a72', '-mtune=cortex-a72', '-mstrict-align', '-mno-outline-atomics', '-ffunction-sections', '-fdata-sections', '-I${SYSD}/include'"
+		# -fmacro-prefix-map: __FILE__ of an installed header names it relative to the
+		# include dir, not by its build-host path. GTK's gtkwidget.c includes GLib's
+		# gobject/gobjectnotifyqueue.c, whose g_return_if_fail() messages put that path
+		# into every program linking libgtk-3.a.
+		local pmap="'-fmacro-prefix-map=${P}/include/='"
+		local flags="'--sysroot=${S}/', '-B${S}/lib/', '-mcpu=cortex-a72', '-mtune=cortex-a72', '-mstrict-align', '-mno-outline-atomics', '-ffunction-sections', '-fdata-sections', '-I${SYSD}/include', ${pmap}"
 		local lflags="'--sysroot=${S}/', '-B${S}/lib/', '-L${SYSD}/lib', '-Wl,-z,max-page-size=0x1000'"
 		# GTK and gtk-layer-shell (Wayland clients) additionally see the M6 compat layer
 		# (memfd_create over shmsrv, epoll & co.) -- never GLib: its configure would find
 		# the emulated eventfd/epoll headers and build its main loop on them.
 		# (-I the Wayland snapshot too: GTK's configure looks for <linux/input.h> -- the
 		# M6 shim over FreeBSD's evdev codes -- with the base flags only.)
-		local flags_wl="'--sysroot=${S}/', '-B${S}/lib/', '-mcpu=cortex-a72', '-mtune=cortex-a72', '-mstrict-align', '-mno-outline-atomics', '-ffunction-sections', '-fdata-sections', '-I${SYSD}/include', '-I${COMPAT_INC}', '-I${D}/wayland/include'"
+		local flags_wl="'--sysroot=${S}/', '-B${S}/lib/', '-mcpu=cortex-a72', '-mtune=cortex-a72', '-mstrict-align', '-mno-outline-atomics', '-ffunction-sections', '-fdata-sections', '-I${SYSD}/include', '-I${COMPAT_INC}', '-I${D}/wayland/include', ${pmap}"
 		local lflags_wl="${lflags}, '-Wl,-u,__wrap_close', '-Wl,-u,__wrap_write', '${D}/wayland/lib/libwlphx-compat.a', '-Wl,--wrap=close', '-Wl,--wrap=write'"
 		# GTK itself: the wl flags + the built-in keymap header (GTK patch 0003)
 		local flags_gtk="${flags_wl}, '-DGDK_WAYLAND_BUILTIN_XKB_KEYMAP_H=\"${D}/gdk_builtin_keymap.h\"'"
@@ -666,6 +671,18 @@ PY
 	{ echo "# gtk3_wayland port build"; (cd "${BIN}" && sha256sum ./*-stripped | sed 's|\./||')
 	  (cd "${I}" && sha256sum data/glib-2.0/schemas/gschemas.compiled); } >"${I}/SHA256SUMS"
 	cat "${I}/SHA256SUMS"
+	# no build path compiled into this build's libraries (the debug info, stripped from
+	# the shipped programs, names the work tree by design)
+	local a needle
+	needle="$(basename "$(dirname "${PREFIX_BUILD%/}")")/$(basename "${PREFIX_BUILD%/}")"
+	for a in "${P}"/lib/*.a; do
+		"${TC}-strip" --strip-debug -o "${out}/nodebug.a" "${a}"
+		if grep -qaF "${needle}" "${out}/nodebug.a"; then
+			echo "gtk3_wayland: $(basename "${a}") compiles in a build path: $(grep -ao -- "[[:print:]]*${needle}[[:print:]]*" "${out}/nodebug.a" | head -1)"
+			bad=1
+		fi
+	done
+	rm -f "${out}/nodebug.a"
 	[ "${bad}" = 0 ] || b_die "gtk3_wayland: verification failed"
 
 	# --- the staging tree: the compiled schemas, the settings and (USE demos) the GTK
