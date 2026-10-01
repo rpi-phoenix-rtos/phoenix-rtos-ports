@@ -1,0 +1,69 @@
+From 0823f2377368c5a79c438c0e8eafd08bba456662 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Thu, 1 Oct 2026 20:51:49 +0200
+Subject: [PATCH] openssl: build the static module without a shared one
+
+With default_library=static the backend was still linked as a shared
+module first, and the static library made from its objects. That needs
+PIC objects (meson refuses to link the non-PIC tlsbase into it with
+b_staticpic=false) and a working shared-library link on the target.
+
+Build the static library straight from the sources instead, with tlsbase
+bundled in, and the shared module only when shared libraries are built.
+---
+ tls/openssl/meson.build | 32 +++++++++++++++++++-------------
+ 1 file changed, 19 insertions(+), 13 deletions(-)
+
+diff --git a/tls/openssl/meson.build b/tls/openssl/meson.build
+index 72a6eca..469f30e 100644
+--- a/tls/openssl/meson.build
++++ b/tls/openssl/meson.build
+@@ -35,26 +35,32 @@ endif
+ 
+ giomodules += 'gioopenssl'
+ 
+-module = shared_module(
+-  'gioopenssl',
+-  sources: sources,
+-  include_directories: incs,
+-  dependencies: deps,
+-  link_args: module_ldflags,
+-  link_depends: symbol_map,
+-  name_suffix: module_suffix,
+-  install: build_shared,
+-  install_dir: gio_module_dir,
+-)
++if build_shared
++  module = shared_module(
++    'gioopenssl',
++    sources: sources,
++    include_directories: incs,
++    dependencies: deps,
++    link_args: module_ldflags,
++    link_depends: symbol_map,
++    name_suffix: module_suffix,
++    install: true,
++    install_dir: gio_module_dir,
++  )
++endif
+ 
+ if build_static
++  # Built from the sources (not from the shared module's objects), so a static-only
++  # build compiles no PIC objects and links no shared module; tlsbase is bundled in.
+   gioopenssl_lib = static_library('gioopenssl',
+-    objects: module.extract_all_objects(recursive: true),
++    sources: sources,
++    include_directories: incs,
+     dependencies: deps,
++    link_whole: tlsbase,
+     install: true,
+     install_dir: gio_module_dir,
+   )
+-  pkg.generate(module)
++  pkg.generate(gioopenssl_lib)
+ 
+   gioopenssl_dep = declare_dependency(link_with: gioopenssl_lib)
+   meson.override_dependency('gioopenssl', gioopenssl_dep)
+-- 
+2.53.0
+

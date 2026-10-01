@@ -1,0 +1,28 @@
+From 7239656bffd6dbc2eeec3d85be6517eb7ab9e397 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Thu, 1 Oct 2026 20:57:45 +0200
+Subject: [PATCH] output.h: include <cstdint> for uint8_t
+
+output.h uses uint8_t without including <cstdint>. It compiles only
+where another standard header happens to pull <cstdint> in: the
+aarch64-phoenix GCC 16 libstdc++ does, GCC 15's on x86-64 Linux does
+not, and WebKit includes this header too.
+---
+ include/woff2/output.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/woff2/output.h b/include/woff2/output.h
+index c325f67..aac04d1 100644
+--- a/include/woff2/output.h
++++ b/include/woff2/output.h
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <memory>
++#include <cstdint>
+ #include <string>
+ 
+ namespace woff2 {
+-- 
+2.53.0
+
