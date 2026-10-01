@@ -35,7 +35,10 @@ p_prepare() {
 		# -O2: the framework passes no optimisation level, and the post-quantum
 		# key exchanges (sntrup761, mlkem768) are slow enough at -O0 to delay
 		# every login noticeably.
-		DROPBEAR_CFLAGS="-O2 -DENDIAN_LITTLE -DUSE_DEV_PTMX ${DROPBEAR_CUSTOM_CFLAGS}"
+		# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
+		# __stack_chk_fail. Set here, not through dropbear's own hardening, which
+		# --disable-harden turns off (it also adds -pie and -z relro/now).
+		DROPBEAR_CFLAGS="-O2 -fstack-protector-strong -DENDIAN_LITTLE -DUSE_DEV_PTMX ${DROPBEAR_CUSTOM_CFLAGS}"
 		DROPBEAR_LDFLAGS=""
 
 		ENABLE_ZLIB="no"
