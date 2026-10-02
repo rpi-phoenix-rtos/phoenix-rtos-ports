@@ -60,6 +60,24 @@ __attribute__((weak)) void _malloc_forkChild(void)
 }
 
 
+/* malloc_trim() lives in malloc_dl.o too (libphoenix since build 22), and WebKit's memory-pressure
+ * handler calls it (WTF/wtf/unix/MemoryPressureHandlerUnix.cpp), which pulled libphoenix's whole
+ * allocator into the link next to mimalloc: "multiple definition of `malloc'". Here it asks
+ * mimalloc to return what it can, when mimalloc is linked (weak reference: the helper programs
+ * of the build link this object without it). Weak, like the hooks above, so a binary that does
+ * use libphoenix's allocator keeps libphoenix's malloc_trim(). */
+extern void mi_collect(_Bool force) __attribute__((weak));
+
+__attribute__((weak)) int malloc_trim(size_t pad)
+{
+	(void)pad;
+	if (mi_collect != NULL) {
+		mi_collect(1);
+	}
+	return 0;
+}
+
+
 /* Triage aid: with PHX_TRACE_ABORT=1 in the environment, a SIGABRT (abort(), a failed
  * RELEASE_ASSERT on this target) prints the interrupted pc/lr and the frame-pointer chain to
  * stderr before the default action, e.g. `PHX-ABORT pc=0x... lr=0x...` then `PHX-ABORT fp#N
