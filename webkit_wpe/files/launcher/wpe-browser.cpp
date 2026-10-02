@@ -975,7 +975,12 @@ static char* storageDirectory(const char* option, const char* first, const char*
         return g_strdup(option);
     /* $HOME, not XDG_DATA_HOME/XDG_CACHE_HOME: the XFCE session points those at its RAM /tmp */
     const char* home = g_getenv("HOME");
-    return g_build_filename(home && *home ? home : "/root", first, second, "wpe-browser", nullptr);
+    const char* base = home && *home ? home : "/root";
+    /* g_build_filename() stops at the first NULL: with no second component, "wpe-browser" must
+     * follow `first` directly (the cache was created as $HOME/.cache itself) */
+    if (!second)
+        return g_build_filename(base, first, "wpe-browser", nullptr);
+    return g_build_filename(base, first, second, "wpe-browser", nullptr);
 }
 
 static WebKitNetworkSession* createNetworkSession()
