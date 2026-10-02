@@ -26,6 +26,11 @@
 #                   Unset (the port): plain ninja -- an image build holds that lock for its
 #                   whole run (rebuild-rpi4b-fast.sh) -- with -j capped at MemAvailable / 2 GB.
 #   PHX_CCACHE      auto (default: ccache when the host has it) | 0 | 1
+#   PHX_WPE_JIT     0 (default): JavaScriptCore's asm LLInt only; 1: also the Baseline JIT, the
+#                   DFG, the FTL and the regexp JIT (browser milestone B9; the port's `jit` USE
+#                   flag). WebAssembly is then compiled in, which 2.54's B3/FTL need, but stays
+#                   off at run time (patches/webkit/0013). JSC_useJIT=false in the environment
+#                   turns the JIT off at run time in a JIT build. Changing it reconfigures.
 #   PHX_WPE_RELEASE_LOG
 #                   1: WebKit's RELEASE_LOG to stderr (ENABLE_RELEASE_LOG), so that WEBKIT_DEBUG=
 #                   ProcessSwapping,Process,Loading,... shows the process model at work; 0 (default):
@@ -418,20 +423,24 @@ EOF
 }
 
 # --- WebKit configuration ------------------------------------------------------------------------
+# JavaScriptCore's tiers (PHX_WPE_JIT; patches/webkit/0012-0014 make both configurations work)
+if [ "${PHX_WPE_JIT:-0}" = 1 ]; then
+	JSC_TIER_OPTS=(-DENABLE_JIT=ON -DENABLE_DFG_JIT=ON -DENABLE_FTL_JIT=ON -DENABLE_WEBASSEMBLY=ON)
+else
+	JSC_TIER_OPTS=(-DENABLE_JIT=OFF -DENABLE_DFG_JIT=OFF -DENABLE_FTL_JIT=OFF -DENABLE_WEBASSEMBLY=OFF)
+fi
 # The port's README (or the coordination repo's tools/browser/wpe/README.md) explains every value.
 WPE_CMAKE_OPTS=(
 	-DPORT=WPE
 	-DCMAKE_BUILD_TYPE=Release
 	-DDEVELOPER_MODE=OFF
 	-DENABLE_STATIC_JSC=ON
-	# JavaScriptCore as the browser plan's track C: asm LLInt, no JIT/WASM, mimalloc
+	# JavaScriptCore as the browser plan's track C: asm LLInt (+ the JIT tiers with PHX_WPE_JIT=1),
+	# mimalloc
 	-DUSE_SYSTEM_MALLOC=OFF
 	-DUSE_MIMALLOC=ON
-	-DENABLE_JIT=OFF
-	-DENABLE_DFG_JIT=OFF
-	-DENABLE_FTL_JIT=OFF
+	"${JSC_TIER_OPTS[@]}"
 	-DENABLE_C_LOOP=OFF
-	-DENABLE_WEBASSEMBLY=OFF
 	-DENABLE_SAMPLING_PROFILER=OFF
 	-DENABLE_REMOTE_INSPECTOR=OFF
 	-DENABLE_API_TESTS=OFF
@@ -540,6 +549,7 @@ stage_configure() {
 		|| { grep -E 'CMake (Error|Warning)' -A6 "${out}/webkit-configure.log" | head -60 >&2; echo "build-wpe.sh: WebKit configure failed, see ${out}/webkit-configure.log" >&2; exit 1; }
 	cp "${tcf}" "${wb}.toolchain"
 	cp "${V}/link-extra.txt" "${wb}.deps"
+	printf '%s\n' "${WPE_CMAKE_OPTS[@]}" > "${wb}.options"
 	grep -E '^--  (ENABLE|USE)_' "${out}/webkit-configure.log" > "${out}/webkit-features.txt" || true
 	log "WebKit: configured; public options ON: $(grep -E ' ON$' "${out}/webkit-features.txt" | awk '{print $2}' | tr '\n' ' ')"
 	touch "${out}/configure.stamp"
@@ -566,7 +576,10 @@ run_heavy() {
 
 stage_build() {
 	[ -n "${RUBY}" ] || stage_ruby
-	[ -f "${out}/configure.stamp" ] || stage_configure
+	# configured with other options (PHX_WPE_JIT changed): configure again
+	if [ ! -f "${out}/configure.stamp" ] || ! printf '%s\n' "${WPE_CMAKE_OPTS[@]}" | cmp -s - "${out}/webkit-build.options"; then
+		stage_configure
+	fi
 	local wb="${out}/webkit-build" t0=${SECONDS} inputs
 	# The static closure (CMAKE_CXX_STANDARD_LIBRARIES), libphoenix and the toolchain's runtime
 	# are not ninja dependencies of the link: when one of them changed, drop the program so
