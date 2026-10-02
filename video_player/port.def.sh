@@ -70,7 +70,9 @@
 # unverified), or the decoder option -rpivid N; ffplay -vcodec hevc = the plain CPU decoder.
 #
 # Installs (${PREFIX_PORT_INSTALL}): bin/ (stripped), prog/ (unstripped, addr2line),
-# share/video-player/ (link maps, stage.MANIFEST), stage/ + stage.MANIFEST (the rootfs files):
+# share/video-player/ (link maps, stage.MANIFEST), ffmpeg/ (the FFmpeg libraries for other
+# ports: include/, lib/*.a, lib/pkgconfig/ with prefix-relative paths; webkit_wpe's USE video
+# links them; a private prefix, never the shared one), stage/ + stage.MANIFEST (the rootfs files):
 #   /usr/bin/ffplay                        ffplay: full screen on KMS from psh, a window on the
 #                                          desktop (SDL tries Wayland, then KMSDRM)
 #   /usr/bin/hevc-rpivid-check             the rpivid decoder checked against the CPU one
@@ -269,6 +271,21 @@ p_build() {
 		"${VP_FS}/libswresample/libswresample.a" "${VP_FS}/libswscale/libswscale.a" "${VP_FS}/libavutil/libavutil.a")
 	local a
 	for a in "${VP_FF_A[@]}"; do [ -f "${a}" ] || b_die "video_player: missing ${a}"; done
+	# the libraries for other ports (webkit_wpe USE video): headers, archives, pkg-config files,
+	# with the paths made relative to the prefix
+	local FFD="${I}/ffmpeg" FFS="${VP_OUT}/ffmpeg-dev"
+	rm -rf "${FFD}" "${FFS}"
+	make -C "${VP_FS}" DESTDIR="${FFS}" install-libs install-headers >"${VP_OUT}/ff-install.log" 2>&1 ||
+		{ tail -20 "${VP_OUT}/ff-install.log"; b_die "video_player: ffmpeg library install failed"; }
+	[ -d "${FFS}/usr/local/lib" ] || b_die "video_player: ffmpeg library install: no ${FFS}/usr/local/lib"
+	mv "${FFS}/usr/local" "${FFD}"
+	sed -i -e 's|^prefix=.*|prefix=/usr/local|' -e 's|^libdir=/usr/local/|libdir=${prefix}/|' \
+		-e 's|^includedir=/usr/local/|includedir=${prefix}/|' "${FFD}"/lib/pkgconfig/*.pc
+	for a in avformat avcodec swresample swscale avutil; do
+		[ -f "${FFD}/lib/lib${a}.a" ] && [ -f "${FFD}/lib/pkgconfig/lib${a}.pc" ] || b_die "video_player: ffmpeg/: lib${a} incomplete"
+	done
+	grep -q 'ff_hevc_rpivid_decoder' < <("${NL_NM}" "${FFD}/lib/libavcodec.a") || b_die "video_player: ffmpeg/: libavcodec has no hevc_rpivid"
+
 	VP_GLUE_O="${VP_OUT}/ffplay_phoenix_glue.o"
 	"${NL_CC}" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${F}/ffplay_phoenix_glue.c" -o "${VP_GLUE_O}"
 
