@@ -19,8 +19,9 @@
 # touches the top edge of the page.
 #
 # Environment: BROWSER_SIZE (WxH, default 1280x960), BROWSER_GPU=1 (Skia's GPU raster on the
-# V3D instead of the CPU, the B7 path), and wpe-browser's own WPE_BROWSER_* test knobs
-# (passed through). Outside the session (WAYLAND_DISPLAY unset) the first
+# V3D instead of the CPU), BROWSER_DMABUF=1 (frames to labwc as dma-bufs instead of shared-memory
+# copies), BROWSER_WEBGL=1 (WebGL, in a build with the port's USE flag webgl) -- the B7 paths,
+# off until their Pi gate passes -- and wpe-browser's own WPE_BROWSER_* test knobs (passed through). Outside the session (WAYLAND_DISPLAY unset) the first
 # $XDG_RUNTIME_DIR/wayland-N socket (default /tmp/xdg) is used.
 #
 # Copyright 2026 Phoenix Systems
@@ -38,4 +39,6 @@ if [ -z "${WAYLAND_DISPLAY:-}" ]; then
 fi
 args=(--size="${BROWSER_SIZE:-1280x960}")
 [ "${BROWSER_GPU:-0}" = 1 ] || args+=(--cpu-rendering)
+[ "${BROWSER_DMABUF:-0}" != 1 ] || args+=(--dmabuf)
+[ "${BROWSER_WEBGL:-0}" != 1 ] || args+=(--webgl)
 exec /usr/bin/wpe-browser "${args[@]}" "$@"

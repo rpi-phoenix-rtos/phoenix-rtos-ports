@@ -22,6 +22,9 @@
 	#                             of file mappings on Phoenix)
 	#   patches/webkit/0015       the process model is the launcher's to choose: process swap,
 	#                             prewarming, the WebProcess cache's size (WPE_PHOENIX_*)
+	#   patches/webkit/0016       frames to the compositor as dma-bufs without GBM, opt-in
+	#                             (WPE_PHOENIX_DMABUF=1, wpe-browser --dmabuf); no fence
+	#                             descriptors across processes
 	#   files/build-wpe.sh        the build (also run by tools/browser/wpe/build.sh for scratch
 	#                             builds): host ruby if missing, a private dependency prefix,
 	#                             the libphoenix compat objects, CMake + ninja, the link checks
@@ -69,7 +72,8 @@
 	depends="gtk3_wayland webkit_deps icu harfbuzz_icu openssl libepoxy mesa_drm wayland_phoenix"
 
 	# rootfs: copy the staging tree (stage/) into the image rootfs.
-	# checks: also stage the Pi checks (B4 page, probe extension, B6 site list and scripts).
+	# checks: also stage the Pi checks (B4 page, probe extension, B6 site list and scripts, the B7
+	#      WebGL and animation pages and script).
 	# release_log: WebKit's RELEASE_LOG compiled in (WEBKIT_DEBUG=ProcessSwapping,Process,Loading
 	#      etc. print to stderr). Off: compiled out, as in any Release build. Toggling it rebuilds
 	#      nearly all of WebKit (~2 h without ccache).
@@ -86,7 +90,7 @@
 #     /bin/browser                                                  the desktop launcher (bash)
 #     /usr/share/applications/wpe-browser.desktop                   XFCE menu: Internet
 #     /usr/share/wpe-browser/start.html                             the start page
-#     USE checks: /usr/share/wpe-browser/{b4.html,b6-*}, /usr/lib/wpe-browser/pi-extensions/
+#     USE checks: /usr/share/wpe-browser/{b4.html,b6-*,b7*}, /usr/lib/wpe-browser/pi-extensions/
 #   SHA256SUMS
 #
 # Host tools: cmake, ninja, perl, python3, gperf, gcc, git, curl, rsync, pkg-config,
@@ -139,7 +143,7 @@ p_build() {
 	install -D -m 644 "${S}/wpe-browser.desktop" "${ST}/usr/share/applications/wpe-browser.desktop"
 	install -D -m 644 "${S}/start.html" "${ST}/usr/share/wpe-browser/start.html"
 	if b_use checks; then
-		for n in b4.html b6.sh b6-sites.txt b6-newwin.html; do
+		for n in b4.html b6.sh b6-sites.txt b6-newwin.html b7.sh b7-webgl.html b7-anim.html; do
 			install -D -m 644 "${C}/${n}" "${ST}/usr/share/wpe-browser/${n}"
 		done
 		install -D -m 755 "${out}/phx-probe-extension.so" "${ST}/usr/lib/wpe-browser/pi-extensions/phx-probe-extension.so"
@@ -148,7 +152,8 @@ p_build() {
 	# what the stage must hold: the program with its export table and the B6 shell, the bundle
 	local bad=0 s
 	for s in 'WPEB t=%.0f ' 'chrome action=go source=%s' 'session persistent data=%s' 'wpeBrowserChrome' \
-		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model' 'chrome mode=%s'; do
+		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model' 'chrome mode=%s' \
+		'gpu raster=%s transport=%s webgl=%s' 'WPEB-WEBKIT swap-chain' 'WPEB-WEBKIT dmabuf-export'; do
 		grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser lacks '${s}'"; bad=1; }
 	done
 	"${TC}-readelf" -dW "${ST}/usr/lib/wpe-webkit-2.0/injected-bundle/libWPEInjectedBundle.so" | grep -q '(HASH)' ||

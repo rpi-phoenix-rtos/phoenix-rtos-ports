@@ -16,6 +16,12 @@
  *     --exit-after-load     exit once the first load has finished (window mode)
  *     --ignore-tls-errors   accept invalid certificates
  *     --cpu-rendering       paint with Skia's CPU raster (WEBKIT_SKIA_ENABLE_CPU_RENDERING=1)
+ *     --dmabuf              window mode: the web process hands its frames to the compositor as
+ *                           dma-bufs instead of reading them back into shared memory (WebKit
+ *                           patch 0016; WPE_BROWSER_DMABUF=1); needs linux-dmabuf from the compositor
+ *     --webgl               WebGL on (a build with the port's USE flag webgl; WPE_BROWSER_WEBGL=1)
+ *     --present-stats=S     every S s, the frames the view presented and what they were made of
+ *                           (WPE_BROWSER_PRESENT_SECS)
  *     --web-extensions=DIR  the WebProcess loads the web process extensions (*.so) in DIR,
  *                           with the user data string "wpe-browser"
  *     --ephemeral           keep nothing on disk (the default with --headless)
@@ -472,6 +478,9 @@ static int optTimeout;
 static gboolean optExitAfterLoad;
 static gboolean optIgnoreTLSErrors;
 static gboolean optCPURendering;
+static gboolean optDMABuf;
+static gboolean optWebGL;
+static int optPresentSecs;
 static char* optWebExtensions;
 static gboolean optEphemeral;
 static char* optDataDir;
@@ -498,6 +507,9 @@ static const GOptionEntry optionEntries[] = {
     { "exit-after-load", 0, 0, G_OPTION_ARG_NONE, &optExitAfterLoad, "Exit when the first load has finished", nullptr },
     { "ignore-tls-errors", 0, 0, G_OPTION_ARG_NONE, &optIgnoreTLSErrors, "Accept invalid TLS certificates", nullptr },
     { "cpu-rendering", 0, 0, G_OPTION_ARG_NONE, &optCPURendering, "Skia CPU raster in the WebProcess", nullptr },
+    { "dmabuf", 0, 0, G_OPTION_ARG_NONE, &optDMABuf, "Frames to the compositor as dma-bufs, no readback (window mode)", nullptr },
+    { "webgl", 0, 0, G_OPTION_ARG_NONE, &optWebGL, "Enable WebGL (a webgl build)", nullptr },
+    { "present-stats", 0, 0, G_OPTION_ARG_INT, &optPresentSecs, "Log the frames the view presented every S s", "S" },
     { "web-extensions", 0, 0, G_OPTION_ARG_FILENAME, &optWebExtensions, "Web process extensions directory", "DIR" },
     { "ephemeral", 0, 0, G_OPTION_ARG_NONE, &optEphemeral, "Keep no cookies, cache or site data on disk", nullptr },
     { "data-dir", 0, 0, G_OPTION_ARG_FILENAME, &optDataDir, "Cookies and site data (default $HOME/.local/share/wpe-browser)", "DIR" },
@@ -537,6 +549,12 @@ static void optionsFromEnvironment()
         const char* value = g_getenv(name);
         return value && *value ? atoi(value) : fallback;
     };
+    if (!optDMABuf)
+        optDMABuf = number("WPE_BROWSER_DMABUF", 0) != 0;
+    if (!optWebGL)
+        optWebGL = number("WPE_BROWSER_WEBGL", 0) != 0;
+    if (optPresentSecs <= 0)
+        optPresentSecs = std::max(number("WPE_BROWSER_PRESENT_SECS", 0), 0);
     if (optProcessCache < 0)
         optProcessCache = std::max(number("WPE_BROWSER_PROCESS_CACHE", defaultProcessCache), 0);
     if (!optPrewarm)
@@ -1485,6 +1503,81 @@ static gboolean logUIFootprint(gpointer)
     return G_SOURCE_CONTINUE;
 }
 
+/* --- GPU: the frame transport, WebGL, the presented frames (browser milestone B7) -------------- */
+
+static constexpr guint32 fourccABGR8888 = 0x34324241; /* drm_fourcc.h DRM_FORMAT_ABGR8888, 'AB24' */
+
+/*
+ * The frame transport. By default the web process renders with GLES (EGL surfaceless on the V3D)
+ * and reads every frame back into shared memory, which the UI process copies once more into a
+ * wl_shm pool for labwc. With --dmabuf (WebKit patch 0016: WPE_PHOENIX_DMABUF=1, read by the UI
+ * process when it starts a web process) each render target is a GL texture exported as a dma-buf
+ * and handed to the compositor through zwp_linux_dmabuf_v1: no readback, no copy. Window mode
+ * only, and only when the compositor offers linux-dmabuf: a headless view takes snapshots, and
+ * without GBM WebKit cannot read a dma-buf back for one.
+ */
+static const char* chooseFrameTransport(WPEDisplay* display)
+{
+    if (!optDMABuf)
+        return "shm";
+    if (optHeadless) {
+        LOG("gpu dmabuf-refused reason=headless (snapshots read SHM frames only)");
+        return "shm";
+    }
+    WPEBufferFormats* formats = wpe_display_get_preferred_buffer_formats(display); /* transfer none */
+    if (!formats) {
+        LOG("gpu dmabuf-refused reason=no-linux-dmabuf (the compositor does not offer zwp_linux_dmabuf_v1)");
+        return "shm";
+    }
+    /* what the compositor advertised (empty with a v4 linux-dmabuf: WPEPlatform asks for its
+     * feedback only with libdrm). The web process exports what the V3D renders (ABGR8888, UIF). */
+    guint n = 0;
+    GString* abgr = g_string_new(nullptr);
+    for (guint g = 0; g < wpe_buffer_formats_get_n_groups(formats); g++) {
+        for (guint f = 0; f < wpe_buffer_formats_get_group_n_formats(formats, g); f++, n++) {
+            if (wpe_buffer_formats_get_format_fourcc(formats, g, f) != fourccABGR8888)
+                continue;
+            GArray* modifiers = wpe_buffer_formats_get_format_modifiers(formats, g, f);
+            for (guint m = 0; modifiers && m < modifiers->len; m++)
+                g_string_append_printf(abgr, "%s0x%016" G_GINT64_MODIFIER "x", abgr->len ? "," : "", g_array_index(modifiers, guint64, m));
+        }
+    }
+    LOG("gpu dmabuf-formats n=%u abgr8888=%s", n, abgr->len ? abgr->str : "-");
+    g_string_free(abgr, TRUE);
+    g_setenv("WPE_PHOENIX_DMABUF", "1", TRUE);
+    return "dmabuf";
+}
+
+/* --present-stats: the frames the view put on screen (WPEView::buffer-rendered, the signal WebKit's
+ * backing store answers with a frame-done), and what they were made of */
+static struct {
+    unsigned frames;
+    unsigned total;
+    double since;
+    const char* buffer;
+    int width, height;
+} present;
+
+static void presentBufferRendered(WPEView*, WPEBuffer* buffer, gpointer)
+{
+    present.frames++;
+    present.total++;
+    present.buffer = WPE_IS_BUFFER_DMA_BUF(buffer) ? "dma-buf" : WPE_IS_BUFFER_SHM(buffer) ? "shm" : "other";
+    present.width = wpe_buffer_get_width(buffer);
+    present.height = wpe_buffer_get_height(buffer);
+}
+
+static gboolean presentReport(gpointer)
+{
+    double now = nowMs();
+    double secs = (now - present.since) / 1000;
+    LOG("present frames=%u fps=%.1f total=%u buffer=%s size=%dx%d", present.frames, secs > 0 ? present.frames / secs : 0.0,
+        present.total, present.buffer ? present.buffer : "none", present.width, present.height);
+    present.frames = 0;
+    present.since = now;
+    return G_SOURCE_CONTINUE;
+}
+
 /* --- network session -------------------------------------------------------------------------- */
 
 static char* storageDirectory(const char* option, const char* first, const char* second)
@@ -1633,6 +1726,11 @@ static int uiMain(int argc, char** argv)
     }
     LOG("display %s", G_OBJECT_TYPE_NAME(display));
     g_signal_connect(display, "disconnected", G_CALLBACK(displayDisconnected), nullptr);
+    /* before the first web process starts: the UI process reads WPE_PHOENIX_DMABUF then */
+    const char* transport = chooseFrameTransport(display);
+    const char* cpuRaster = g_getenv("WEBKIT_SKIA_ENABLE_CPU_RENDERING"); /* WebKit's own test */
+    LOG("gpu raster=%s transport=%s webgl=%s", cpuRaster && strcmp(cpuRaster, "0") ? "cpu" : "gpu", transport,
+        !ENABLE_WEBGL ? (optWebGL ? "unbuilt" : "off") : optWebGL ? "on" : "off");
 
     /* The WebProcess's injected bundle (libWPEInjectedBundle.so, dlopen()ed) loads these; set
      * before the first web process starts. */
@@ -1647,7 +1745,7 @@ static int uiMain(int argc, char** argv)
     if (optIgnoreTLSErrors)
         webkit_network_session_set_tls_errors_policy(session, WEBKIT_TLS_ERRORS_POLICY_IGNORE);
     WebKitSettings* settings = webkit_settings_new_with_settings(
-        "enable-webgl", FALSE,
+        "enable-webgl", static_cast<gboolean>(ENABLE_WEBGL && optWebGL),
         "enable-media", FALSE,
         "enable-webaudio", FALSE,
         "enable-developer-extras", FALSE,
@@ -1715,6 +1813,11 @@ static int uiMain(int argc, char** argv)
             wpe_toplevel_set_title(toplevel, "wpe-browser");
         }
         LOG("view %s %dx%d", G_OBJECT_TYPE_NAME(view), width, height);
+        if (optPresentSecs > 0) {
+            present.since = nowMs();
+            g_signal_connect(view, "buffer-rendered", G_CALLBACK(presentBufferRendered), nullptr);
+            g_timeout_add_seconds(static_cast<guint>(optPresentSecs), presentReport, nullptr);
+        }
     }
 
     if (optTimeout > 0)
