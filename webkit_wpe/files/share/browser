@@ -15,8 +15,9 @@
 #     NFS or SD root, never the RAM /tmp);
 #   - Skia's CPU raster, a 1280x960 window.
 # Keys: Ctrl+L the address, Alt+Left / Alt+Right back / forward, F5 reload, Esc stop,
-# Alt+Home the start page, F11 fullscreen, Ctrl+Q quit; the toolbar shows when the pointer
-# touches the top edge of the page.
+# Alt+Home the start page, F11 fullscreen, Ctrl+Q quit. The toolbar (back, forward,
+# reload/stop, home, the address) stays at the top of the window; WPE_BROWSER_TOOLBAR=auto shows
+# it only with Ctrl+L or when the pointer touches the top edge.
 #
 # Environment: BROWSER_SIZE (WxH, default 1280x960), BROWSER_GPU=1 (Skia's GPU raster on the
 # V3D instead of the CPU, the B7 path), and wpe-browser's own WPE_BROWSER_* test knobs
