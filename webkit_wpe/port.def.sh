@@ -22,6 +22,11 @@
 	#                             of file mappings on Phoenix)
 	#   patches/webkit/0015       the process model is the launcher's to choose: process swap,
 	#                             prewarming, the WebProcess cache's size (WPE_PHOENIX_*)
+	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
+	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
+	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).
+	#                             Kept apart so that a build without video has the same tree
+	#                             (its new CMake option would change cmakeconfig.h: a full rebuild)
 	#   files/build-wpe.sh        the build (also run by tools/browser/wpe/build.sh for scratch
 	#                             builds): host ruby if missing, a private dependency prefix,
 	#                             the libphoenix compat objects, CMake + ninja, the link checks
@@ -66,14 +71,19 @@
 	# openssl: PAL's digests and the TLS backend; libepoxy + mesa_drm: EGL/GLES (the WebProcess
 	# composites with GLES even for CPU raster); wayland_phoenix: Wayland, xkbcommon, the
 	# memfd_create()-over-shmsrv compat library.
-	depends="gtk3_wayland webkit_deps icu harfbuzz_icu openssl libepoxy mesa_drm wayland_phoenix"
+	# video_player (USE video): its ffmpeg/ prefix, FFmpeg 6.1 with the hevc_rpivid decoder.
+	depends="gtk3_wayland webkit_deps icu harfbuzz_icu openssl libepoxy mesa_drm wayland_phoenix video? ( video_player )"
 
 	# rootfs: copy the staging tree (stage/) into the image rootfs.
 	# checks: also stage the Pi checks (B4 page, probe extension, B6 site list and scripts).
 	# release_log: WebKit's RELEASE_LOG compiled in (WEBKIT_DEBUG=ProcessSwapping,Process,Loading
 	#      etc. print to stderr). Off: compiled out, as in any Release build. Toggling it rebuilds
 	#      nearly all of WebKit (~2 h without ccache).
-	iuse="rootfs checks release_log"
+	# video: <video> and <audio> (coordination repo docs/browser/B8-video.md): ENABLE_VIDEO with the
+	#      FFmpeg media player of patch 0030 (no GStreamer, no Media Source Extensions, no Web
+	#      Audio), sound on /dev/audio0. Off: no media, as before. Toggling it rebuilds nearly all
+	#      of WebKit (~2 h without ccache hits), as release_log.
+	iuse="rootfs checks release_log video"
 
 	supports="phoenix>=3.3"
 }
@@ -108,6 +118,9 @@ p_prepare() {
 		command -v "${t}" >/dev/null || b_die "webkit_wpe: host tool ${t} not found"
 	done
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}" webkit
+	if b_use video; then
+		b_port_apply_patches "${PREFIX_PORT_WORKDIR}" webkit-video
+	fi
 }
 
 p_build() {
@@ -120,12 +133,20 @@ p_build() {
 		d="$(b_dependency_dir "${n}")" || b_die "webkit_wpe: dependency ${n} missing"
 		dep[${n}]="${d%/}"
 	done
+	local video=0 ffmpeg=""
+	if b_use video; then
+		video=1
+		d="$(b_dependency_dir video_player)" || b_die "webkit_wpe: dependency video_player missing (USE video)"
+		ffmpeg="${d%/}/ffmpeg"
+		[ -f "${ffmpeg}/lib/libavcodec.a" ] || b_die "webkit_wpe: ${ffmpeg}: no FFmpeg libraries (video_player installs them)"
+	fi
 
 	PHX_TREE="${PREFIX_BUILD%/}" PHX_TC="${TC}" \
 		PHX_GTK="${dep[gtk3_wayland]}" PHX_WEBKIT_DEPS="${dep[webkit_deps]}" PHX_ICU_PREFIX="${dep[icu]}" \
 		PHX_OPENSSL="${dep[openssl]}" PHX_EPOXY="${dep[libepoxy]}" PHX_MESA="${dep[mesa_drm]}" \
 		PHX_WAYLAND="${dep[wayland_phoenix]}" WEBKIT_SRC="${PREFIX_PORT_WORKDIR%/}" \
 		PHX_WPE_RELEASE_LOG="$(b_use release_log && echo 1 || echo 0)" \
+		PHX_WPE_VIDEO="${video}" PHX_FFMPEG="${ffmpeg}" \
 		"${F}/build-wpe.sh" --out "${out}" --dl "${PHOENIX_DISTFILES:-${HOME}/.phoenix-distfiles}/newlane" \
 		--src-copy -j 8 || b_die "webkit_wpe: build-wpe.sh failed"
 
@@ -142,6 +163,11 @@ p_build() {
 		for n in b4.html b6.sh b6-sites.txt b6-newwin.html; do
 			install -D -m 644 "${C}/${n}" "${ST}/usr/share/wpe-browser/${n}"
 		done
+		if [ "${video}" = 1 ]; then
+			for n in b8.html b8.sh; do
+				install -D -m 644 "${C}/${n}" "${ST}/usr/share/wpe-browser/${n}"
+			done
+		fi
 		install -D -m 755 "${out}/phx-probe-extension.so" "${ST}/usr/lib/wpe-browser/pi-extensions/phx-probe-extension.so"
 	fi
 
@@ -151,6 +177,11 @@ p_build() {
 		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model' 'chrome mode=%s'; do
 		grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser lacks '${s}'"; bad=1; }
 	done
+	if [ "${video}" = 1 ]; then
+		for s in 'WPEB-MEDIA mono=%llu id=%u %s' 'rpivid: hardware HEVC decode' 'media autoplay=%s'; do
+			grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser (USE video) lacks '${s}'"; bad=1; }
+		done
+	fi
 	"${TC}-readelf" -dW "${ST}/usr/lib/wpe-webkit-2.0/injected-bundle/libWPEInjectedBundle.so" | grep -q '(HASH)' ||
 		{ echo "webkit_wpe: the injected bundle has no DT_HASH"; bad=1; }
 	[ "${bad}" = 0 ] || b_die "webkit_wpe: stage verification failed"

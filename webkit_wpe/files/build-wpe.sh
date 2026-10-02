@@ -31,6 +31,13 @@
 #                   ProcessSwapping,Process,Loading,... shows the process model at work; 0 (default):
 #                   compiled out, as in every Release build. Changing it rebuilds nearly all of
 #                   WebKit (cmakeconfig.h changes), ~2 h at -j8 without ccache hits
+#   PHX_WPE_VIDEO   1: <video>/<audio> (ENABLE_VIDEO with USE_FFMPEG: the media player over FFmpeg
+#                   of ../patches/webkit-video/0030, no GStreamer; a WEBKIT_SRC tree must carry that
+#                   patch); 0 (default): no media. Changing it rebuilds nearly all of WebKit, as
+#                   PHX_WPE_RELEASE_LOG
+#   PHX_FFMPEG      with PHX_WPE_VIDEO=1: the FFmpeg libraries, a prefix with include/, lib/*.a and
+#                   lib/pkgconfig/ (the video_player port installs one as ffmpeg/: FFmpeg 6.1 with
+#                   the hevc_rpivid decoder)
 #
 # Usage: build-wpe.sh --out <dir> [--dl <dir>] [-j N] [--src-copy]
 #            [--stage ruby|deps|compat|extract|configure|build|plugins|all] [--mesa-variant gles|wayland] [--clean]
@@ -60,6 +67,8 @@ unset CC CXX CPP CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LIBS AR AS LD NM RANLIB STRIP 
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 patches="$(cd "${here}/../patches/webkit" && pwd)"
+# applied only with PHX_WPE_VIDEO=1 (the port: USE video), after patches/webkit
+patches_video="${here}/../patches/webkit-video"
 out=""
 dl=""
 jobs=8
@@ -197,8 +206,9 @@ stage_extract() {
 		return
 	fi
 	[ -z "${WEBKIT_SRC:-}" ] || { log "WEBKIT_SRC=${WEBKIT_SRC} (not extracted)"; return; }
-	local dir="${out}/src/webkit" stamp p
-	stamp="$( { pkg_field webkit 3; cat "${patches}"/*.patch; } | sha256sum | cut -c1-16)"
+	local dir="${out}/src/webkit" stamp p list=("${patches}"/*.patch)
+	[ "${video}" = 0 ] || list+=("${patches_video}"/*.patch)
+	stamp="$( { pkg_field webkit 3; cat "${list[@]}"; } | sha256sum | cut -c1-16)"
 	if [ "$(cat "${dir}.stamp" 2>/dev/null || true)" = "${stamp}" ]; then
 		return
 	fi
@@ -212,7 +222,7 @@ stage_extract() {
 	git -C "${dir}" init -q
 	git -C "${dir}" add -A
 	git -C "${dir}" -c user.name=build -c user.email=build@invalid commit -q -m "$(pkg_field webkit 1)"
-	for p in "${patches}"/*.patch; do
+	for p in "${list[@]}"; do
 		log "apply $(basename "${p}")"
 		git -C "${dir}" apply --whitespace=nowarn "${p}"
 		git -C "${dir}" add -A
@@ -263,6 +273,9 @@ stage_compat() {
 	"${TC}-gcc" -O2 ${TFLAGS} -Wall -Wextra -Werror ${cdefs} -isystem "${ci}" -c "${C}/phoenix-jsc-compat.c" \
 		-o "${cn}/phoenix-jsc-compat.o"
 	"${TC}-gcc" -O2 ${TFLAGS} -Wall -Wextra -Werror -c "${C}/phoenix-wpe-compat.c" -o "${cn}/phoenix-wpe-compat.o"
+	if [ "${video}" = 1 ]; then
+		"${TC}-gcc" -O2 ${TFLAGS} -Wall -Wextra -Werror -c "${C}/phoenix-ffmpeg-compat.c" -o "${cn}/phoenix-ffmpeg-compat.o"
+	fi
 	mkdir -p "${out}/compat"
 	rsync -rc --delete "${cn}/" "${out}/compat/"
 	rm -rf "${cn}"
@@ -360,10 +373,26 @@ stage_deps() {
 		"Description: libepoxy 1.5.10, static-EGL dispatch (EGL/GLES from mesa_drm ${mesa_variant}, linked by the program)" \
 		"Version: 1.5.10" "Libs: -L\${libdir} -lepoxy" "Cflags: -I\${includedir} -DEGL_NO_X11" > "${VN}/lib/pkgconfig/epoxy.pc"
 
+	# FFmpeg (PHX_WPE_VIDEO): the media player's libraries. Their threads (frame/slice workers)
+	# are created without a stack size, i.e. with libphoenix's 256 KiB default, which the H.264
+	# decoder overflows; so their pthread_create is renamed to compat's phx_ffmpeg_pthread_create
+	# (8 MiB): only FFmpeg's threads change, not WebKit's or GLib's.
+	if [ "${video}" = 1 ]; then
+		local FF="${PHX_FFMPEG:?PHX_FFMPEG: the FFmpeg prefix (video_player install ffmpeg/) for PHX_WPE_VIDEO=1}" l
+		for l in avformat avcodec swresample swscale avutil; do
+			[ -f "${FF}/lib/lib${l}.a" ] || { echo "build-wpe.sh: ${FF}/lib/lib${l}.a missing" >&2; exit 1; }
+			cp_into include "${FF}/include/lib${l}"
+			mkdir -p "${VN}/lib"
+			"${TC}-objcopy" --redefine-sym pthread_create=phx_ffmpeg_pthread_create "${FF}/lib/lib${l}.a" "${VN}/lib/lib${l}.a"
+			pc_into "${FF}/lib/pkgconfig/lib${l}.pc"
+		done
+	fi
+
 	# every .pc: prefix = this view (pkg-config --define-prefix also does this), and the
 	# source roots it may name spelled as the view
 	for f in "${VN}"/lib/pkgconfig/*.pc; do
 		# (-pthread: the Phoenix gcc rejects it; pthreads are libphoenix)
+		[ -z "${PHX_FFMPEG:-}" ] || sed -i -e "s|${PHX_FFMPEG%/}|${V}|g" "${f}"
 		sed -i -e "s|^prefix=.*|prefix=${V}|" -e "s|${GTK}/deps/[a-z0-9_-]*|${V}|g" -e "s|${WKD}/deps/sqlite3|${V}|g" \
 			-e "s|${WKD}|${V}|g" -e "s|${OSSL}|${V}|g" -e "s|${ICUP}|${V}|g" -e "s|${WLP}/prefix|${V}|g" -e "s|${B}|${V}|g" \
 			-e "s/ -pthread\b//g" -e "s/^\(Cflags\|Libs\): -pthread\b/\1:/" "${f}"
@@ -415,6 +444,13 @@ EOF
 		wayland-protocols xkbcommon epoxy libxml-2.0 libxslt libwebp sqlite3 libcrypto freetype2 fontconfig \
 		libpng16 2>&1 | tr '\n' ' ' | sed 's/^/[wpe-build] versions: /'
 	echo
+	if [ "${video}" = 1 ]; then
+		"${V}/pkg-config" --modversion libavformat libavcodec libswresample libswscale libavutil 2>&1 | tr '\n' ' ' | sed 's/^/[wpe-build] FFmpeg: /'
+		echo
+		# every pthread_create of FFmpeg goes through the compat wrapper
+		! "${TC}-nm" "${V}/lib/libavcodec.a" "${V}/lib/libavutil.a" 2>/dev/null | grep -q ' U pthread_create$' \
+			|| { echo "build-wpe.sh: FFmpeg still calls pthread_create directly" >&2; exit 1; }
+	fi
 }
 
 # --- WebKit configuration ------------------------------------------------------------------------
@@ -489,13 +525,27 @@ WPE_CMAKE_OPTS=(
 	-DENABLE_PDFJS=ON
 	-DUSE_EXTERNAL_HOLEPUNCH=OFF
 )
+# PHX_WPE_VIDEO=1: <video>/<audio> through WebKit patch 0030's FFmpeg player (USE_FFMPEG). The
+# rest of the media stack stays off: no Media Source Extensions (no GStreamer MSE backend and
+# no FFmpeg one), no Web Audio, no WebCodecs, no WebRTC, no encrypted media.
+video="${PHX_WPE_VIDEO:-0}"
+case "${video}" in 0 | 1) ;; *) echo "build-wpe.sh: PHX_WPE_VIDEO=${video}: 0 or 1" >&2; exit 2 ;; esac
+# (USE_FFMPEG is patch 0030's option: a tree without that patch does not know it)
+if [ "${video}" = 1 ]; then
+	WPE_CMAKE_OPTS=("${WPE_CMAKE_OPTS[@]/-DENABLE_VIDEO=OFF/-DENABLE_VIDEO=ON}" -DUSE_FFMPEG=ON)
+fi
 
 stage_configure() {
 	[ -n "${RUBY}" ] || stage_ruby
 	[ -x "${V}/pkg-config" ] || stage_deps
 	[ -f "${out}/compat/phoenix-wpe-compat.o" ] || stage_compat
+	if [ "${video}" = 1 ]; then
+		[ -f "${out}/compat/phoenix-ffmpeg-compat.o" ] || stage_compat
+		[ -f "${V}/lib/libavcodec.a" ] || stage_deps
+		ffcompat="${out}/compat/phoenix-ffmpeg-compat.o"
+	fi
 	stage_extract
-	local wsrc wb="${out}/webkit-build" tcf="${out}/phoenix-aarch64.cmake" wflags extra launcher=()
+	local wsrc wb="${out}/webkit-build" tcf="${out}/phoenix-aarch64.cmake" wflags extra launcher=() ffcompat=""
 	wsrc="$(webkit_src_dir)"
 	wflags="${TFLAGS} -isystem ${out}/compat/include"
 	# unifdef runs on the BUILD machine (it strips the other ports' #if blocks from the public
@@ -534,7 +584,7 @@ stage_configure() {
 		-DCMAKE_INSTALL_PREFIX=/usr \
 		-DPHOENIX_BROWSER_DIR="${here}/launcher" \
 		-DUSE_SYSTEM_UNIFDEF=ON -DUNIFDEF_EXECUTABLE="${out}/host-tools/unifdef" \
-		-DCMAKE_CXX_STANDARD_LIBRARIES="${out}/compat/phoenix-jsc-compat.o ${out}/compat/phoenix-wpe-compat.o ${extra} ${V}/lib/libicudata.a ${S}/lib/libm.a" \
+		-DCMAKE_CXX_STANDARD_LIBRARIES="${out}/compat/phoenix-jsc-compat.o ${out}/compat/phoenix-wpe-compat.o ${ffcompat} ${extra} ${V}/lib/libicudata.a ${S}/lib/libm.a" \
 		-DCMAKE_EXE_LINKER_FLAGS="-L${V}/lib -Wl,-z,max-page-size=0x1000 -Wl,-z,stack-size=8388608 -Wl,--gc-sections" \
 		> "${out}/webkit-configure.log" 2>&1 \
 		|| { grep -E 'CMake (Error|Warning)' -A6 "${out}/webkit-configure.log" | head -60 >&2; echo "build-wpe.sh: WebKit configure failed, see ${out}/webkit-configure.log" >&2; exit 1; }
@@ -607,6 +657,19 @@ check_program() {
 			webkit_user_script_new_for_world webkit_cookie_manager_set_persistent_storage _ZN3WTF15memoryFootprintEv; do
 		grep -qE " [TtWD] ${s}\$" <<< "${syms}" || { echo "build-wpe.sh: wpe-browser has no ${s}" >&2; exit 1; }
 	done
+	# the media player (PHX_WPE_VIDEO=1): WebCore's FFmpeg engine, the rpivid HEVC decoder (picked by
+	# avcodec_find_decoder() before FFmpeg's own), FFmpeg's threads on the 8 MiB wrapper; none of
+	# it in a build without video
+	if [ "${video}" = 1 ]; then
+		for s in ff_hevc_rpivid_decoder ff_h264_decoder ff_aac_decoder ff_mov_demuxer avformat_open_input swr_convert phx_ffmpeg_pthread_create; do
+			grep -qE " [TtWDdRr] ${s}\$" <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no ${s}" >&2; exit 1; }
+		done
+		grep -qE ' [Tt] _ZN7WebCore24MediaPlayerPrivateFFmpeg' <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no MediaPlayerPrivateFFmpeg" >&2; exit 1; }
+		grep -qF 'WPEB-MEDIA mono=%llu id=%u %s' < <(strings "${out}/wpe-browser") || { echo "build-wpe.sh: wpe-browser (video) lacks the WPEB-MEDIA log" >&2; exit 1; }
+	elif grep -qE ' [Tt] _ZN7WebCore24MediaPlayerPrivateFFmpeg' <<< "${syms}"; then
+		echo "build-wpe.sh: wpe-browser has the FFmpeg media player in a build without PHX_WPE_VIDEO" >&2
+		exit 1
+	fi
 	# mimalloc IS malloc (the override), as in the jsc shell
 	[ "$(grep -E ' T (malloc|mi_malloc)$' <<< "${syms}" | awk '{print $1}' | sort -u | wc -l)" = 1 ] \
 		|| { echo "build-wpe.sh: malloc is not mimalloc's" >&2; exit 1; }

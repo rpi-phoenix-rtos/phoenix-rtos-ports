@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<!--
+  b8.html: the browser plan's B8 check page (<video> in a page). The clip is the query's src
+  (b8.html?src=file:///usr/share/video-demo/h264-720p30-aac.mp4); the page plays it once with
+  the native controls and reports through console.log, which wpe-browser writes to stdout:
+  every line starts with "B8PAGE ". canPlayType() answers for the codecs the FFmpeg engine claims
+  come first. Copyright 2026 Phoenix Systems. SPDX-License-Identifier: BSD-3-Clause
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>B8 video</title>
+<style>
+  body { font: 15px sans-serif; margin: 12px; background: #202020; color: #e0e0e0; }
+  video { width: 960px; height: 540px; background: black; display: block; }
+  #state { font-family: monospace; margin-top: 6px; }
+</style>
+</head>
+<body>
+<video id="v" controls autoplay playsinline preload="auto"></video>
+<div id="state">-</div>
+<script>
+"use strict";
+const params = new URLSearchParams(location.search);
+const src = params.get("src") || "file:///usr/share/video-demo/h264-720p30-aac.mp4";
+const v = document.getElementById("v");
+const state = document.getElementById("state");
+const t0 = performance.now();
+function report(what) {
+    const line = "B8PAGE t=" + Math.round(performance.now() - t0) + " " + what;
+    console.log(line);
+    state.textContent = line;
+    document.title = "B8 " + what.split(" ")[0];
+}
+for (const type of ['video/mp4; codecs="avc1.4d401f, mp4a.40.2"', 'video/mp4; codecs="hvc1.1.6.L93.B0"',
+    'video/mp4; codecs="hev1.1.6.L120.90"', 'video/webm; codecs="vp9, opus"', 'video/mp4', 'application/x-mpegURL'])
+    report("canplaytype type=" + type.replace(/ /g, "") + " answer=" + (v.canPlayType(type) || "no"));
+report("src " + src);
+v.addEventListener("loadedmetadata", () => report("loadedmetadata size=" + v.videoWidth + "x" + v.videoHeight + " duration=" + v.duration.toFixed(2)));
+v.addEventListener("canplay", () => report("canplay ready=" + v.readyState));
+v.addEventListener("playing", () => report("playing current=" + v.currentTime.toFixed(2)));
+v.addEventListener("pause", () => report("pause current=" + v.currentTime.toFixed(2)));
+v.addEventListener("seeked", () => report("seeked current=" + v.currentTime.toFixed(2)));
+v.addEventListener("ended", () => report("ended current=" + v.currentTime.toFixed(2)));
+v.addEventListener("error", () => report("error code=" + (v.error ? v.error.code : "?") + " message=" + (v.error ? v.error.message : "")));
+let last = -1;
+v.addEventListener("timeupdate", () => {
+    const s = Math.floor(v.currentTime / 5);
+    if (s !== last) {
+        last = s;
+        report("timeupdate current=" + v.currentTime.toFixed(2) + " paused=" + v.paused);
+    }
+});
+// optional seek check: b8.html?src=...&seek=<at>:<to> (seconds of clip time)
+const seek = params.get("seek");
+if (seek) {
+    const [at, to] = seek.split(":").map(Number);
+    let done = false;
+    v.addEventListener("timeupdate", () => {
+        if (!done && v.currentTime >= at) {
+            done = true;
+            report("seek-request from=" + v.currentTime.toFixed(2) + " to=" + to);
+            v.currentTime = to;
+        }
+    });
+}
+v.src = src;
+</script>
+</body>
+</html>
