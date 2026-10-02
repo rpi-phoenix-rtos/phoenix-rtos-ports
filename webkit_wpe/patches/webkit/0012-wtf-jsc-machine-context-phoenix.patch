@@ -1,0 +1,118 @@
+Subject: WTF/JSC: Phoenix machine context (SA_SIGINFO ucontext_t), concurrent GC on
+
+Phoenix-RTOS delivers siginfo_t and a ucontext_t to SA_SIGINFO handlers on aarch64, with
+Linux's uc_mcontext layout (fault_address, regs[31], sp, pc, pstate; <sys/ucontext.h>). So
+HAVE(MACHINE_CONTEXT) on OS(PHOENIX) && CPU(ARM64), PlatformRegisters is the mcontext_t (the
+Phoenix "no ucontext" case of 0002-wtf-threads-phoenix goes), and MachineContext.h reads it
+through the Linux branches. Thread::suspend() now captures every general register of the
+suspended thread, which is what a concurrent collector's conservative scan needs, so the
+Phoenix override that kept useConcurrentGC false (0004-jsc-phoenix) goes too. FP/SIMD
+registers are restored across a handler but not exposed in the mcontext_t (Linux's
+__reserved area is not provided). With the DFG this also turns on SIGNAL_BASED_VM_TRAPS.
+
+diff --git a/Source/JavaScriptCore/runtime/MachineContext.h b/Source/JavaScriptCore/runtime/MachineContext.h
+index 2ac8b24f..43cf3af5 100644
+--- a/Source/JavaScriptCore/runtime/MachineContext.h
++++ b/Source/JavaScriptCore/runtime/MachineContext.h
+@@ -189,7 +189,7 @@ static inline void*& stackPointerImpl(mcontext_t& machineContext)
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD)
++#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD) || OS(PHOENIX)
+ 
+ #if CPU(X86_64)
+     return reinterpret_cast<void*&>((uintptr_t&) machineContext.gregs[REG_RSP]);
+@@ -308,7 +308,7 @@ static inline void*& framePointerImpl(mcontext_t& machineContext)
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD)
++#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD) || OS(PHOENIX)
+ 
+ // The following sequence depends on glibc's sys/ucontext.h.
+ #if CPU(X86_64)
+@@ -468,7 +468,7 @@ static inline void*& instructionPointerImpl(mcontext_t& machineContext)
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD)
++#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD) || OS(PHOENIX)
+ 
+ // The following sequence depends on glibc's sys/ucontext.h.
+ #if CPU(X86_64)
+@@ -644,7 +644,7 @@ inline void*& argumentPointer<1>(mcontext_t& machineContext)
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD)
++#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD) || OS(PHOENIX)
+ 
+ // The following sequence depends on glibc's sys/ucontext.h.
+ #if CPU(X86_64)
+@@ -701,7 +701,7 @@ inline void* wasmInstancePointer(const mcontext_t& machineContext)
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD)
++#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD) || OS(PHOENIX)
+ 
+ // The following sequence depends on glibc's sys/ucontext.h.
+ #if CPU(X86_64)
+@@ -821,7 +821,7 @@ inline void*& llintInstructionPointer(mcontext_t& machineContext)
+ #error Unknown Architecture
+ #endif
+ 
+-#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD)
++#elif OS(FUCHSIA) || OS(LINUX) || OS(HURD) || OS(PHOENIX)
+ 
+ // The following sequence depends on glibc's sys/ucontext.h.
+ #if CPU(X86_64)
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 862882c5..683bc60a 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -635,13 +635,6 @@ static void overrideDefaults()
+     }
+ #endif
+ 
+-#if OS(PHOENIX)
+-    // Phoenix-RTOS does not deliver a ucontext to signal handlers yet (SA_SIGINFO: browser track
+-    // B4), so a concurrent collector could not read a suspended mutator's registers. Collect on
+-    // the mutator thread by default; JSC_useConcurrentGC=true still turns it on for testing.
+-    Options::useConcurrentGC() = false;
+-#endif
+-
+ #if OS(LINUX) && CPU(ARM)
+     Options::maximumFunctionForCallInlineCandidateBytecodeCostForDFG() = 77;
+     Options::maximumOptimizationCandidateBytecodeCost() = 42403;
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index 99dc0380..1691c2bf 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -241,6 +241,11 @@
+ #define HAVE_MACHINE_CONTEXT 1
+ #endif
+ 
++/* Phoenix-RTOS delivers a Linux-layout ucontext_t to SA_SIGINFO handlers on aarch64 only. */
++#if OS(PHOENIX) && CPU(ARM64)
++#define HAVE_MACHINE_CONTEXT 1
++#endif
++
+ #if OS(DARWIN) || OS(HAIKU) || OS(PHOENIX) || ((OS(LINUX) || OS(HURD)) && defined(__GLIBC__) && !defined(__UCLIBC__) && !CPU(MIPS))
+ #define HAVE_BACKTRACE 1
+ #define HAVE_BACKTRACE_SYMBOLS 1
+diff --git a/Source/WTF/wtf/PlatformRegisters.h b/Source/WTF/wtf/PlatformRegisters.h
+index 9af07046..37efb86d 100644
+--- a/Source/WTF/wtf/PlatformRegisters.h
++++ b/Source/WTF/wtf/PlatformRegisters.h
+@@ -39,9 +39,6 @@
+ typedef ucontext_t mcontext_t;
+ #elif OS(QNX)
+ #include <ucontext.h>
+-#elif OS(PHOENIX)
+-// No ucontext_t on Phoenix until SA_SIGINFO delivery lands (browser track B4); without
+-// HAVE(MACHINE_CONTEXT) PlatformRegisters below is just the stack pointer.
+ #else
+ #include <sys/ucontext.h>
+ #endif
