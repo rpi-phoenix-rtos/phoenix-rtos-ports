@@ -1,0 +1,96 @@
+Subject: JSC: the JIT on Phoenix: DFG default, 32 MiB RWX pool, EL0 cache flush, no WebAssembly
+
+The executable pool is one private anonymous RWX mapping made at JSC initialization (WTF's
+OSAllocatorPOSIX reserves read-write-execute up front on non-Linux systems; no
+SEPARATED_WX_HEAP, no mprotect: Phoenix's cannot add PROT_EXEC to a mapping). Phoenix
+populates anonymous mappings when they are made, so ARM64's 512 MiB default pool would be
+resident: 32 MiB instead (--jitMemoryReservationSize overrides). ARM64Assembler::cacheFlush
+takes the Linux path, __builtin___clear_cache (DC CVAU + IC IVAU over the range): the kernel
+sets SCTLR_EL1.UCI for EL0. The DFG is on by default for ARM64 Phoenix as on Linux/FreeBSD.
+WebAssembly must be compiled in for B3/FTL in this release, but its memories reserve address
+space to commit later, which Phoenix cannot do: useWasm defaults to false there.
+
+diff --git a/Source/JavaScriptCore/assembler/ARM64Assembler.h b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+index 081edf7d..564e7b85 100644
+--- a/Source/JavaScriptCore/assembler/ARM64Assembler.h
++++ b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+@@ -4011,7 +4011,7 @@ public:
+     
+     unsigned debugOffset() { return m_buffer.debugOffset(); }
+ 
+-#if OS(LINUX)
++#if OS(LINUX) || OS(PHOENIX)
+     static inline void linuxPageFlush(uintptr_t begin, uintptr_t end)
+     {
+         __builtin___clear_cache(reinterpret_cast<char*>(begin), reinterpret_cast<char*>(end));
+@@ -4024,7 +4024,9 @@ public:
+         sys_icache_invalidate(code, size);
+ #elif OS(FUCHSIA)
+         zx_cache_flush(code, size, ZX_CACHE_FLUSH_INSN);
+-#elif OS(LINUX)
++#elif OS(LINUX) || OS(PHOENIX)
++        // Phoenix-RTOS lets EL0 clean and invalidate by VA (SCTLR_EL1.UCI=1, kernel
++        // hal/aarch64/_init.S), so __builtin___clear_cache works there as on Linux.
+         size_t page = pageSize();
+         uintptr_t current = reinterpret_cast<uintptr_t>(code);
+         uintptr_t end = current + size;
+@@ -4043,11 +4045,6 @@ public:
+         linuxPageFlush(current, end);
+ #elif OS(WINDOWS)
+         FlushInstructionCache(GetCurrentProcess(), code, size);
+-#elif OS(PHOENIX)
+-        // Built with ENABLE_JIT=OFF, so no code is ever written. For a JIT (browser B9) note that
+-        // the Phoenix kernel runs EL0 with SCTLR_EL1.UCI=0 (hal/aarch64/_init.S), so the DC CVAU /
+-        // IC IVAU that __builtin___clear_cache emits trap; it needs UCI=1 or a kernel cache call.
+-        __builtin___clear_cache(static_cast<char*>(code), static_cast<char*>(code) + size);
+ #else
+ #error "The cacheFlush support is missing on this platform."
+ #endif
+diff --git a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
+index c9e3589b..d92a5ed6 100644
+--- a/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
++++ b/Source/JavaScriptCore/jit/ExecutableAllocator.cpp
+@@ -91,6 +91,11 @@ static constexpr size_t minimumPoolSizeForSegregatedHeap = 256 * MB;
+ 
+ #if defined(FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB) && FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB > 0
+ static constexpr size_t fixedExecutableMemoryPoolSize = FIXED_EXECUTABLE_MEMORY_POOL_SIZE_IN_MB * MB;
++#elif OS(PHOENIX)
++// Phoenix-RTOS populates an anonymous mapping when it is made (there is no virtual reserve), so the
++// whole pool is resident from JSC initialization on: keep it small. --jitMemoryReservationSize
++// (JSC_jitMemoryReservationSize) overrides it.
++static constexpr size_t fixedExecutableMemoryPoolSize = 32 * MB;
+ #elif CPU(ARM64)
+ #if ENABLE(JUMP_ISLANDS)
+ static constexpr size_t fixedExecutableMemoryPoolSize = 512 * MB;
+diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
+index 08d8ea5a..539797b9 100644
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -788,7 +788,7 @@
+ #define ENABLE_DFG_JIT 1
+ #endif
+ 
+-#if CPU(ARM64) && (OS(DARWIN) || OS(LINUX) || OS(FREEBSD))
++#if CPU(ARM64) && (OS(DARWIN) || OS(LINUX) || OS(FREEBSD) || OS(PHOENIX))
+ #define ENABLE_DFG_JIT 1
+ #endif
+ 
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 683bc60a..fb517950 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -635,6 +635,14 @@ static void overrideDefaults()
+     }
+ #endif
+ 
++#if OS(PHOENIX)
++    // WebAssembly is compiled in only because B3 and the FTL need it. Its memories reserve address
++    // space to commit later (fast memories: 4 GiB plus a redzone), which Phoenix-RTOS cannot do:
++    // anonymous memory is resident from mmap() and mprotect() cannot add access. Off until a
++    // Phoenix memory mode exists and is tested; --useWasm=true turns it on.
++    Options::useWasm() = false;
++#endif
++
+ #if OS(LINUX) && CPU(ARM)
+     Options::maximumFunctionForCallInlineCandidateBytecodeCostForDFG() = 77;
+     Options::maximumOptimizationCandidateBytecodeCost() = 42403;

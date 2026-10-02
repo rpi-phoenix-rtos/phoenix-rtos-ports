@@ -1,0 +1,25 @@
+Subject: JSC: InlineCacheCompiler.h names Jump types through MacroAssembler
+
+InlineCacheCompiler.h only forward-declares CCallHelpers, yet declared two functions
+returning CCallHelpers::Jump / CCallHelpers::JumpList, which needs the complete type. A
+translation unit that includes it before CCallHelpers.h (LLIntOffsetsExtractor.cpp, with
+the JIT on, GCC 16) fails to compile. MacroAssembler::Jump/JumpList are the same types
+(CCallHelpers inherits them) and MacroAssembler.h is already included. Not Phoenix-specific.
+
+diff --git a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
+index 41ac3348..2c05e5dc 100644
+--- a/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
++++ b/Source/JavaScriptCore/bytecode/InlineCacheCompiler.h
+@@ -275,8 +275,10 @@ public:
+     static void NODELETE emitDataICEpilogue(CCallHelpers&);
+     static void emitDataICPrepareForCall(CCallHelpers&);
+     static void emitDataICRestoreAfterCall(CCallHelpers&);
+-    static CCallHelpers::Jump emitDataICCheckStructure(CCallHelpers&, GPRReg baseGPR, GPRReg scratchGPR);
+-    static CCallHelpers::JumpList emitDataICCheckUid(CCallHelpers&, bool isSymbol, JSValueRegs, GPRReg scratchGPR);
++    // MacroAssembler's Jump types (the very types CCallHelpers inherits): CCallHelpers is only
++    // forward-declared here, and naming a member of it needs the complete type.
++    static MacroAssembler::Jump emitDataICCheckStructure(CCallHelpers&, GPRReg baseGPR, GPRReg scratchGPR);
++    static MacroAssembler::JumpList emitDataICCheckUid(CCallHelpers&, bool isSymbol, JSValueRegs, GPRReg scratchGPR);
+     static void emitDataICJumpNextHandler(CCallHelpers&);
+ 
+     bool NODELETE useHandlerIC() const;

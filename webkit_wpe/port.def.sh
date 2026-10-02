@@ -20,6 +20,11 @@
 	#                             shmsrv (memfd_create), WTF's platform sources, build fixes,
 	#                             the disk cache's files written with write() (no write-back
 	#                             of file mappings on Phoenix)
+	#   patches/webkit/0012-0014  JavaScriptCore's JIT on Phoenix (track C's webkit-jit series,
+	#                             browser B9): the SA_SIGINFO machine context, concurrent GC, a
+	#                             32 MiB RWX executable pool, the EL0 cache flush, WebAssembly off
+	#                             at run time; harmless to the LLInt-only build, which they also
+	#                             give the real register context for its concurrent collector
 	#   patches/webkit/0015       the process model is the launcher's to choose: process swap,
 	#                             prewarming, the WebProcess cache's size (WPE_PHOENIX_*)
 	#   patches/webkit/0016       frames to the compositor as dma-bufs without GBM, opt-in
@@ -83,6 +88,10 @@
 	# rootfs: copy the staging tree (stage/) into the image rootfs.
 	# checks: also stage the Pi checks (B4 page, probe extension, B6 site list and scripts, the B7
 	#      WebGL and animation pages and script).
+	# jit: build JavaScriptCore's JIT tiers (Baseline, DFG, FTL, regexp; B9) instead of the LLInt
+	#      only. Off: the B5/B6 interpreter build. A JIT build still runs on the LLInt with
+	#      JSC_useJIT=false in the environment. Toggling it reconfigures and rebuilds most of
+	#      WebKit (~2 h without ccache).
 	# release_log: WebKit's RELEASE_LOG compiled in (WEBKIT_DEBUG=ProcessSwapping,Process,Loading
 	#      etc. print to stderr). Off: compiled out, as in any Release build. Toggling it rebuilds
 	#      nearly all of WebKit (~2 h without ccache).
@@ -93,7 +102,7 @@
 	#      FFmpeg media player of patch 0030 (no GStreamer, no Media Source Extensions, no Web
 	#      Audio), sound on /dev/audio0. Off: no media, as before. Toggling it rebuilds nearly all
 	#      of WebKit (~2 h without ccache hits), as release_log.
-	iuse="rootfs checks release_log webgl video"
+	iuse="rootfs checks jit release_log webgl video"
 
 	supports="phoenix>=3.3"
 }
@@ -155,6 +164,7 @@ p_build() {
 		PHX_GTK="${dep[gtk3_wayland]}" PHX_WEBKIT_DEPS="${dep[webkit_deps]}" PHX_ICU_PREFIX="${dep[icu]}" \
 		PHX_OPENSSL="${dep[openssl]}" PHX_EPOXY="${dep[libepoxy]}" PHX_MESA="${dep[mesa_drm]}" \
 		PHX_WAYLAND="${dep[wayland_phoenix]}" WEBKIT_SRC="${PREFIX_PORT_WORKDIR%/}" \
+		PHX_WPE_JIT="$(b_use jit && echo 1 || echo 0)" \
 		PHX_WPE_RELEASE_LOG="$(b_use release_log && echo 1 || echo 0)" \
 		PHX_WPE_WEBGL="$(b_use webgl && echo 1 || echo 0)" \
 		PHX_WPE_VIDEO="${video}" PHX_FFMPEG="${ffmpeg}" \
