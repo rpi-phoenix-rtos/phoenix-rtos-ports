@@ -20,6 +20,8 @@
 	#                             shmsrv (memfd_create), WTF's platform sources, build fixes,
 	#                             the disk cache's files written with write() (no write-back
 	#                             of file mappings on Phoenix)
+	#   patches/webkit/0015       the process model is the launcher's to choose: process swap,
+	#                             prewarming, the WebProcess cache's size (WPE_PHOENIX_*)
 	#   files/build-wpe.sh        the build (also run by tools/browser/wpe/build.sh for scratch
 	#                             builds): host ruby if missing, a private dependency prefix,
 	#                             the libphoenix compat objects, CMake + ninja, the link checks
@@ -68,7 +70,10 @@
 
 	# rootfs: copy the staging tree (stage/) into the image rootfs.
 	# checks: also stage the Pi checks (B4 page, probe extension, B6 site list and scripts).
-	iuse="rootfs checks"
+	# release_log: WebKit's RELEASE_LOG compiled in (WEBKIT_DEBUG=ProcessSwapping,Process,Loading
+	#      etc. print to stderr). Off: compiled out, as in any Release build. Toggling it rebuilds
+	#      nearly all of WebKit (~2 h without ccache).
+	iuse="rootfs checks release_log"
 
 	supports="phoenix>=3.3"
 }
@@ -120,6 +125,7 @@ p_build() {
 		PHX_GTK="${dep[gtk3_wayland]}" PHX_WEBKIT_DEPS="${dep[webkit_deps]}" PHX_ICU_PREFIX="${dep[icu]}" \
 		PHX_OPENSSL="${dep[openssl]}" PHX_EPOXY="${dep[libepoxy]}" PHX_MESA="${dep[mesa_drm]}" \
 		PHX_WAYLAND="${dep[wayland_phoenix]}" WEBKIT_SRC="${PREFIX_PORT_WORKDIR%/}" \
+		PHX_WPE_RELEASE_LOG="$(b_use release_log && echo 1 || echo 0)" \
 		"${F}/build-wpe.sh" --out "${out}" --dl "${PHOENIX_DISTFILES:-${HOME}/.phoenix-distfiles}/newlane" \
 		--src-copy -j 8 || b_die "webkit_wpe: build-wpe.sh failed"
 
@@ -141,7 +147,8 @@ p_build() {
 
 	# what the stage must hold: the program with its export table and the B6 shell, the bundle
 	local bad=0 s
-	for s in 'WPEB t=%.0f ' 'chrome action=go source=%s' 'session persistent data=%s' 'wpeBrowserChrome'; do
+	for s in 'WPEB t=%.0f ' 'chrome action=go source=%s' 'session persistent data=%s' 'wpeBrowserChrome' \
+		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model' 'chrome mode=%s'; do
 		grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser lacks '${s}'"; bad=1; }
 	done
 	"${TC}-readelf" -dW "${ST}/usr/lib/wpe-webkit-2.0/injected-bundle/libWPEInjectedBundle.so" | grep -q '(HASH)' ||
