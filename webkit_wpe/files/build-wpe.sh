@@ -607,9 +607,11 @@ check_program() {
 	# the export table is useless to a dlopen() that does not read it: libphoenix's dl.c learnt to
 	# (before that it read only the program file's .symtab, which the stripped program has not
 	# got); its LD_DEBUG message is the marker
-	strings "${out}/wpe-browser" | grep -qF 'dl: host %s exports %s' \
+	# grep -q reading a process substitution, not a pipe: under pipefail, `strings | grep -q` fails
+	# whenever grep matches early, because strings then dies of SIGPIPE
+	grep -qF 'dl: host %s exports %s' < <(strings "${out}/wpe-browser") \
 		|| { echo "build-wpe.sh: the sysroot's libphoenix dlopen() does not use the program's export table" >&2; exit 1; }
-	"${TC}-readelf" --dyn-syms -W "${out}/wpe-browser-stripped" | grep -qF '_ZN6WebKit26WebProcessExtensionManager10initializeEPNS_14InjectedBundleEPN3API6ObjectE' \
+	grep -qF '_ZN6WebKit26WebProcessExtensionManager10initializeEPNS_14InjectedBundleEPN3API6ObjectE' < <("${TC}-readelf" --dyn-syms -W "${out}/wpe-browser-stripped") \
 		|| { echo "build-wpe.sh: wpe-browser exports no WebProcessExtensionManager::initialize (launcher/wpe-browser.exports)" >&2; exit 1; }
 	log "wpe-browser: symbol checks passed"
 }
@@ -623,9 +625,9 @@ check_program() {
 PLUGIN_LDFLAGS="-shared -nostartfiles -nostdlib -Wl,--hash-style=sysv -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,-z,noexecstack"
 plugin_check() {  # plugin_check <object> <entry point>: what dlopen() needs, and the imports covered
 	local so="$1" entry="$2" exports undef s
-	"${TC}-readelf" -lW "${so}" | grep -q ' TLS ' && { echo "build-wpe.sh: ${so}: thread-local storage (dlopen() has no dynamic TLS)" >&2; exit 1; }
-	"${TC}-readelf" -dW "${so}" | grep -q '(HASH)' || { echo "build-wpe.sh: ${so}: no DT_HASH" >&2; exit 1; }
-	"${TC}-readelf" -dW "${so}" | grep -q '(NEEDED)' && { echo "build-wpe.sh: ${so}: DT_NEEDED (dlopen() loads no dependencies)" >&2; exit 1; }
+	grep -q ' TLS ' < <("${TC}-readelf" -lW "${so}") && { echo "build-wpe.sh: ${so}: thread-local storage (dlopen() has no dynamic TLS)" >&2; exit 1; }
+	grep -q '(HASH)' < <("${TC}-readelf" -dW "${so}") || { echo "build-wpe.sh: ${so}: no DT_HASH" >&2; exit 1; }
+	grep -q '(NEEDED)' < <("${TC}-readelf" -dW "${so}") && { echo "build-wpe.sh: ${so}: DT_NEEDED (dlopen() loads no dependencies)" >&2; exit 1; }
 	"${TC}-readelf" --dyn-syms -W "${so}" | awk -v e="${entry}" '$7 != "UND" && $8 == e { f = 1 } END { exit !f }' \
 		|| { echo "build-wpe.sh: ${so}: does not define ${entry}" >&2; exit 1; }
 	exports="$("${TC}-readelf" --dyn-syms -W "${out}/wpe-browser-stripped" | awk '$7 != "UND" { print $8 }')"
