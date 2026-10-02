@@ -1180,10 +1180,49 @@ static gboolean loadFailed(WebKitWebView*, WebKitLoadEvent, const char* uri, GEr
     return FALSE; /* WebKit's error page */
 }
 
-static gboolean loadFailedTLS(WebKitWebView*, const char* uri, GTlsCertificate*, GTlsCertificateFlags errors, gpointer)
+/* Our own page for a refused certificate: WebKit's says only "Unacceptable TLS certificate". The
+ * Pi has no RTC, so the commonest cause is a clock that never got set (ntpclient found no server):
+ * then every certificate is "not yet valid", and the page says what to do about it. */
+static gboolean loadFailedTLS(WebKitWebView* view, const char* uri, GTlsCertificate*, GTlsCertificateFlags errors, gpointer)
 {
-    LOG("load-failed-tls uri=%s flags=0x%x", uri, static_cast<unsigned>(errors));
-    return FALSE;
+    static const struct {
+        GTlsCertificateFlags flag;
+        const char* text;
+    } reasons[] = {
+        { G_TLS_CERTIFICATE_UNKNOWN_CA, "it is not signed by a known certificate authority" },
+        { G_TLS_CERTIFICATE_BAD_IDENTITY, "it is not for this site's name" },
+        { G_TLS_CERTIFICATE_NOT_ACTIVATED, "it is not valid yet" },
+        { G_TLS_CERTIFICATE_EXPIRED, "it has expired" },
+        { G_TLS_CERTIFICATE_REVOKED, "it has been revoked" },
+        { G_TLS_CERTIFICATE_INSECURE, "its algorithm is insecure" },
+    };
+    /* 2024-01-01: no certificate a site serves today was issued before the clock could read this */
+    const bool clockUnset = time(nullptr) < 1704067200;
+
+    LOG("load-failed-tls uri=%s flags=0x%x clock=%s", uri, static_cast<unsigned>(errors), clockUnset ? "unset" : "set");
+    pendingDone();
+
+    char* site = g_markup_escape_text(uri ? uri : "", -1);
+    GString* html = g_string_new(nullptr);
+    g_string_append_printf(html, "<!DOCTYPE html><html><head><meta charset=utf-8><title>Certificate refused</title>"
+        "<style>body{font:16px sans-serif;margin:2em;max-width:40em}code{background:#eee;padding:0 .2em}</style>"
+        "</head><body><h1>Certificate refused</h1><p>The certificate of <b>%s</b> was not accepted:</p><ul>", site);
+    for (const auto& reason : reasons) {
+        if (errors & reason.flag)
+            g_string_append_printf(html, "<li>%s</li>", reason.text);
+    }
+    g_string_append(html, "</ul>");
+    if (clockUnset) {
+        g_string_append(html, "<p><b>This system's clock is not set</b> (it reads 1970), so every certificate looks "
+            "not valid yet. The board has no battery-backed clock and sets it from the network at boot; that "
+            "failed. Run <code>ntpclient -w 30</code> in a terminal (or set another server in "
+            "<code>/etc/ntp.conf</code>), then reload this page.</p>");
+    }
+    g_string_append(html, "<p>The page was not loaded, to keep the connection safe.</p></body></html>");
+    webkit_web_view_load_alternate_html(view, html->str, uri, nullptr);
+    g_string_free(html, TRUE);
+    g_free(site);
+    return TRUE;
 }
 
 static void webProcessTerminated(WebKitWebView* view, WebKitWebProcessTerminationReason reason, gpointer)
