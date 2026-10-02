@@ -46,6 +46,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 set -euo pipefail
 
+# Run from the ports framework, the environment carries the TARGET toolchain (CC=aarch64-phoenix-gcc,
+# CFLAGS, LDFLAGS, PKG_CONFIG_*). This script names every compiler itself: the host tools (libyaml,
+# ruby, unifdef) must build with the host's gcc, and CMake would fold an inherited CFLAGS/LDFLAGS
+# into its first configure. Drop them.
+unset CC CXX CPP CFLAGS CXXFLAGS CPPFLAGS LDFLAGS LIBS AR AS LD NM RANLIB STRIP OBJCOPY OBJDUMP \
+	PKG_CONFIG PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 patches="$(cd "${here}/../patches/webkit" && pwd)"
 out=""
