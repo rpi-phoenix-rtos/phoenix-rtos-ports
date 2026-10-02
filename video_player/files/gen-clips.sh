@@ -7,8 +7,8 @@
 #
 #   m10-h264-720p30-aac.mp4    45 s  1280x720 30 fps H.264 Main + AAC-LC 44.1 kHz stereo (the CPU demo)
 #   m10-h264-1080p30-aac.mp4   30 s  1920x1080 30 fps H.264 High + AAC (CPU at 1080p: expect drops)
-#   m10-hevc-720p30-aac.mp4    30 s  1280x720 30 fps HEVC Main in the rpivid subset + AAC (CPU hevc
-#                                    now; hevc-play reads the same file: it skips the audio track)
+#   m10-hevc-720p30-aac.mp4    30 s  1280x720 30 fps HEVC Main in the rpivid subset + AAC (decoded
+#                                    on the rpivid block by FFmpeg's hevc_rpivid)
 #   m10-vp9-360p-opus.webm     20 s  640x360 30 fps VP9 + Opus 48 kHz (a second codec family and
 #                                    a 48 kHz track: aresample + SDL's converter to 44.1 kHz)
 #
