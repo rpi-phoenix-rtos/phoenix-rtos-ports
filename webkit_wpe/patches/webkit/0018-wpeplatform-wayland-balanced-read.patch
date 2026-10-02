@@ -1,0 +1,79 @@
+Subject: WPEPlatform Wayland: never prepare a read twice (a skipped check() left the UI waiting on itself)
+
+The display's event source calls wl_display_prepare_read() in prepare() and ends it in check(),
+with wl_display_read_events() or wl_display_cancel_read(). GLib does not call check() for a
+source when a source of higher priority became ready in the same iteration (gmain.c,
+g_main_context_check: it stops at the first lower priority once one is ready). The prepared read
+then outlives the iteration, the next prepare() prepares again, libwayland counts the thread as
+two readers, and the thread's next wl_display_read_events() waits on reader_cond for the "other"
+reader -- itself -- for ever (wayland-client.c read_events). Any G_PRIORITY_HIGH source on the UI's
+main context can do it; on Phoenix the browser's one-second main-loop heartbeat did, on every
+start (b31-gate1: UI main thread in read_events, all other threads idle).
+
+The source now remembers that it holds a prepared read: prepare() prepares only when it holds none,
+check() ends the one it holds, and the display's dispose cancels one still held.
+
+diff --git a/Source/WebKit/WPEPlatform/wpe/wayland/WPEDisplayWayland.cpp b/Source/WebKit/WPEPlatform/wpe/wayland/WPEDisplayWayland.cpp
+--- a/Source/WebKit/WPEPlatform/wpe/wayland/WPEDisplayWayland.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/wayland/WPEDisplayWayland.cpp
+@@ -125,6 +125,12 @@
+     GSource source;
+     GPollFD pfd;
+     WPEDisplayWayland* display;
++    // Whether this source holds a wl_display_prepare_read() that check() has yet to end with
++    // wl_display_read_events() or wl_display_cancel_read(). GLib does not call check() for a
++    // source when one of higher priority became ready in the same iteration, so a prepared read
++    // can outlive its iteration; preparing it again would count this thread as a second reader,
++    // and its next wl_display_read_events() would then wait for itself for ever.
++    bool reading;
+ };
+ 
+ GSourceFuncs EventSource::sourceFuncs = {
+@@ -136,9 +142,12 @@
+ 
+         *timeout = -1;
+ 
+-        while (wl_display_prepare_read(display->priv->wlDisplay)) {
+-            if (wl_display_dispatch_pending(display->priv->wlDisplay) < 0)
+-                return FALSE;
++        if (!source->reading) {
++            while (wl_display_prepare_read(display->priv->wlDisplay)) {
++                if (wl_display_dispatch_pending(display->priv->wlDisplay) < 0)
++                    return FALSE;
++            }
++            source->reading = true;
+         }
+ 
+         wl_display_flush(display->priv->wlDisplay);
+@@ -151,7 +160,12 @@
+         auto* source = reinterpret_cast<EventSource*>(base);
+         auto* display = WPE_DISPLAY_WAYLAND(source->display);
+ 
++        if (!source->reading)
++            return !!source->pfd.revents;
++        source->reading = false;
++
+         if (source->pfd.revents & (G_IO_ERR | G_IO_HUP)) {
++            wl_display_cancel_read(display->priv->wlDisplay);
+             GUniquePtr<GError> error(g_error_new_literal(WPE_DISPLAY_ERROR, WPE_DISPLAY_ERROR_CONNECTION_LOST, "Connection to Wayland compositor was lost"));
+             wpe_display_disconnected(WPE_DISPLAY(display), error.get());
+             return FALSE;
+@@ -201,6 +215,7 @@
+     auto source = adoptGRef(g_source_new(&EventSource::sourceFuncs, sizeof(EventSource)));
+     auto& eventSource = *reinterpret_cast<EventSource*>(source.get());
+     eventSource.display = display;
++    eventSource.reading = false;
+     eventSource.pfd.fd = wl_display_get_fd(display->priv->wlDisplay);
+     eventSource.pfd.events = G_IO_IN | G_IO_ERR | G_IO_HUP;
+     eventSource.pfd.revents = 0;
+@@ -218,6 +233,10 @@
+     auto* priv = WPE_DISPLAY_WAYLAND(object)->priv;
+ 
+     if (priv->eventSource) {
++        auto& eventSource = *reinterpret_cast<EventSource*>(priv->eventSource.get());
++        if (eventSource.reading && priv->wlDisplay)
++            wl_display_cancel_read(priv->wlDisplay);
++        eventSource.reading = false;
+         g_source_destroy(priv->eventSource.get());
+         priv->eventSource = nullptr;
+     }

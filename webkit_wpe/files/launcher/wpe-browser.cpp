@@ -311,8 +311,12 @@ static void initStallReport(int ipc)
     mainTid = gettid();
     ipcFd = ipc;
     startupPhase("start");
-    /* the beat says the loop runs; until its first one, the start-up phases are watched */
-    g_timeout_add_full(G_PRIORITY_HIGH, 1000, heartbeat, nullptr, nullptr);
+    /* the beat says the loop runs; until its first one, the start-up phases are watched. At the
+     * default priority: a G_PRIORITY_HIGH source ready in an iteration makes GLib skip the
+     * check() of WPEPlatform's Wayland event source, which left its prepared read held and the
+     * UI's main thread waiting on itself in wl_display_read_events() (b31-gate1; patch 0018
+     * makes the source safe against it, and the beat should not outrank real work anyway) */
+    g_timeout_add_full(G_PRIORITY_DEFAULT, 1000, heartbeat, nullptr, nullptr);
     struct sigaction action;
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = sampleHandler;
