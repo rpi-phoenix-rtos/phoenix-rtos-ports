@@ -6,8 +6,9 @@
   channel over the plain one in /etc/xdg (property by property; every property of that file
   is set here). One 30 px panel on the top edge: the applications menu; launchers for the
   terminal (foot) and Thunar (the session's .desktop files in
-  /usr/share/xfce-session/applications) and the application finder (its own .desktop file,
-  found by its bare Exec on the session's PATH); the window buttons (libxfce4windowing:
+  /usr/share/xfce-session/applications), the web browser (the webkit_wpe port's
+  /usr/share/applications/wpe-browser.desktop: /bin/browser) and the application finder (its
+  own .desktop file, found by its bare Exec on the session's PATH); the window buttons (libxfce4windowing:
   wlr-foreign-toplevel); a spacer; the clock (GLib's local time: the session's TZ); and
   Log Out (the actions plugin: without a session manager on the bus it runs
   `loginctl terminate-session`, the session's stand-in in /usr/lib/xfce-session/bin, which
@@ -29,6 +30,7 @@
         <value type="int" value="2"/>
         <value type="int" value="3"/>
         <value type="int" value="4"/>
+        <value type="int" value="12"/>
         <value type="int" value="9"/>
         <value type="int" value="5"/>
         <value type="int" value="6"/>
@@ -52,6 +54,11 @@
     <property name="plugin-4" type="string" value="launcher">
       <property name="items" type="array">
         <value type="string" value="/usr/share/xfce-session/applications/thunar.desktop"/>
+      </property>
+    </property>
+    <property name="plugin-12" type="string" value="launcher">
+      <property name="items" type="array">
+        <value type="string" value="/usr/share/applications/wpe-browser.desktop"/>
       </property>
     </property>
     <property name="plugin-9" type="string" value="launcher">

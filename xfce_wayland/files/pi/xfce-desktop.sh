@@ -49,7 +49,10 @@
 # /bin/xfce-autostart.sh, which the session's stop closes), XFCONFD (default
 # /usr/lib/xfce4/xfconf/xfconfd), ACTIVATION (0 = skip bus activation, start
 # xfconfd directly), VERBOSE (labwc -V, default 1), G_DEBUG / G_MESSAGES_DEBUG (passed
-# through), GDBUS_DEBUG (1 = G_DBUS_DEBUG=authentication for the XFCE programs).
+# through), GDBUS_DEBUG (1 = G_DBUS_DEBUG=authentication for the XFCE programs), INPUT_EXTRA
+# (more libinput-phoenix devices, path:keyboard|mouse comma-separated, after the USB ones: a
+# regular file is read like a device, so `INPUT_EXTRA=/tmp/kbd-inject:keyboard` lets a script
+# type into the session by appending 8-byte HID boot reports to /tmp/kbd-inject).
 #
 # Every line of ours starts with "XFCE " (grading). GTK/GLib messages look like
 # "(thunar:12): Gtk-WARNING **: 12:00:00.000: ..."; wlroots lines "00:00:01.234 [file.c:1] ...".
@@ -116,7 +119,7 @@ export TERM=xterm-256color
 if [ "${INPUT}" = noinput ]; then
 	export LIBINPUT_PHOENIX_DEVICES=
 else
-	export LIBINPUT_PHOENIX_DEVICES=/dev/kbd0:keyboard,/dev/mouse0:mouse
+	export LIBINPUT_PHOENIX_DEVICES=/dev/kbd0:keyboard,/dev/mouse0:mouse${INPUT_EXTRA:+,${INPUT_EXTRA}}
 fi
 
 case "${SESSION}" in
