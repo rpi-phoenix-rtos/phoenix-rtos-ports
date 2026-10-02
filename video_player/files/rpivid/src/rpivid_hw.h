@@ -60,6 +60,9 @@ void rpivid_hw_close(rpivid_hw_t *hw);
 /* The clock the firmware set, Hz (0 off Phoenix) */
 uint32_t rpivid_hw_clock(const rpivid_hw_t *hw);
 
+/* 1: a decode sleeps on the block's interrupt; 0: it polls the interrupt controller */
+int rpivid_hw_irq(const rpivid_hw_t *hw);
+
 /* Decode one picture. 0, -ETIMEDOUT (a phase did not finish: the block may be wedged and
  * should not be used again), -EIO (phase 1 rejected the stream), -ENOMEM. */
 int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st);

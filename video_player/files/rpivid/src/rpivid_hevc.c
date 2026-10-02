@@ -85,12 +85,13 @@ typedef struct RPIVIDContext {
 	int write_mv;
 	int nslices;
 	int missing_refs;
+	uint64_t slice_ns;             /* the picture's decode_slice calls: bitstream copy, slice commands */
 	const char *frame_err;
 	int failed;
 
 	/* statistics (ns): all frames, and the current reporting window */
-	uint64_t n, sum_build, sum_p1, sum_p2, sum_detile;
-	uint64_t wn, w_build, w_p1, w_p2, w_detile;
+	uint64_t n, sum_slices, sum_p1, sum_p2, sum_detile;
+	uint64_t wn, w_slices, w_p1, w_p2, w_detile;
 	uint64_t t_start;
 	uint32_t p1_reruns, missing_total;
 } RPIVIDContext;
@@ -320,9 +321,9 @@ static int rpivid_uninit(AVCodecContext *avctx)
 	}
 	if (ctx->n != 0u) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: %" PRIu64 " pictures on the block: hw %.2f ms (phase 1 %.2f, phase 2 %.2f), "
-			"SAND->planar %.2f ms, command build %.2f ms per picture; %u phase-1 reruns, %u missing references, %d buffers\n",
+			"SAND->planar %.2f ms, slices (bitstream copy, commands) %.2f ms per picture; %u phase-1 reruns, %u missing references, %d buffers\n",
 			ctx->n, (ctx->sum_p1 + ctx->sum_p2) / 1e6 / ctx->n, ctx->sum_p1 / 1e6 / ctx->n, ctx->sum_p2 / 1e6 / ctx->n,
-			ctx->sum_detile / 1e6 / ctx->n, ctx->sum_build / 1e6 / ctx->n, ctx->p1_reruns, ctx->missing_total,
+			ctx->sum_detile / 1e6 / ctx->n, ctx->sum_slices / 1e6 / ctx->n, ctx->p1_reruns, ctx->missing_total,
 			(ctx->pool != NULL) ? ctx->pool->nbufs : 0);
 	}
 	rpivid_cmd_free(&ctx->cmd);
@@ -401,9 +402,9 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level)
 
 	avctx->internal->hwaccel_priv_data = ctx;
 	avctx->hwaccel = &ff_hevc_rpivid_hwaccel.p;
-	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit (%s), HEVC clock %u MHz\n", sps->width, sps->height,
-		sps->bit_depth, (level >= RPIVID_LEVEL_ALL) ? "all tools, UNVERIFIED ones included" : "verified tool set",
-		rpivid_hw_clock(ctx->hw) / 1000000u);
+	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit (%s), HEVC clock %u MHz, completion %s\n", sps->width,
+		sps->height, sps->bit_depth, (level >= RPIVID_LEVEL_ALL) ? "all tools, UNVERIFIED ones included" : "verified tool set",
+		rpivid_hw_clock(ctx->hw) / 1000000u, rpivid_hw_irq(ctx->hw) ? "by interrupt" : "POLLED (no interrupt)");
 	return 0;
 }
 
@@ -554,6 +555,7 @@ static int rpivid_start_frame(AVCodecContext *avctx, const uint8_t *buf, uint32_
 	ctx->nslots = 0;
 	ctx->nslices = 0;
 	ctx->missing_refs = 0;
+	ctx->slice_ns = 0;
 	ctx->frame_err = NULL;
 	ctx->failed = 0;
 	/* keep this picture's motion vectors if any later picture may use it as the
@@ -615,7 +617,7 @@ static int ref_slot(RPIVIDContext *ctx, const HEVCFrame *ref, const RPIVIDFrame 
 }
 
 
-static int rpivid_decode_slice(AVCodecContext *avctx, const uint8_t *buf, uint32_t size)
+static int decode_slice(AVCodecContext *avctx, const uint8_t *buf, uint32_t size)
 {
 	const HEVCContext *s = avctx->priv_data;
 	const SliceHeader *sh = &s->sh;
@@ -725,15 +727,26 @@ static int rpivid_decode_slice(AVCodecContext *avctx, const uint8_t *buf, uint32
 }
 
 
+static int rpivid_decode_slice(AVCodecContext *avctx, const uint8_t *buf, uint32_t size)
+{
+	RPIVIDContext *ctx = avctx->internal->hwaccel_priv_data;
+	uint64_t t0 = (uint64_t)av_gettime_relative();
+	int ret = decode_slice(avctx, buf, size);
+
+	ctx->slice_ns += ((uint64_t)av_gettime_relative() - t0) * 1000u;
+	return ret;
+}
+
+
 static void stat_window(AVCodecContext *avctx, RPIVIDContext *ctx)
 {
 	if (ctx->wn < STAT_EVERY) {
 		return;
 	}
-	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms build=%.2fms\n", ctx->n,
+	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms\n", ctx->n,
 		(ctx->w_p1 + ctx->w_p2) / 1e6 / ctx->wn, ctx->w_p1 / 1e6 / ctx->wn, ctx->w_p2 / 1e6 / ctx->wn, ctx->w_detile / 1e6 / ctx->wn,
-		ctx->w_build / 1e6 / ctx->wn);
-	ctx->wn = ctx->w_build = ctx->w_p1 = ctx->w_p2 = ctx->w_detile = 0;
+		ctx->w_slices / 1e6 / ctx->wn);
+	ctx->wn = ctx->w_slices = ctx->w_p1 = ctx->w_p2 = ctx->w_detile = 0;
 }
 
 
@@ -827,8 +840,8 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 
 	ctx->n++;
 	ctx->wn++;
-	ctx->sum_build += (t1 - t0) * 1000u;
-	ctx->w_build += (t1 - t0) * 1000u;
+	ctx->sum_slices += (t1 - t0) * 1000u + ctx->slice_ns;
+	ctx->w_slices += (t1 - t0) * 1000u + ctx->slice_ns;
 	ctx->sum_p1 += st.p1_ns;
 	ctx->w_p1 += st.p1_ns;
 	ctx->sum_p2 += st.p2_ns;
