@@ -1,0 +1,218 @@
+Subject: WTF: Phoenix memory footprint from meminfo(); jsc MemoryFootprint() and --footprint
+
+memoryFootprint() sums the anonymous pages of the process's map entries (meminfo(), as psh mem
+does). libphoenix's struct rusage has no ru_maxrss, so FastMalloc statistics use it too, and the jsc
+shell's MemoryFootprint()/--footprint report it (peak = largest value sampled).
+
+diff --git a/Source/JavaScriptCore/jsc.cpp b/Source/JavaScriptCore/jsc.cpp
+index 7a26bf7e..43c8c7a9 100644
+--- a/Source/JavaScriptCore/jsc.cpp
++++ b/Source/JavaScriptCore/jsc.cpp
+@@ -164,11 +164,13 @@
+ #include <wtf/spi/darwin/ProcessMemoryFootprint.h>
+ #elif OS(LINUX)
+ #include <wtf/linux/ProcessMemoryFootprint.h>
++#elif OS(PHOENIX)
++#include <wtf/phoenix/ProcessMemoryFootprint.h>
+ #endif
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ 
+-#if OS(DARWIN) || OS(LINUX)
++#if OS(DARWIN) || OS(LINUX) || OS(PHOENIX)
+ struct MemoryFootprint : ProcessMemoryFootprint {
+     MemoryFootprint(const ProcessMemoryFootprint& src)
+         : ProcessMemoryFootprint(src)
+diff --git a/Source/WTF/wtf/FastMalloc.cpp b/Source/WTF/wtf/FastMalloc.cpp
+index 7dea132d..a89ad2d3 100644
+--- a/Source/WTF/wtf/FastMalloc.cpp
++++ b/Source/WTF/wtf/FastMalloc.cpp
+@@ -45,6 +45,10 @@
+ #include <OS.h>
+ #endif
+ 
++#if OS(PHOENIX)
++#include <wtf/MemoryFootprint.h>
++#endif
++
+ #if ENABLE(MALLOC_HEAP_BREAKDOWN)
+ #include <wtf/Atomics.h>
+ #include <wtf/HashMap.h>
+@@ -615,6 +619,9 @@ FastMallocStatistics fastMallocStatistics()
+     area_info info;
+     while (get_next_area_info(B_CURRENT_TEAM, &cookie, &info) == B_OK)
+         statistics.committedVMBytes += info.ram_size;
++#elif OS(PHOENIX)
++    // libphoenix's struct rusage has no ru_maxrss.
++    statistics.committedVMBytes = memoryFootprint();
+ #elif HAVE(RESOURCE_H)
+     struct rusage resourceUsage;
+     getrusage(RUSAGE_SELF, &resourceUsage);
+diff --git a/Source/WTF/wtf/PlatformJSCOnly.cmake b/Source/WTF/wtf/PlatformJSCOnly.cmake
+index fe97ed9c..d5964623 100644
+--- a/Source/WTF/wtf/PlatformJSCOnly.cmake
++++ b/Source/WTF/wtf/PlatformJSCOnly.cmake
+@@ -108,6 +108,15 @@ elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
+ 
+         unix/MemoryPressureHandlerUnix.cpp
+     )
++elseif (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    list(APPEND WTF_SOURCES
++        generic/MemoryPressureHandlerGeneric.cpp
++
++        phoenix/MemoryFootprintPhoenix.cpp
++    )
++    list(APPEND WTF_PUBLIC_HEADERS
++        phoenix/ProcessMemoryFootprint.h
++    )
+ elseif (CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+     list(APPEND WTF_SOURCES
+         generic/MemoryFootprintGeneric.cpp
+diff --git a/Source/WTF/wtf/phoenix/MemoryFootprintPhoenix.cpp b/Source/WTF/wtf/phoenix/MemoryFootprintPhoenix.cpp
+new file mode 100644
+index 00000000..b04e9a39
+--- /dev/null
++++ b/Source/WTF/wtf/phoenix/MemoryFootprintPhoenix.cpp
+@@ -0,0 +1,76 @@
++/*
++ * Copyright (C) 2026 Phoenix-RTOS Raspberry Pi port contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
++ * EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include <wtf/MemoryFootprint.h>
++
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++namespace WTF {
++
++// Phoenix-RTOS: the bytes of anonymous pages in this process's map entries, from the kernel's
++// meminfo() (what `psh mem <pid>` lists). Anonymous mappings are populated at mmap time there,
++// so this is close to the dirty resident footprint; shared program text is not counted.
++size_t memoryFootprint()
++{
++    int capacity = 64;
++    for (int attempt = 0; attempt < 4; ++attempt) {
++        auto* map = static_cast<entryinfo_t*>(malloc(sizeof(entryinfo_t) * capacity));
++        if (!map)
++            return 0;
++        meminfo_t info;
++        memset(&info, 0, sizeof(info));
++        info.page.mapsz = -1;
++        info.maps.mapsz = -1;
++        info.entry.kmapsz = -1;
++        info.entry.pid = static_cast<unsigned>(getpid());
++        info.entry.mapsz = capacity;
++        info.entry.map = map;
++        meminfo(&info);
++        if (info.entry.mapsz < 0) {
++            free(map);
++            return 0;
++        }
++        if (info.entry.mapsz <= capacity) {
++            size_t total = 0;
++            for (int i = 0; i < info.entry.mapsz; ++i) {
++WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
++                // The kernel marks an entry with no anonymous pages as ~0U (vm/map.c), not 0.
++                if (map[i].anonsz != static_cast<size_t>(~0U) && map[i].anonsz != SIZE_MAX)
++                    total += map[i].anonsz;
++WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
++            }
++            free(map);
++            return total;
++        }
++        capacity = info.entry.mapsz + 32;
++        free(map);
++    }
++    return 0;
++}
++
++} // namespace WTF
+diff --git a/Source/WTF/wtf/phoenix/ProcessMemoryFootprint.h b/Source/WTF/wtf/phoenix/ProcessMemoryFootprint.h
+new file mode 100644
+index 00000000..c560f592
+--- /dev/null
++++ b/Source/WTF/wtf/phoenix/ProcessMemoryFootprint.h
+@@ -0,0 +1,60 @@
++/*
++ * Copyright (C) 2026 Phoenix-RTOS Raspberry Pi port contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
++ * EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#if OS(PHOENIX)
++
++#include <algorithm>
++#include <atomic>
++#include <wtf/MemoryFootprint.h>
++
++// The jsc shell's MemoryFootprint() / --dumpMemoryFootprint on Phoenix-RTOS. The kernel keeps no
++// peak, so `peak` is the largest footprint seen by now() since the last resetPeak().
++struct ProcessMemoryFootprint {
++    uint64_t current;
++    uint64_t peak;
++
++    static ProcessMemoryFootprint now()
++    {
++        uint64_t current = WTF::memoryFootprint();
++        uint64_t peak = peakStorage().load();
++        while (current > peak && !peakStorage().compare_exchange_weak(peak, current)) { }
++        return { current, std::max(peak, current) };
++    }
++
++    static void resetPeak()
++    {
++        peakStorage().store(0);
++    }
++
++private:
++    static std::atomic<uint64_t>& peakStorage()
++    {
++        static std::atomic<uint64_t> peak { 0 };
++        return peak;
++    }
++};
++
++#endif

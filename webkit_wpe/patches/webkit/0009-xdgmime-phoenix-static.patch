@@ -1,0 +1,34 @@
+Subject: xdgmime: own names for the two unprefixed globals; ntohl from <arpa/inet.h> on Phoenix
+
+In one static program WebKit's bundled xdgmime and GLib's copy inside GIO both define
+_caches and _xdg_binary_or_text_fallback (XDG_PREFIX renames only the functions). On Phoenix
+ntohl/ntohs are declared in <arpa/inet.h> only.
+
+diff --git a/Source/ThirdParty/xdgmime/CMakeLists.txt b/Source/ThirdParty/xdgmime/CMakeLists.txt
+index 43374cae..8d12d92b 100644
+--- a/Source/ThirdParty/xdgmime/CMakeLists.txt
++++ b/Source/ThirdParty/xdgmime/CMakeLists.txt
+@@ -18,6 +18,9 @@ set(XDGMIME_SOURCES
+ 
+ include_directories("${XDGMIME_INCLUDE_DIRECTORIES}")
+ add_definitions(-DXDG_PREFIX=_wk_xdg)
++# The two globals XDG_PREFIX leaves unprefixed collide with GLib's own copy of xdgmime (in GIO)
++# when everything is linked statically (Phoenix-RTOS): give WebKit's its own names.
++add_definitions(-D_caches=_wk_xdg_caches -D_xdg_binary_or_text_fallback=_wk_xdg_binary_or_text_fallback)
+ add_library(xdgmime STATIC ${XDGMIME_SOURCES})
+ 
+ if (CMAKE_CXX_BYTE_ORDER STREQUAL "LITTLE_ENDIAN")
+diff --git a/Source/ThirdParty/xdgmime/src/xdgmimecache.c b/Source/ThirdParty/xdgmime/src/xdgmimecache.c
+index d06095f4..fd50c84c 100644
+--- a/Source/ThirdParty/xdgmime/src/xdgmimecache.c
++++ b/Source/ThirdParty/xdgmime/src/xdgmimecache.c
+@@ -39,6 +39,9 @@
+ #include <assert.h>
+ 
+ #include <netinet/in.h> /* for ntohl/ntohs */
++#ifdef __phoenix__
++#include <arpa/inet.h> /* Phoenix-RTOS: ntohl/ntohs live only here */
++#endif
+ 
+ #ifdef HAVE_MMAP
+ #include <sys/mman.h>

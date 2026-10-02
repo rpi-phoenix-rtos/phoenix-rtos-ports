@@ -1,0 +1,62 @@
+Subject: WTF: FileSystem::mapToFile() writes the file on Phoenix (no write-back of file mappings)
+
+FileSystem::mapToFile() creates a file, maps it MAP_SHARED and copies the data into the mapping:
+the network cache stores every body larger than a page that way (NetworkCacheBlobStorage), and
+the service worker script storage too. Phoenix-RTOS has no shared file mappings: MAP_SHARED is
+MAP_PRIVATE (0) and the kernel never writes a mapped page back, so the file keeps the zeros of
+its ftruncate() -- the blob's hash fails on the next read and the HTTP disk cache keeps only the
+small bodies. On Phoenix write the bytes with write() and return an anonymous read-only copy
+(what callers then read, and what the returned handle's file now holds).
+
+diff --git a/Source/WTF/wtf/FileSystem.cpp b/Source/WTF/wtf/FileSystem.cpp
+index 7771695..7ff73a0 100644
+--- a/Source/WTF/wtf/FileSystem.cpp
++++ b/Source/WTF/wtf/FileSystem.cpp
+@@ -388,6 +388,39 @@ void finalizeMappedFileData(MappedFileData& mappedFileData, size_t bytesSize)
+ 
+ MappedFileData mapToFile(const String& path, size_t bytesSize, NOESCAPE const Function<void(const Function<bool(std::span<const uint8_t>)>&)>& apply, FileHandle* outputHandle)
+ {
++#if OS(PHOENIX)
++    // Phoenix-RTOS keeps no file mapping in step with its file: MAP_SHARED is MAP_PRIVATE and the
++    // kernel writes no page back, so bytes stored through a mapping never reach the file (the
++    // network cache's blobs would be zeros on disk). Write them with write(), and hand back an
++    // anonymous read-only copy: the caller's view of what is now in the file.
++    constexpr bool failIfFileExists = true;
++    auto handle = FileSystem::openFile(path, FileSystem::FileOpenMode::ReadWrite, FileSystem::FileAccessPermission::User, { }, failIfFileExists);
++    if (!handle)
++        return { };
++    auto copy = MmapSpan<uint8_t>::tryAlloc(bytesSize);
++    if (!copy) {
++        handle = { };
++        FileSystem::deleteFile(path);
++        return { };
++    }
++    auto copyData = copy.mutableSpan();
++    bool written = true;
++    apply([&](std::span<const uint8_t> chunk) {
++        memcpySpan(consumeSpan(copyData, chunk.size()), chunk);
++        written = handle.write(chunk) == chunk.size();
++        return written;
++    });
++    if (!written) {
++        handle = { };
++        FileSystem::deleteFile(path);
++        return { };
++    }
++    MappedFileData mappedFile { WTF::move(copy) };
++    finalizeMappedFileData(mappedFile, bytesSize);
++    if (outputHandle)
++        *outputHandle = WTF::move(handle);
++    return mappedFile;
++#else
+     auto mappedFile = createMappedFileData(path, bytesSize, outputHandle);
+     if (!mappedFile)
+         return { };
+@@ -402,6 +435,7 @@ MappedFileData mapToFile(const String& path, size_t bytesSize, NOESCAPE const Fu
+     finalizeMappedFileData(mappedFile, bytesSize);
+ 
+     return mappedFile;
++#endif
+ }
+ 
+ static Salt makeSalt()

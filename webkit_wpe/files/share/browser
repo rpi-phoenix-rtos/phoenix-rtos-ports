@@ -1,0 +1,41 @@
+#!/bin/bash
+#
+# browser -- the web browser of the Phoenix-RTOS desktop (WPE WebKit: /usr/bin/wpe-browser).
+#
+#     /bin/bash /bin/browser [URL|FILE|WORDS]
+#
+# (the XFCE menu entry "Web Browser" runs the same; Phoenix execs no #! scripts, so psh and the
+# .desktop entry name bash). In a window of the running Wayland session with the desktop
+# defaults:
+#   - no argument: the start page /usr/share/wpe-browser/start.html;
+#   - an address without a scheme gets https:// (http:// for localhost and IP addresses); plain
+#     words are a DuckDuckGo search;
+#   - cookies (no third-party ones), local storage and HSTS in $HOME/.local/share/wpe-browser,
+#     the HTTP disk cache in $HOME/.cache/wpe-browser ($HOME is /root on the Pi: the persistent
+#     NFS or SD root, never the RAM /tmp);
+#   - Skia's CPU raster, a 1280x960 window.
+# Keys: Ctrl+L the address, Alt+Left / Alt+Right back / forward, F5 reload, Esc stop,
+# Alt+Home the start page, F11 fullscreen, Ctrl+Q quit; the toolbar shows when the pointer
+# touches the top edge of the page.
+#
+# Environment: BROWSER_SIZE (WxH, default 1280x960), BROWSER_GPU=1 (Skia's GPU raster on the
+# V3D instead of the CPU, the B7 path), and wpe-browser's own WPE_BROWSER_* test knobs
+# (passed through). Outside the session (WAYLAND_DISPLAY unset) the first
+# $XDG_RUNTIME_DIR/wayland-N socket (default /tmp/xdg) is used.
+#
+# Copyright 2026 Phoenix Systems
+#
+# This file is part of Phoenix-RTOS.
+#
+# %LICENSE%
+
+export HOME=${HOME:-/root}
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp/xdg}
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+	for s in "${XDG_RUNTIME_DIR}"/wayland-[0-9]; do
+		[ -e "${s}" ] && export WAYLAND_DISPLAY="${s##*/}" && break
+	done
+fi
+args=(--size="${BROWSER_SIZE:-1280x960}")
+[ "${BROWSER_GPU:-0}" = 1 ] || args+=(--cpu-rendering)
+exec /usr/bin/wpe-browser "${args[@]}" "$@"

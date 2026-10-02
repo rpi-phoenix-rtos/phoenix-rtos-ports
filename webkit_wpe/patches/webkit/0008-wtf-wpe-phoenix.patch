@@ -1,0 +1,95 @@
+Subject: WTF: WPE port on Phoenix: no linux/ sources, meminfo footprint, memory pressure handler
+
+WTF's WPE source list assumes Linux (procfs memory status, eventfd + RealtimeKit threads). On
+Phoenix use track C's phoenix/MemoryFootprintPhoenix.cpp, and MemoryPressureHandlerUnix.cpp with
+an OS(PHOENIX) processMemoryUsage() (the meminfo footprint) and the hold-off timer.
+
+diff --git a/Source/WTF/wtf/MemoryPressureHandler.cpp b/Source/WTF/wtf/MemoryPressureHandler.cpp
+index 71256410..619f780c 100644
+--- a/Source/WTF/wtf/MemoryPressureHandler.cpp
++++ b/Source/WTF/wtf/MemoryPressureHandler.cpp
+@@ -67,7 +67,7 @@ static MemoryPressureHandler* memoryPressureHandlerIfExists()
+ }
+ 
+ MemoryPressureHandler::MemoryPressureHandler()
+-#if (OS(LINUX) || OS(FREEBSD) || OS(HAIKU) || OS(QNX)) && !OS(ANDROID)
++#if (OS(LINUX) || OS(FREEBSD) || OS(HAIKU) || OS(QNX) || OS(PHOENIX)) && !OS(ANDROID)
+     : m_holdOffTimer(RunLoop::mainSingleton(), "MemoryPressureHandler::HoldOffTimer"_s, this, &MemoryPressureHandler::holdOffTimerFired)
+ #elif OS(WINDOWS)
+     : m_windowsMeasurementTimer(RunLoop::mainSingleton(), "MemoryPressureHandler::WindowsMeasurementTimer"_s, this, &MemoryPressureHandler::windowsMeasurementTimerFired)
+diff --git a/Source/WTF/wtf/MemoryPressureHandler.h b/Source/WTF/wtf/MemoryPressureHandler.h
+index 2faf07ca..990f6deb 100644
+--- a/Source/WTF/wtf/MemoryPressureHandler.h
++++ b/Source/WTF/wtf/MemoryPressureHandler.h
+@@ -98,7 +98,7 @@ public:
+     WTF_EXPORT_PRIVATE void NODELETE setMemoryFootprintPollIntervalForTesting(Seconds);
+     WTF_EXPORT_PRIVATE void setShouldUsePeriodicMemoryMonitor(bool);
+ 
+-#if OS(LINUX) || OS(FREEBSD) || OS(HAIKU) || OS(QNX)
++#if OS(LINUX) || OS(FREEBSD) || OS(HAIKU) || OS(QNX) || OS(PHOENIX)
+     WTF_EXPORT_PRIVATE void triggerMemoryPressureEvent(bool isCritical);
+ #endif
+ 
+@@ -268,7 +268,7 @@ private:
+     HANDLE m_lowMemoryWaitHandle { nullptr };
+ #endif
+ 
+-#if (OS(LINUX) || OS(FREEBSD) || OS(HAIKU) || OS(QNX)) && !OS(ANDROID)
++#if (OS(LINUX) || OS(FREEBSD) || OS(HAIKU) || OS(QNX) || OS(PHOENIX)) && !OS(ANDROID)
+     RunLoop::Timer m_holdOffTimer;
+     void holdOffTimerFired();
+ #endif
+diff --git a/Source/WTF/wtf/PlatformWPE.cmake b/Source/WTF/wtf/PlatformWPE.cmake
+index 0f9abb33..6ad84800 100644
+--- a/Source/WTF/wtf/PlatformWPE.cmake
++++ b/Source/WTF/wtf/PlatformWPE.cmake
+@@ -20,9 +20,6 @@ list(APPEND WTF_SOURCES
+     glib/TimeZoneGLib.cpp
+     glib/URLGLib.cpp
+ 
+-    linux/CurrentProcessMemoryStatus.cpp
+-    linux/RealTimeThreads.cpp
+-
+     posix/CPUTimePOSIX.cpp
+     posix/FileHandlePOSIX.cpp
+     posix/FileSystemPOSIX.cpp
+@@ -37,11 +34,25 @@ list(APPEND WTF_SOURCES
+     unix/UniStdExtrasUnix.cpp
+ )
+ 
++if (NOT CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    list(APPEND WTF_SOURCES
++        linux/CurrentProcessMemoryStatus.cpp
++        linux/RealTimeThreads.cpp
++    )
++endif ()
++
+ if (ANDROID)
+     list(APPEND WTF_SOURCES
+         generic/MemoryFootprintGeneric.cpp
+         generic/MemoryPressureHandlerGeneric.cpp
+     )
++elseif (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    # Phoenix-RTOS: no /proc; the footprint comes from meminfo() (track C, patch 0003)
++    list(APPEND WTF_SOURCES
++        phoenix/MemoryFootprintPhoenix.cpp
++
++        unix/MemoryPressureHandlerUnix.cpp
++    )
+ else ()
+     list(APPEND WTF_SOURCES
+         linux/MemoryFootprintLinux.cpp
+diff --git a/Source/WTF/wtf/unix/MemoryPressureHandlerUnix.cpp b/Source/WTF/wtf/unix/MemoryPressureHandlerUnix.cpp
+index 97b0e3de..ee0ff555 100644
+--- a/Source/WTF/wtf/unix/MemoryPressureHandlerUnix.cpp
++++ b/Source/WTF/wtf/unix/MemoryPressureHandlerUnix.cpp
+@@ -142,6 +142,9 @@ static size_t processMemoryUsage()
+         return 0;
+ 
+     return static_cast<size_t>(info.rss);
++#elif OS(PHOENIX)
++    // the anonymous pages of the process's map entries (wtf/phoenix/MemoryFootprintPhoenix.cpp)
++    return memoryFootprint();
+ #else
+ #error "Missing a platform specific way of determining the memory usage"
+ #endif

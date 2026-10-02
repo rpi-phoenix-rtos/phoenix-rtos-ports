@@ -1,0 +1,182 @@
+Subject: bmalloc/mimalloc: Phoenix prim; mimalloc overrides malloc on Phoenix
+
+Phoenix has no virtual reserve (anonymous mmap is resident at once), no overcommit, no madvise,
+and mprotect cannot add a permission the mapping lacked at mmap time: map everything read-write,
+make commit/decommit/reset no-ops, report a 39-bit user address space, quarter-size (32 MiB)
+arenas. No getrandom (weak seed), short struct rusage. In WebKit's mimalloc wrapper, Phoenix builds
+override malloc/free/new with mimalloc (libphoenix's allocator takes a kernel mutex per call once a
+process has threads) and do not use -march=armv8.1-a (Cortex-A72 is ARMv8.0).
+
+diff --git a/Source/bmalloc/mimalloc/CMakeLists.txt b/Source/bmalloc/mimalloc/CMakeLists.txt
+index 76b86ba4..75d27eb6 100644
+--- a/Source/bmalloc/mimalloc/CMakeLists.txt
++++ b/Source/bmalloc/mimalloc/CMakeLists.txt
+@@ -1,4 +1,13 @@
+-set(MI_OVERRIDE OFF CACHE BOOL "Disable mimalloc override" FORCE)
++if (CMAKE_SYSTEM_NAME STREQUAL "Phoenix")
++    # Phoenix-RTOS (static binaries only): mimalloc also replaces the process's malloc/free and
++    # operator new/delete, so ICU and libstdc++ allocations skip libphoenix's allocator, which
++    # takes a kernel mutex on every call once a process has threads (browser PLAN decision 4).
++    set(MI_OVERRIDE ON CACHE BOOL "Override malloc (Phoenix)" FORCE)
++    # Cortex-A72 is ARMv8.0: no -march=armv8.1-a (LSE atomics).
++    set(MI_NO_OPT_ARCH ON CACHE BOOL "No armv8.1-a (Phoenix, Cortex-A72)" FORCE)
++else ()
++    set(MI_OVERRIDE OFF CACHE BOOL "Disable mimalloc override" FORCE)
++endif ()
+ set(MI_OSX_INTERPOSE OFF CACHE BOOL "Disable macOS malloc zone interpose" FORCE)
+ set(MI_OSX_ZONE ON CACHE BOOL "Disable macOS malloc zone" FORCE)
+ set(MI_BUILD_SHARED OFF CACHE BOOL "Build mimalloc shared library" FORCE)
+@@ -9,6 +18,11 @@ set(MI_BUILD_TESTS OFF CACHE BOOL "Build mimalloc tests" FORCE)
+ WEBKIT_INCLUDE_CONFIG_FILES_IF_EXISTS()
+ 
+ add_subdirectory(mimalloc)
++if (CMAKE_SYSTEM_NAME STREQUAL "Phoenix")
++    # Anonymous memory is resident from mmap on Phoenix (no virtual reserve): reserve arenas of
++    # 128 MiB, which mimalloc quarters to 32 MiB without a virtual reserve, instead of 1 GiB.
++    target_compile_definitions(mimalloc-obj PRIVATE "MI_DEFAULT_ARENA_RESERVE=(128L*1024L)")
++endif ()
+ WEBKIT_ADD_TARGET_CXX_FLAGS(mimalloc-obj
+     -Wno-undef
+     -Wno-cast-align)
+diff --git a/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c b/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c
+index ba8dfb1f..9fd7eaa5 100644
+--- a/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c
++++ b/Source/bmalloc/mimalloc/mimalloc/src/prim/unix/prim.c
+@@ -210,6 +210,15 @@ void _mi_prim_mem_init( mi_os_mem_config_t* config )
+   config->has_partial_free = true;    // mmap can free in parts
+   config->has_virtual_reserve = true; // todo: check if this true for NetBSD?  (for anonymous mmap with PROT_NONE)
+   config->has_transparent_huge_pages = unix_detect_thp();
++  #if defined(__phoenix__)
++  // Phoenix-RTOS populates every page of an anonymous mmap at once (no demand paging, no
++  // overcommit), and mprotect can never add a permission the mapping did not have at mmap time
++  // (vm/map.c, map_checkProt). So there is no "virtual reserve": see _mi_prim_alloc/_commit below.
++  // The user address space is 39 bits (hal/aarch64/arch/pmap.h, VADDR_USR_MAX).
++  config->has_overcommit = false;
++  config->has_virtual_reserve = false;
++  config->virtual_address_bits = 39;
++  #endif
+ 
+   // disable transparent huge pages for this process?
+   #if (defined(__linux__) || defined(__ANDROID__)) && defined(PR_GET_THP_DISABLE)
+@@ -247,6 +256,7 @@ int _mi_prim_free(void* addr, size_t size ) {
+ // mmap
+ //---------------------------------------------
+ 
++#if !defined(__phoenix__)  // no madvise on Phoenix: see _mi_prim_decommit/_mi_prim_reset
+ static int unix_madvise(void* addr, size_t size, int advice) {
+   #if defined(__sun)
+   int res = madvise((caddr_t)addr, size, advice);  // Solaris needs cast (issue #520)
+@@ -257,6 +267,7 @@ static int unix_madvise(void* addr, size_t size, int advice) {
+   #endif
+   return (res==0 ? 0 : errno);
+ }
++#endif
+ 
+ static void* unix_mmap_prim(void* addr, size_t size, int protect_flags, int flags, int fd) {
+   void* p = mmap(addr, size, protect_flags, flags, fd, 0 /* offset */);
+@@ -441,7 +452,14 @@ int _mi_prim_alloc(void* hint_addr, size_t size, size_t try_alignment, bool comm
+   }
+ 
+   *is_zero = true;
++  #if defined(__phoenix__)
++  // Always map read-write: a PROT_NONE "reservation" could never be committed later (mprotect
++  // cannot add permissions on Phoenix), and the pages are resident either way.
++  MI_UNUSED(commit);
++  int protect_flags = (PROT_WRITE | PROT_READ);
++  #else
+   int protect_flags = (commit ? (PROT_WRITE | PROT_READ) : PROT_NONE);
++  #endif
+   *addr = unix_mmap(hint_addr, size, try_alignment, protect_flags, false, allow_large, is_large);
+   return (*addr != NULL ? 0 : errno);
+ }
+@@ -474,12 +492,18 @@ int _mi_prim_commit(void* start, size_t size, bool* is_zero) {
+   // we sometimes call commit on a range with still partially committed
+   // memory and `mprotect` does not zero the range.
+   *is_zero = false;
++  #if defined(__phoenix__)
++  // Everything is mapped read-write and resident from the start (_mi_prim_alloc).
++  MI_UNUSED(start); MI_UNUSED(size);
++  return 0;
++  #else
+   int err = mprotect(start, size, (PROT_READ | PROT_WRITE));
+   if (err != 0) {
+     err = errno;
+     unix_mprotect_hint(err);
+   }
+   return err;
++  #endif
+ }
+ 
+ int _mi_prim_reuse(void* start, size_t size) {
+@@ -492,7 +516,10 @@ int _mi_prim_reuse(void* start, size_t size) {
+ 
+ int _mi_prim_decommit(void* start, size_t size, bool* needs_recommit) {
+   int err = 0;
+-  #if defined(__APPLE__) && defined(MADV_FREE_REUSABLE)
++  #if defined(__phoenix__)
++    // No madvise on Phoenix: the pages stay resident and usable; nothing to recommit.
++    MI_UNUSED(start); MI_UNUSED(size);
++  #elif defined(__APPLE__) && defined(MADV_FREE_REUSABLE)
+     // decommit on macOS: use MADV_FREE_REUSABLE as it does immediate rss accounting (issue #1097)
+     err = unix_madvise(start, size, MADV_FREE_REUSABLE);
+     if (err) { err = unix_madvise(start, size, MADV_DONTNEED); }
+@@ -500,7 +527,7 @@ int _mi_prim_decommit(void* start, size_t size, bool* needs_recommit) {
+     // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
+     err = unix_madvise(start, size, MADV_DONTNEED);
+   #endif
+-  #if !MI_DEBUG && MI_SECURE<=2
++  #if (!MI_DEBUG && MI_SECURE<=2) || defined(__phoenix__)
+     *needs_recommit = false;
+   #else
+     *needs_recommit = true;
+@@ -518,6 +545,9 @@ int _mi_prim_decommit(void* start, size_t size, bool* needs_recommit) {
+ 
+ int _mi_prim_reset(void* start, size_t size) {
+   int err = 0;
++  #if defined(__phoenix__)
++  MI_UNUSED(start); MI_UNUSED(size);  // no madvise on Phoenix (see _mi_prim_decommit)
++  #else
+ 
+   // on macOS can use MADV_FREE_REUSABLE (but we disable this for now as it seems slower)
+   #if 0 && defined(__APPLE__) && defined(MADV_FREE_REUSABLE)
+@@ -542,6 +572,7 @@ int _mi_prim_reset(void* start, size_t size) {
+   #else
+   err = unix_madvise(start, size, MADV_DONTNEED);
+   #endif
++  #endif // __phoenix__
+   return err;
+ }
+ 
+@@ -743,10 +774,13 @@ void _mi_prim_process_info(mi_process_info_t* pinfo)
+   getrusage(RUSAGE_SELF, &rusage);
+   pinfo->utime = timeval_secs(&rusage.ru_utime);
+   pinfo->stime = timeval_secs(&rusage.ru_stime);
+-#if !defined(__HAIKU__)
++#if !defined(__HAIKU__) && !defined(__phoenix__)
+   pinfo->page_faults = rusage.ru_majflt;
+ #endif
+-#if defined(__HAIKU__)
++#if defined(__phoenix__)
++  // libphoenix's struct rusage has only the CPU times; mimalloc's own stats cover the rest.
++  pinfo->page_faults = 0;
++#elif defined(__HAIKU__)
+   // Haiku does not have (yet?) a way to
+   // get these stats per process
+   thread_info tid;
+@@ -928,6 +962,16 @@ bool _mi_prim_random_buf(void* buf, size_t buf_len) {
+   return (count==buf_len);
+ }
+ 
++#elif defined(__phoenix__)
++
++// Phoenix-RTOS has no getrandom/arc4random, and /dev/urandom is not opened from here: this runs
++// inside mimalloc's first allocation and libphoenix's open() may allocate. mimalloc then seeds
++// from its weak (time and address) source; the seed only randomizes, it secures nothing here.
++bool _mi_prim_random_buf(void* buf, size_t buf_len) {
++  MI_UNUSED(buf); MI_UNUSED(buf_len);
++  return false;
++}
++
+ #else
+ 
+ bool _mi_prim_random_buf(void* buf, size_t buf_len) {

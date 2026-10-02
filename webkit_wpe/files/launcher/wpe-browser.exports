@@ -1,0 +1,25 @@
+/*
+ * The symbols wpe-browser exports to the shared objects it dlopen()s (ld --dynamic-list).
+ *
+ * wpe-browser is a static program. Linked with --no-dynamic-linker and this list, it gets a
+ * dynamic symbol table that holds exactly these symbols: libphoenix's dlopen() binds a loaded
+ * object's undefined symbols to it, it is part of the loaded image (it survives strip), and ld
+ * keeps every listed symbol under --gc-sections. launcher/CMakeLists.txt also passes
+ * --require-defined for each one, so a symbol WebKit renames or drops fails the link.
+ *
+ * Keep it the union of what the loaded objects import; build-wpe.sh checks that it covers them.
+ */
+{
+	/* libWPEInjectedBundle.so (WebKitInjectedBundleMain.cpp) */
+	abort;
+	/* WebKit::WebProcessExtensionManager::singleton() */
+	_ZN6WebKit26WebProcessExtensionManager9singletonEv;
+	/* WebKit::WebProcessExtensionManager::initialize(WebKit::InjectedBundle*, API::Object*) */
+	_ZN6WebKit26WebProcessExtensionManager10initializeEPNS_14InjectedBundleEPN3API6ObjectE;
+
+	/* checks/phx-probe-extension.so, the web process extension of the Pi check */
+	g_printerr;
+	g_signal_connect_data;
+	g_variant_get_string;
+	webkit_web_page_get_id;
+};

@@ -1,0 +1,117 @@
+Subject: JSC: Phoenix: Structure heap size, no concurrent GC by default, LLInt ELF glue
+
+Anonymous mmap is populated at once on Phoenix (vm/map.c), so the Structure heap 'reservation' is
+resident: 32 MiB instead of 4 GiB. Concurrent GC defaults off (no ucontext in signal handlers yet,
+track B4; JSC_useConcurrentGC=true re-enables it). The asm LLInt uses the ELF GOT globaladdr form and
+opcode debug labels as on Linux. No mincore() (all pages resident, as QNX) and no
+dl_iterate_phdr() (bytecode-cache version falls back). ARM64Assembler::cacheFlush gets a Phoenix
+case (unused with ENABLE_JIT=OFF; see the UCI note for a future JIT).
+
+diff --git a/Source/JavaScriptCore/assembler/ARM64Assembler.h b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+index 6cf574e1..081edf7d 100644
+--- a/Source/JavaScriptCore/assembler/ARM64Assembler.h
++++ b/Source/JavaScriptCore/assembler/ARM64Assembler.h
+@@ -4043,6 +4043,11 @@ public:
+         linuxPageFlush(current, end);
+ #elif OS(WINDOWS)
+         FlushInstructionCache(GetCurrentProcess(), code, size);
++#elif OS(PHOENIX)
++        // Built with ENABLE_JIT=OFF, so no code is ever written. For a JIT (browser B9) note that
++        // the Phoenix kernel runs EL0 with SCTLR_EL1.UCI=0 (hal/aarch64/_init.S), so the DC CVAU /
++        // IC IVAU that __builtin___clear_cache emits trap; it needs UCI=1 or a kernel cache call.
++        __builtin___clear_cache(static_cast<char*>(code), static_cast<char*>(code) + size);
+ #else
+ #error "The cacheFlush support is missing on this platform."
+ #endif
+diff --git a/Source/JavaScriptCore/heap/BlockDirectory.cpp b/Source/JavaScriptCore/heap/BlockDirectory.cpp
+index c069adcb..e594ecad 100644
+--- a/Source/JavaScriptCore/heap/BlockDirectory.cpp
++++ b/Source/JavaScriptCore/heap/BlockDirectory.cpp
+@@ -68,8 +68,9 @@ void BlockDirectory::updatePercentageOfPagedOutPages(SimpleStats& stats)
+ {
+     // FIXME: We should figure out a solution for Windows and PlayStation.
+     // QNX doesn't have mincore(), though the information can be had. But since all mapped
+-    // pages are resident, does it matter?
+-#if OS(UNIX) && !PLATFORM(PLAYSTATION) && !OS(QNX) && !OS(HAIKU)
++    // pages are resident, does it matter? Neither does Phoenix-RTOS (no swap; anonymous memory
++    // is resident from mmap).
++#if OS(UNIX) && !PLATFORM(PLAYSTATION) && !OS(QNX) && !OS(HAIKU) && !OS(PHOENIX)
+     size_t pageSize = WTF::pageSize();
+     ASSERT(!(MarkedBlock::blockSize % pageSize));
+     auto numberOfPagesInMarkedBlock = MarkedBlock::blockSize / pageSize;
+diff --git a/Source/JavaScriptCore/heap/StructureAlignedMemoryAllocator.cpp b/Source/JavaScriptCore/heap/StructureAlignedMemoryAllocator.cpp
+index 1494c4a2..ac0de46d 100644
+--- a/Source/JavaScriptCore/heap/StructureAlignedMemoryAllocator.cpp
++++ b/Source/JavaScriptCore/heap/StructureAlignedMemoryAllocator.cpp
+@@ -263,6 +263,12 @@ size_t StructureMemoryManager::computePreferredStructureHeapReservationSize()
+         size_t baseSize { 0 };
+ #if PLATFORM(PLAYSTATION) || OS(QNX)
+         baseSize = 128 * MB;
++#elif OS(PHOENIX)
++        // Phoenix maps anonymous memory eagerly (vm/map.c _vm_mmap), so this "reservation" is
++        // resident from the start and the aligned reservation briefly maps twice its size. Keep it
++        // small, but at least 64 MiB: mimalloc's arena (mi_manage_os_memory_ex) only uses whole
++        // 32 MiB chunks, and 32 MiB minus the first block leaves none (RELEASE_ASSERT at startup).
++        baseSize = 64 * MB;
+ #elif (PLATFORM(IOS_FAMILY) && !CPU(ARM64E)) || PLATFORM(WATCHOS) || PLATFORM(APPLETV)
+         baseSize = 512 * MB;
+ #elif PLATFORM(IOS_FAMILY)
+diff --git a/Source/JavaScriptCore/llint/LowLevelInterpreter.cpp b/Source/JavaScriptCore/llint/LowLevelInterpreter.cpp
+index dd0b44de..d80d3907 100644
+--- a/Source/JavaScriptCore/llint/LowLevelInterpreter.cpp
++++ b/Source/JavaScriptCore/llint/LowLevelInterpreter.cpp
+@@ -637,7 +637,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+     LOCAL_LABEL_STRING(label) ":\n" \
+     OFFLINE_ASM_ALT_GLOBAL_LABEL(label)
+ 
+-#if OS(LINUX)
++#if OS(LINUX) || OS(PHOENIX)
+ #define OFFLINE_ASM_OPCODE_DEBUG_LABEL(label)  #label ":\n"
+ #else
+ #define OFFLINE_ASM_OPCODE_DEBUG_LABEL(label)
+diff --git a/Source/JavaScriptCore/offlineasm/arm64.rb b/Source/JavaScriptCore/offlineasm/arm64.rb
+index e792bb0d..70113c95 100644
+--- a/Source/JavaScriptCore/offlineasm/arm64.rb
++++ b/Source/JavaScriptCore/offlineasm/arm64.rb
+@@ -1458,8 +1458,8 @@ class Instruction
+             $asm.puts "ldr #{operands[1].arm64Operand(:quad)}, [#{operands[1].arm64Operand(:quad)}, #{operands[0].asmLabel}@GOTPAGEOFF]"
+             $asm.putStr("#endif")
+ 
+-            # On Linux, use ELF GOT relocation specifiers.
+-            $asm.putStr("#elif OS(LINUX)")
++            # On Linux (and Phoenix-RTOS, also ELF), use ELF GOT relocation specifiers.
++            $asm.putStr("#elif OS(LINUX) || OS(PHOENIX)")
+ 
+             $asm.puts "adrp #{operands[1].arm64Operand(:quad)}, :got:#{operands[0].asmLabel}"
+             $asm.putStr("#if CPU(ADDRESS32)")
+diff --git a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
+index 26e825ac..70d2f893 100644
+--- a/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
++++ b/Source/JavaScriptCore/runtime/JSCBytecodeCacheVersion.cpp
+@@ -68,7 +68,7 @@ uint32_t computeJSCBytecodeCacheVersion()
+         }
+         cacheVersion.construct(0);
+         dataLogLnIf(JSCBytecodeCacheVersionInternal::verbose, "Failed to get UUID for JavaScriptCore framework");
+-#elif OS(UNIX) && !PLATFORM(PLAYSTATION) && !OS(HAIKU) && !OS(QNX)
++#elif OS(UNIX) && !PLATFORM(PLAYSTATION) && !OS(HAIKU) && !OS(QNX) && !OS(PHOENIX)
+         auto result = ([&] -> std::optional<uint32_t> {
+             Dl_info info { };
+             if (!dladdr(jsFunctionAddr, &info))
+diff --git a/Source/JavaScriptCore/runtime/Options.cpp b/Source/JavaScriptCore/runtime/Options.cpp
+index 683bc60a..862882c5 100644
+--- a/Source/JavaScriptCore/runtime/Options.cpp
++++ b/Source/JavaScriptCore/runtime/Options.cpp
+@@ -635,6 +635,13 @@ static void overrideDefaults()
+     }
+ #endif
+ 
++#if OS(PHOENIX)
++    // Phoenix-RTOS does not deliver a ucontext to signal handlers yet (SA_SIGINFO: browser track
++    // B4), so a concurrent collector could not read a suspended mutator's registers. Collect on
++    // the mutator thread by default; JSC_useConcurrentGC=true still turns it on for testing.
++    Options::useConcurrentGC() = false;
++#endif
++
+ #if OS(LINUX) && CPU(ARM)
+     Options::maximumFunctionForCallInlineCandidateBytecodeCostForDFG() = 77;
+     Options::maximumOptimizationCandidateBytecodeCost() = 42403;

@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<!-- B6 check (keys): a target=_blank link that has the focus, so that a Return key opens a
+     "new window", which wpe-browser loads in its one view. SPDX-License-Identifier: BSD-3-Clause -->
+<html lang="en">
+<head><meta charset="utf-8"><title>B6 new window</title></head>
+<body style="font: 20px 'DejaVu Sans', sans-serif; margin: 40px">
+<p><a id="pop" href="b4.html" target="_blank">This link opens a new window (b4.html)</a></p>
+<p id="state">-</p>
+<script>
+  const a = document.getElementById('pop');
+  a.focus();
+  document.getElementById('state').textContent = document.activeElement === a ? 'link focused' : 'link NOT focused';
+  console.log('B6-NEWWIN ' + document.getElementById('state').textContent);
+</script>
+</body>
+</html>
