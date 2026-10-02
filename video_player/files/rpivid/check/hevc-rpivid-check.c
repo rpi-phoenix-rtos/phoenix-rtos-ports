@@ -24,8 +24,9 @@
  * agree (or the one pass ran), 1 on a mismatch, 2 on an error.
  *
  * Timing: ms/frame is the pass's wall time per frame; of that, check_ms/frame is this
- * tool's own work on the decoded frames (hashing them to compare the passes) and
- * decode_ms/frame the rest: demuxing and the decoder.
+ * tool's own work on the decoded frames (hashing them to compare the passes),
+ * demux_ms/frame reading the file (av_read_frame) and decode_ms/frame the rest: the
+ * decoder (avcodec_send_packet / avcodec_receive_frame).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -62,6 +63,7 @@ typedef struct {
 	struct AVMD5 *md5ctx;
 	double wall, cpu;
 	double check_s;                /* of the wall time: this tool's own per-frame work */
+	double demux_s;                /* of the wall time: reading the file (av_read_frame) */
 	int w, h;
 	enum AVPixelFormat fmt;
 } pass_t;
@@ -291,7 +293,10 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 	t0 = av_gettime_relative();
 	c0 = cpu_seconds();
 	while (!done) {
+		int64_t r0 = av_gettime_relative();
+
 		ret = av_read_frame(fc, pkt);
+		p->demux_s += (av_gettime_relative() - r0) / 1e6;
 		if (ret < 0) {
 			ret = avcodec_send_packet(cc, NULL); /* drain */
 			done = 1;
@@ -333,9 +338,10 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 		snprintf(cpu, sizeof(cpu), "n/a");
 	}
 	printf("RPIVID-CHECK pass=%s threads=%d frames=%d size=%dx%d fmt=%s wall=%.2fs ms/frame=%.2f fps=%.1f cpu=%s error_frames=%d"
-		" sei_hash_checked=%d sei_hash_bad=%d decode_ms/frame=%.2f check_ms/frame=%.2f\n", decoder, threads, p->n, p->w, p->h,
-		av_get_pix_fmt_name(p->fmt), p->wall, p->n ? p->wall * 1000.0 / p->n : 0.0, (p->wall > 0.0) ? p->n / p->wall : 0.0, cpu,
-		p->errors, crc_checked, crc_bad, p->n ? (p->wall - p->check_s) * 1000.0 / p->n : 0.0, p->n ? p->check_s * 1000.0 / p->n : 0.0);
+		" sei_hash_checked=%d sei_hash_bad=%d decode_ms/frame=%.2f demux_ms/frame=%.2f check_ms/frame=%.2f\n", decoder, threads, p->n,
+		p->w, p->h, av_get_pix_fmt_name(p->fmt), p->wall, p->n ? p->wall * 1000.0 / p->n : 0.0, (p->wall > 0.0) ? p->n / p->wall : 0.0,
+		cpu, p->errors, crc_checked, crc_bad, p->n ? (p->wall - p->check_s - p->demux_s) * 1000.0 / p->n : 0.0,
+		p->n ? p->demux_s * 1000.0 / p->n : 0.0, p->n ? p->check_s * 1000.0 / p->n : 0.0);
 
 out:
 	avcodec_free_context(&cc);
