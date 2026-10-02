@@ -28,6 +28,8 @@
 	#   patches/webkit/0017       ANGLE (WebGL) on Phoenix: platform, TLS, mutex, dlfcn, and the linked
 	#                             Mesa EGL instead of dlopen()ing libEGL.so.1 (compiled only
 	#                             with USE webgl)
+	#   patches/webkit/0018       WPEPlatform Wayland: the event source never prepares a read twice
+	#                             (a skipped check() left the UI waiting on itself)
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
 	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).
