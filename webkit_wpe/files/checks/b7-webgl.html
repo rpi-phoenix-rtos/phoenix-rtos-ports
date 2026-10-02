@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<!-- B7 WebGL check (coordination repo docs/browser/B7-gpu-webgl.md): no network, no textures, one
+     static mesh drawn with one draw call per frame, so the frame rate measures WebGL (ANGLE ->
+     GLES 3.1 on the V3D) and the compositor, not the JavaScript interpreter.
+     Every line it prints starts with "B7-WEBGL " (console.log -> the launcher's stdout):
+       B7-WEBGL context=webgl2|webgl|none renderer=<UNMASKED_RENDERER_WEBGL> version=<VERSION>
+       B7-WEBGL pixel=<r>,<g>,<b>,<a> expect=255,128,0,255 ok=1|0     (a known first frame)
+       B7-WEBGL fps=<f> frames=<n> secs=<s> t=<s>                     (every 5 s)
+       B7-WEBGL done frames=<n> secs=<s> fps=<f> min5=<f> max5=<f> triangles=<t>
+     Query: ?secs=60 (measurement length), ?tris=20000 (mesh size), ?ctx=webgl (force WebGL 1). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>B7 WebGL</title>
+<style>
+  html, body { margin: 0; background: #202020; color: #eee; font-family: "DejaVu Sans", sans-serif; }
+  #c { display: block; margin: 8px auto; width: 640px; height: 480px; }
+  #s { text-align: center; font-size: 18px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="640" height="480"></canvas>
+<p id="s">B7 WebGL: starting</p>
+<script>
+"use strict";
+const q = new URLSearchParams(location.search);
+const SECS = Number(q.get("secs") || 60);
+const TRIS = Number(q.get("tris") || 20000);
+const status = document.getElementById("s");
+function out(line) {
+  console.log("B7-WEBGL " + line);
+  status.textContent = "B7 WebGL: " + line;
+}
+
+const canvas = document.getElementById("c");
+let gl = null, kind = "none";
+if (q.get("ctx") !== "webgl") {
+  gl = canvas.getContext("webgl2", { antialias: false, preserveDrawingBuffer: false });
+  if (gl) kind = "webgl2";
+}
+if (!gl) {
+  gl = canvas.getContext("webgl", { antialias: false }) || canvas.getContext("experimental-webgl");
+  if (gl) kind = "webgl";
+}
+if (!gl) {
+  out("context=none renderer=- version=-");
+  out("done frames=0 secs=0 fps=0 min5=0 max5=0 triangles=0");
+  document.title = "B7 WebGL none";
+} else {
+  const dbg = gl.getExtension("WEBGL_debug_renderer_info");
+  const renderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  out("context=" + kind + " renderer=" + renderer + " version=" + gl.getParameter(gl.VERSION));
+
+  function shader(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+      out("shader-error " + gl.getShaderInfoLog(s).replace(/\s+/g, " "));
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER,
+    "attribute vec3 p; uniform float a; varying vec3 c;" +
+    "void main() { float s = sin(a), k = cos(a);" +
+    "  vec3 r = vec3(p.x * k - p.z * s, p.y, p.x * s + p.z * k);" +
+    "  c = 0.5 + 0.5 * normalize(p + 0.001); gl_Position = vec4(r.xy * 0.8, r.z * 0.5, 1.0); }"));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER,
+    "precision mediump float; varying vec3 c; uniform float solid;" +
+    "void main() { gl_FragColor = solid > 0.5 ? vec4(1.0, 128.0 / 255.0, 0.0, 1.0) : vec4(c, 1.0); }"));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    out("link-error " + gl.getProgramInfoLog(prog).replace(/\s+/g, " "));
+  gl.useProgram(prog);
+  const uA = gl.getUniformLocation(prog, "a"), uSolid = gl.getUniformLocation(prog, "solid");
+
+  // a sphere-ish shell of TRIS small triangles: deterministic (no Math.random)
+  const v = new Float32Array(TRIS * 9);
+  for (let i = 0; i < TRIS; i++) {
+    const t = i / TRIS, th = t * Math.PI * 64, ph = Math.acos(1 - 2 * t);
+    const x = Math.sin(ph) * Math.cos(th), y = Math.cos(ph), z = Math.sin(ph) * Math.sin(th);
+    const d = 0.03;
+    v.set([x, y, z, x + d, y, z, x, y + d, z], i * 9);
+  }
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, v, gl.STATIC_DRAW);
+  // a full-viewport triangle for the known first frame
+  const fb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, fb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1.25, -1.25, 0, 3.75, -1.25, 0, -1.25, 3.75, 0]), gl.STATIC_DRAW);
+  const aP = gl.getAttribLocation(prog, "p");
+  gl.enableVertexAttribArray(aP);
+  gl.enable(gl.DEPTH_TEST);
+
+  // the known first frame: the whole canvas orange, read back at the centre
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.bindBuffer(gl.ARRAY_BUFFER, fb);
+  gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 0, 0);
+  gl.uniform1f(uA, 0);
+  gl.uniform1f(uSolid, 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const px = new Uint8Array(4);
+  gl.readPixels(canvas.width >> 1, canvas.height >> 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const ok = px[0] === 255 && Math.abs(px[1] - 128) <= 1 && px[2] === 0 && px[3] === 255;
+  out("pixel=" + px.join(",") + " expect=255,128,0,255 ok=" + (ok ? 1 : 0));
+  gl.uniform1f(uSolid, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 0, 0);
+
+  let start = 0, last = 0, frames = 0, winFrames = 0, min5 = Infinity, max5 = 0;
+  function frame(now) {
+    if (!start) start = last = now;
+    gl.clearColor(0.1, 0.1, 0.15, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.uniform1f(uA, (now - start) / 1000);
+    gl.drawArrays(gl.TRIANGLES, 0, TRIS * 3);
+    frames++;
+    winFrames++;
+    if (now - last >= 5000) {
+      const fps = winFrames * 1000 / (now - last);
+      min5 = Math.min(min5, fps);
+      max5 = Math.max(max5, fps);
+      out("fps=" + fps.toFixed(1) + " frames=" + frames + " secs=" + ((now - start) / 1000).toFixed(1) + " t=" + (now / 1000).toFixed(1));
+      last = now;
+      winFrames = 0;
+    }
+    if (now - start < SECS * 1000) {
+      requestAnimationFrame(frame);
+      return;
+    }
+    const secs = (now - start) / 1000;
+    out("done frames=" + frames + " secs=" + secs.toFixed(1) + " fps=" + (frames / secs).toFixed(1) +
+      " min5=" + (min5 === Infinity ? 0 : min5).toFixed(1) + " max5=" + max5.toFixed(1) + " triangles=" + TRIS);
+    document.title = "B7 WebGL done " + (frames / secs).toFixed(1);
+  }
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,112 @@
+Subject: WPE on Phoenix: frames to the compositor as dma-bufs without GBM (opt-in), no cross-process fence descriptors
+
+Without GBM (USE_GBM=OFF) the UI process asks every web process for shared-memory frames only
+(WebProcessPoolGLib.cpp adds RendererBufferTransportMode::Hardware only when GBM found a DRM
+device). The web process then reads each frame back from the GPU (RenderTargetSHMImage:
+glReadPixels / SkSurface::readPixels into a ShareableBitmap), and the UI process copies it once
+more into a wl_shm pool for the compositor. Everything the hardware path needs is compiled in
+already and needs no GBM: on an EGL surfaceless display with EGL_MESA_image_dma_buf_export the
+swap chain renders into GL textures and exports each one as a dma-buf (RenderTargetTexture), the
+UI process wraps it as a WPEBufferDMABuf, and WPEPlatform's Wayland view hands it to the
+compositor with zwp_linux_dmabuf_v1 -- no EGL in the UI process.
+
+On Phoenix the browser opts in with WPE_PHOENIX_DMABUF=1 (wpe-browser --dmabuf). It stays off by
+default, and for headless displays: WPEBufferDMABuf's import_to_pixels (snapshots) needs GBM.
+
+A native fence descriptor (EGL_ANDROID_native_fence_sync, advertised by Mesa) is valid only in
+the process that made it on Phoenix: libdrm-phoenix emulates sync files per process, so it can
+neither travel with the frame nor be poll()ed in the UI process. useExplicitSync() is therefore
+false on Phoenix (WPE_PHOENIX_EXPLICIT_SYNC=1 restores WebKit's choice): the web process waits for
+each frame's fence itself, and the render server's implicit sync of shared buffers orders the
+compositor's sampling after it.
+
+Release builds have no RELEASE_LOG, so the web process states what it chose, once per swap chain
+and for the first exported buffer:
+
+  WPEB-WEBKIT swap-chain pid=<p> type=texture-dmabuf|shm display=surfaceless dmabuf-export=1 transport-hardware=1 explicit-sync=0
+  WPEB-WEBKIT dmabuf-export pid=<p> fourcc=AB24 modifier=0x0700000000000006 planes=1 stride=<s> size=<w>x<h>
+
+diff --git a/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp b/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp
+--- a/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp
++++ b/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp
+@@ -204,6 +204,16 @@
+ #if OS(ANDROID)
+         parameters.rendererBufferTransportMode.add(RendererBufferTransportMode::Hardware);
+ #endif
++#if OS(PHOENIX) && !USE(GBM)
++        // Phoenix-RTOS: without GBM the web process still renders through EGL surfaceless on the
++        // V3D render node, and its swap chain can export each render target (a GL texture) as a
++        // dma-buf (EGL_MESA_image_dma_buf_export) that goes to the compositor through
++        // zwp_linux_dmabuf_v1, instead of reading every frame back into shared memory. The
++        // browser opts in with WPE_PHOENIX_DMABUF=1 (wpe-browser --dmabuf), for a Wayland display
++        // that offers linux-dmabuf only: without GBM a dma-buf cannot be read back for a snapshot.
++        if (!g_strcmp0(g_getenv("WPE_PHOENIX_DMABUF"), "1"))
++            parameters.rendererBufferTransportMode.add(RendererBufferTransportMode::Hardware);
++#endif
+         parameters.rendererBufferTransportMode.add(RendererBufferTransportMode::SharedMemory);
+     }
+ #endif
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
+@@ -107,6 +107,16 @@
+ 
+ static bool useExplicitSync()
+ {
++#if OS(PHOENIX)
++    // Phoenix-RTOS: a native fence descriptor (EGL_ANDROID_native_fence_sync) is valid only in
++    // the process that created it; it cannot go to the UI process with the frame, nor be
++    // poll()ed there. Without it every frame waits for its fence here (clientWait), and the
++    // compositor's own GPU work is ordered after ours by the render server's implicit sync of
++    // shared buffers. WPE_PHOENIX_EXPLICIT_SYNC=1 restores WebKit's choice.
++    const char* explicitSync = getenv("WPE_PHOENIX_EXPLICIT_SYNC");
++    if (!explicitSync || strcmp(explicitSync, "1"))
++        return false;
++#endif
+     auto& display = PlatformDisplay::sharedDisplay();
+     auto& extensions = display.eglExtensions();
+     return extensions.ANDROID_native_fence_sync && (display.eglCheckVersion(1, 5) || extensions.KHR_fence_sync);
+@@ -486,6 +496,18 @@
+ 
+     display.destroyEGLImage(image);
+ 
++#if OS(PHOENIX)
++    // what a run is graded by (Release builds have no RELEASE_LOG): the frames really leave this
++    // process as dma-bufs, in this layout (V3D renders UIF-tiled, 0x0700000000000006)
++    static bool loggedExport;
++    if (!loggedExport) {
++        loggedExport = true;
++        WTFLogAlways("WPEB-WEBKIT dmabuf-export pid=%d fourcc=%c%c%c%c modifier=0x%016" PRIx64 " planes=%d stride=%d size=%dx%d", getpid(),
++            fourcc & 0xff, (fourcc >> 8) & 0xff, (fourcc >> 16) & 0xff, (fourcc >> 24) & 0xff, modifier, planeCount,
++            planeCount ? stridesOut[0] : 0, size.width(), size.height());
++    }
++#endif
++
+     Vector<UnixFileDescriptor> fds = fdsOut.map([](int fd) {
+         return UnixFileDescriptor(fd, UnixFileDescriptor::Adopt);
+     });
+@@ -593,6 +615,9 @@
+ #if PLATFORM(GTK) || ENABLE(WPE_PLATFORM)
+     if (!m_surface->hardwareAccelerationEnabled()) {
+         m_type = Type::SharedMemory;
++#if OS(PHOENIX)
++        WTFLogAlways("WPEB-WEBKIT swap-chain pid=%d type=shm display=none hardware-acceleration=0", getpid());
++#endif
+         return;
+     }
+ #endif
+@@ -644,6 +669,14 @@
+ #endif // PLATFORM(GTK)
+ 
+     }
++#if OS(PHOENIX)
++    // which frame transport the web process took, and why (see WebProcessPoolGLib.cpp)
++    WTFLogAlways("WPEB-WEBKIT swap-chain pid=%d type=%s display=%s dmabuf-export=%d transport-hardware=%d explicit-sync=%d", getpid(),
++        m_type == Type::Texture ? "texture-dmabuf" : m_type == Type::SharedMemory ? "shm" : "other",
++        display.type() == PlatformDisplay::Type::Surfaceless ? "surfaceless" : "other",
++        !!display.eglExtensions().MESA_image_dma_buf_export,
++        WebProcess::singleton().rendererBufferTransportMode().contains(RendererBufferTransportMode::Hardware), useExplicitSync());
++#endif
+ }
+ 
+ #if (PLATFORM(GTK) || ENABLE(WPE_PLATFORM)) && (USE(GBM) || OS(ANDROID))

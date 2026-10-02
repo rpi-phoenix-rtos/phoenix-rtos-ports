@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<!-- B7 compositing/raster check (coordination repo docs/browser/B7-gpu-webgl.md): no network, no
+     WebGL. Two workloads, both driven by CSS animations (no per-frame JavaScript except a
+     requestAnimationFrame counter), so the frame rate measures painting, compositing and frame
+     transport (SHM readback vs dma-buf), not the JavaScript interpreter:
+       layers   16 composited layers (will-change: transform) rotating: TextureMapper work only
+       repaint  a 960x320 block of text and gradients moving by `left`: layout + raster every frame
+     Lines (console.log -> the launcher's stdout), every 5 s and once at the end:
+       B7-ANIM mode=<m> fps=<f> frames=<n> secs=<s>
+       B7-ANIM done mode=<m> frames=<n> secs=<s> fps=<f> min5=<f> max5=<f>
+     Query: ?mode=layers|repaint|both (default both), ?secs=60. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>B7 animation</title>
+<style>
+  html, body { margin: 0; background: #fff; font-family: "DejaVu Sans", sans-serif; overflow: hidden; }
+  #layers { position: relative; height: 300px; }
+  .l { position: absolute; width: 100px; height: 100px; border-radius: 14px; will-change: transform;
+       animation: spin 2s linear infinite; opacity: 0.85; }
+  @keyframes spin { from { transform: rotate(0deg) scale(1); } 50% { transform: rotate(180deg) scale(1.3); } to { transform: rotate(360deg) scale(1); } }
+  #repaint { position: relative; height: 340px; }
+  #block { position: absolute; top: 10px; width: 960px; height: 320px; animation: slide 3s ease-in-out infinite alternate;
+           background: linear-gradient(135deg, #fde 0%, #9cf 50%, #fd8 100%); border: 2px solid #345; }
+  #block p { margin: 10px 14px; font-size: 17px; line-height: 23px; color: #123; }
+  @keyframes slide { from { left: 0; } to { left: 300px; } }
+  #s { position: fixed; bottom: 6px; left: 8px; font-size: 16px; }
+</style>
+</head>
+<body>
+<div id="layers"></div>
+<div id="repaint"><div id="block"></div></div>
+<p id="s">B7 animation: starting</p>
+<script>
+"use strict";
+const q = new URLSearchParams(location.search);
+const MODE = q.get("mode") || "both";
+const SECS = Number(q.get("secs") || 60);
+const status = document.getElementById("s");
+function out(line) {
+  console.log("B7-ANIM " + line);
+  status.textContent = "B7 animation: " + line;
+}
+if (MODE === "layers" || MODE === "both") {
+  const box = document.getElementById("layers");
+  for (let i = 0; i < 16; i++) {
+    const d = document.createElement("div");
+    d.className = "l";
+    d.style.left = (20 + (i % 8) * 150) + "px";
+    d.style.top = (30 + Math.floor(i / 8) * 140) + "px";
+    d.style.background = "hsl(" + (i * 22) + ", 70%, 50%)";
+    d.style.animationDelay = (-i * 0.12) + "s";
+    box.appendChild(d);
+  }
+} else
+  document.getElementById("layers").style.display = "none";
+if (MODE === "repaint" || MODE === "both") {
+  const words = "Phoenix-RTOS WPE WebKit V3D GLES compositing raster Skia TextureMapper dma-buf ".repeat(10);
+  let html = "";
+  for (let i = 0; i < 12; i++) html += "<p>" + i + ": " + words.slice(i * 7, i * 7 + 110) + "</p>";
+  document.getElementById("block").innerHTML = html;
+} else
+  document.getElementById("repaint").style.display = "none";
+
+let start = 0, last = 0, frames = 0, win = 0, min5 = Infinity, max5 = 0;
+function frame(now) {
+  if (!start) start = last = now;
+  frames++;
+  win++;
+  if (now - last >= 5000) {
+    const fps = win * 1000 / (now - last);
+    min5 = Math.min(min5, fps);
+    max5 = Math.max(max5, fps);
+    out("mode=" + MODE + " fps=" + fps.toFixed(1) + " frames=" + frames + " secs=" + ((now - start) / 1000).toFixed(1));
+    last = now;
+    win = 0;
+  }
+  if (now - start < SECS * 1000) {
+    requestAnimationFrame(frame);
+    return;
+  }
+  const secs = (now - start) / 1000;
+  out("done mode=" + MODE + " frames=" + frames + " secs=" + secs.toFixed(1) + " fps=" + (frames / secs).toFixed(1) +
+    " min5=" + (min5 === Infinity ? 0 : min5).toFixed(1) + " max5=" + max5.toFixed(1));
+  document.title = "B7 animation done " + (frames / secs).toFixed(1);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
