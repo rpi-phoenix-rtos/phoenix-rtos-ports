@@ -21,7 +21,10 @@
  *     --ephemeral           keep nothing on disk (the default with --headless)
  *     --data-dir=DIR        cookies, local storage, HSTS (default $HOME/.local/share/wpe-browser)
  *     --cache-dir=DIR       the HTTP disk cache (default $HOME/.cache/wpe-browser)
- *     --no-chrome           no toolbar overlay (the default with --headless)
+ *     --toolbar=MODE        always (default): the toolbar stays at the top and the page is laid
+ *                           out below it; auto: it shows with Ctrl+L or the pointer at the top
+ *                           edge; never: no toolbar (WPE_BROWSER_TOOLBAR; headless: never)
+ *     --no-chrome           the same as --toolbar=never
  *     --search=PREFIX       where plain words go (default DuckDuckGo's HTML search)
  *   The process model (WebKit patch 0015; also from the environment). WebKit's own defaults are a
  *   desktop's: on a 4 GB Pi ~15 cached web processes and a prewarmed spare one.
@@ -45,9 +48,10 @@
  *                           <seconds>:type:<text>, fed through the same path as real keys
  *
  * The chrome (window mode) is an overlay the program injects into every top-level page, in its
- * own script world "wpe-browser": a toolbar (back, forward, reload/stop, home, the address) that
- * appears with Ctrl+L or when the pointer touches the top edge, and a progress line while a page
- * loads. The address is edited here, in the UI process; the overlay only displays it, so a page
+ * own script world "wpe-browser": a toolbar (back, forward, reload/stop, home, the address) and a
+ * progress line while a page loads. With --toolbar=always (the default) the toolbar is always
+ * shown and a user style sheet lays the page out below it; with --toolbar=auto it appears with
+ * Ctrl+L or when the pointer touches the top edge, over the page. The address is edited here, in the UI process; the overlay only displays it, so a page
  * never sees those keystrokes.
  *   Keys: Ctrl+L / Alt+D / F6 the address (Enter go, Escape cancel; plain words are a search),
  *   Alt+Left / Alt+Right back / forward, Ctrl+R / F5 reload, Ctrl+Shift+R reload without the
@@ -473,6 +477,7 @@ static gboolean optEphemeral;
 static char* optDataDir;
 static char* optCacheDir;
 static gboolean optNoChrome;
+static char* optToolbar;
 static char* optSearch;
 static char* optCycle;
 static int optCycleSecs;
@@ -497,7 +502,8 @@ static const GOptionEntry optionEntries[] = {
     { "ephemeral", 0, 0, G_OPTION_ARG_NONE, &optEphemeral, "Keep no cookies, cache or site data on disk", nullptr },
     { "data-dir", 0, 0, G_OPTION_ARG_FILENAME, &optDataDir, "Cookies and site data (default $HOME/.local/share/wpe-browser)", "DIR" },
     { "cache-dir", 0, 0, G_OPTION_ARG_FILENAME, &optCacheDir, "HTTP disk cache (default $HOME/.cache/wpe-browser)", "DIR" },
-    { "no-chrome", 0, 0, G_OPTION_ARG_NONE, &optNoChrome, "No toolbar overlay", nullptr },
+    { "toolbar", 0, 0, G_OPTION_ARG_STRING, &optToolbar, "always (default): pinned at the top; auto: on demand; never", "MODE" },
+    { "no-chrome", 0, 0, G_OPTION_ARG_NONE, &optNoChrome, "No toolbar (--toolbar=never)", nullptr },
     { "search", 0, 0, G_OPTION_ARG_STRING, &optSearch, "Search URL prefix for plain words", "PREFIX" },
     { "cycle", 0, 0, G_OPTION_ARG_STRING, &optCycle, "Pages to cycle through (comma list or file)", "LIST" },
     { "cycle-secs", 0, 0, G_OPTION_ARG_INT, &optCycleSecs, "Seconds per cycled page (default 60)", "S" },
@@ -525,6 +531,8 @@ static void optionsFromEnvironment()
         optAuto = g_strdup(g_getenv("WPE_BROWSER_AUTO"));
     if (optCycleSecs <= 0)
         optCycleSecs = 60;
+    if (!optToolbar && g_getenv("WPE_BROWSER_TOOLBAR"))
+        optToolbar = g_strdup(g_getenv("WPE_BROWSER_TOOLBAR"));
     auto number = [](const char* name, int fallback) {
         const char* value = g_getenv(name);
         return value && *value ? atoi(value) : fallback;
@@ -749,10 +757,11 @@ static const char chromeScript[] = R"JS((() => {
         .sel { background: #3584e4; color: #fff; }
         .progress { position: fixed; top: 0; left: 0; height: 3px; width: 0; display: none;
                     background: #3584e4; pointer-events: none; }
-        .progress.shown { display: block; }`;
+        .progress.shown { display: block; }
+        .progress.pinned { top: 31px; }`;
     let host = null, ui = null, hover = false;
     let state = { editing: false, before: '', after: '', sel: false, uri: '', loading: false,
-                  progress: 0, back: false, fwd: false };
+                  progress: 0, back: false, fwd: false, pinned: false };
     const post = (message) => {
         try { window.webkit.messageHandlers.chrome.postMessage(message); } catch (e) { }
     };
@@ -800,8 +809,9 @@ static const char chromeScript[] = R"JS((() => {
     const render = () => {
         if ((!host || !host.isConnected) && !build())
             return;
-        ui.bar.classList.toggle('shown', state.editing || hover);
+        ui.bar.classList.toggle('shown', state.pinned || state.editing || hover);
         ui.progress.classList.toggle('shown', state.loading);
+        ui.progress.classList.toggle('pinned', state.pinned);
         ui.progress.style.width = Math.round(Math.max(0.05, state.progress) * 100) + '%';
         ui.back.disabled = !state.back;
         ui.forward.disabled = !state.fwd;
@@ -830,6 +840,7 @@ static const char chromeScript[] = R"JS((() => {
 
 struct ChromeState {
     bool enabled { false };
+    bool pinned { false }; /* --toolbar=always */
     bool editing { false };
     bool selectAll { false };
     std::u32string text;
@@ -871,6 +882,7 @@ static void pushChrome()
     appendJSONString(js, "before", utf8(chrome.text, 0, chrome.caret).c_str());
     appendJSONString(js, "after", utf8(chrome.text, chrome.caret, chrome.text.size()).c_str());
     appendJSONString(js, "uri", webkit_web_view_get_uri(webView));
+    g_string_append_printf(js, "\"pinned\":%s,", chrome.pinned ? "true" : "false");
     g_string_append_printf(js, "\"editing\":%s,\"sel\":%s,\"loading\":%s,\"progress\":%.2f,\"back\":%s,\"fwd\":%s})",
         chrome.editing ? "true" : "false", chrome.selectAll ? "true" : "false",
         webkit_web_view_is_loading(webView) ? "true" : "false", webkit_web_view_get_estimated_load_progress(webView),
@@ -1646,7 +1658,25 @@ static int uiMain(int argc, char** argv)
 
     /* the chrome overlay, in its own script world (window mode) */
     WebKitUserContentManager* contentManager = webkit_user_content_manager_new();
-    chrome.enabled = !optHeadless && !optNoChrome;
+    const char* toolbar = optHeadless || optNoChrome ? "never" : optToolbar ? optToolbar : "always";
+    if (strcmp(toolbar, "always") && strcmp(toolbar, "auto") && strcmp(toolbar, "never")) {
+        fprintf(stderr, "wpe-browser: --toolbar wants always, auto or never\n");
+        return 1;
+    }
+    chrome.enabled = strcmp(toolbar, "never");
+    chrome.pinned = !strcmp(toolbar, "always");
+    LOG("chrome mode=%s", toolbar);
+    if (chrome.pinned) {
+        /* The toolbar is an overlay in the page (one WPE view has no room beside the page), so
+         * the page makes room: its root box starts below the bar. A user style sheet's
+         * !important wins over the page's own. Elements the page fixes at top: 0 stay under the
+         * bar; documents the chrome script does not reach (SVG, XML, error pages) have neither. */
+        WebKitUserStyleSheet* sheet = webkit_user_style_sheet_new(
+            "html { margin-top: 34px !important; scroll-padding-top: 34px !important; }",
+            WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_STYLE_LEVEL_USER, nullptr, nullptr);
+        webkit_user_content_manager_add_style_sheet(contentManager, sheet);
+        webkit_user_style_sheet_unref(sheet);
+    }
     if (chrome.enabled) {
         WebKitUserScript* script = webkit_user_script_new_for_world(chromeScript, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
             WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, chromeWorld, nullptr, nullptr);

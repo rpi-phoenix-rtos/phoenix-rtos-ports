@@ -148,7 +148,7 @@ p_build() {
 	# what the stage must hold: the program with its export table and the B6 shell, the bundle
 	local bad=0 s
 	for s in 'WPEB t=%.0f ' 'chrome action=go source=%s' 'session persistent data=%s' 'wpeBrowserChrome' \
-		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model'; do
+		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model' 'chrome mode=%s'; do
 		grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser lacks '${s}'"; bad=1; }
 	done
 	"${TC}-readelf" -dW "${ST}/usr/lib/wpe-webkit-2.0/injected-bundle/libWPEInjectedBundle.so" | grep -q '(HASH)' ||
