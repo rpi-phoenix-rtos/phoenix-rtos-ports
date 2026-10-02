@@ -508,6 +508,9 @@ WPE_CMAKE_OPTS=(
 	-DENABLE_ENCRYPTED_MEDIA=OFF
 	-DENABLE_THUNDER=OFF
 	-DUSE_GSTREAMER=OFF
+	# its GL sharing defaults ON regardless, and with ENABLE_VIDEO it pulls GStreamer headers into
+	# WebCore's PlatformDisplay.h (build 35: UnifiedSource-UIProcess-42, GRefPtrGStreamer.h)
+	-DUSE_GSTREAMER_GL=OFF
 	-DENABLE_SPEECH_SYNTHESIS=OFF
 	# graphics: WebGL (ANGLE on GLES 3.1) only with PHX_WPE_WEBGL=1 (browser milestone B7); no
 	# WebXR, no Vulkan
