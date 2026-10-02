@@ -23,6 +23,18 @@
  *     --cache-dir=DIR       the HTTP disk cache (default $HOME/.cache/wpe-browser)
  *     --no-chrome           no toolbar overlay (the default with --headless)
  *     --search=PREFIX       where plain words go (default DuckDuckGo's HTML search)
+ *   The process model (WebKit patch 0015; also from the environment). WebKit's own defaults are a
+ *   desktop's: on a 4 GB Pi ~15 cached web processes and a prewarmed spare one.
+ *     --process-cache=N     keep the web processes of at most N recently left sites, for a quick
+ *                           return (WPE_BROWSER_PROCESS_CACHE; default 2, 0 none)
+ *     --prewarm             keep a spare web process launched ahead (WPE_BROWSER_PREWARM=1)
+ *     --no-process-swap     one web process for every site (WPE_BROWSER_PROCESS_SWAP=0); the
+ *                           default is WebKit's, a process per site, swapped on navigation
+ *     --hang-recovery=S     when a navigation's web process stays unresponsive for S s,
+ *                           terminate it and load the page again (WPE_BROWSER_HANG_SECS;
+ *                           default 30, 0 off)
+ *     --stall-secs=S        every child reports a main thread that has not run its event loop
+ *                           for S s (WPE_BROWSER_STALL_SECS; default 10, 0 off); see stallReport()
  *   Test knobs (also from the environment, for runs started where only one argument fits):
  *     --cycle=LIST          load the next page of LIST every --cycle-secs (WPE_BROWSER_CYCLE):
  *                           comma-separated entries, or the path of a file with one per line
@@ -42,6 +54,10 @@
  *   cache, Escape stop, Alt+Home the start page, F11 fullscreen, Ctrl+Q quit.
  * Every line this program prints starts with "WPEB " (UART-friendly, one event per line);
  * every chrome action prints "WPEB t=<ms> chrome action=<what> source=key|ui|auto|cycle ...".
+ * The navigation's way through the processes is logged too: "policy navigation" (the page's
+ * current web process asked whether to follow it), "page-swap page-id=" (WebKit moved the view to
+ * another web process), "web-process responsive=0|1", "load ..." and "load-failed",
+ * "web-process-terminated", "hang-recovery ...".
  *
  * Copyright 2026 Phoenix Systems
  * SPDX-License-Identifier: BSD-3-Clause
@@ -50,8 +66,10 @@
 #include "cmakeconfig.h"
 
 #include <algorithm>
+#include <atomic>
 #include <errno.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -59,6 +77,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <sys/mman.h>
+#include <sys/threads.h>
 #include <time.h>
 #include <unistd.h>
 #include <vector>
@@ -140,29 +160,282 @@ static void recordExecutablePath(const char* argv0)
 }
 
 /*
+ * The main-thread stall report (every child; WPE_BROWSER_STALL_SECS, default 10 s, 0 off).
+ *
+ * A web process whose main thread stops running its event loop stops answering the UI: no
+ * navigation reaches it any more, and WebKit only marks it unresponsive. This says where it
+ * stopped. The main loop beats once a second (a GLib timeout on the default main context, which
+ * WebKit's main RunLoop runs). When the last beat is older than the limit, the watchdog thread
+ * below reports, at once and again every 60 s while the stall lasts:
+ *
+ *   stall n=K main_ms=M ipc_in=0|1 ipc_revents=0x..
+ *       ipc_in: the socket of the UI connection holds unread input. 1 = the UI's messages wait for
+ *       a main thread that does not take them; 0 while the UI reports the process unresponsive =
+ *       the UI's sends do not arrive (the connection, not this process)
+ *   stall-thread tid=T [main] state=ready|sleep cpu_ms=C delta_ms=D wait_ms=W prio=P
+ *       every thread of the process (the kernel's threadsinfo): D is the CPU time since the
+ *       previous report, so a busy thread has D close to the time between reports, a blocked one 0
+ *   stall-sample tid=T [main] pc=.. lr=.. fp=.. sp=..   (or "none")
+ *       the registers where SIGUSR2 interrupted each thread, in reports 2-4 of a stall only (from
+ *       60 s on: a long task on a slow page must not get its system calls interrupted);
+ *       "none" = no answer in 500 ms (the signal blocked, e.g. a thread JSC holds suspended)
+ *   stall-stack tid=T ret=0x.. 0x.. ...
+ *       the main thread's return addresses from its stack: words in the program's code just
+ *       after a BL/BLR (WebKit is built without frame pointers, so no fp chain). Symbolise with
+ *       addr2line -f -C -e <port install>/bin/wpe-browser <pc> <lr> <ret...>
+ *   stall-end n=K main_ms=M   the loop ran again
+ *
+ * And when the loop runs but the connection's socket has held unread input at every check (once
+ * a second) for 3x the limit, the thread that receives it (WebKit's connection work queue) is
+ * stuck, or its poll() missed the wakeup:
+ *
+ *   ipc-stall readable_ms=R main_beat_ms=B ipc_revents=0x..   then the thread lines as above
+ *   ipc-stall-end readable_ms=R
+ *
+ * The signal and its handler cost nothing until a stall: SIGUSR2 is not used by WebKit (JSC's
+ * thread suspension is SIGUSR1), and the handler only copies registers and reads the stack.
+ */
+static constexpr unsigned orphanPollMs = 100;
+static constexpr unsigned orphanGraceMs = 1500;
+static constexpr unsigned stallRepeatMs = 60000;
+static constexpr unsigned stallFirstSampledReport = 1; /* the report 60 s into a stall */
+static constexpr unsigned stallLastSampledReport = 3;
+static constexpr unsigned maxSamples = 64;
+static constexpr unsigned maxStackReturns = 32;
+static constexpr size_t maxStackScan = 512 * 1024;
+static constexpr int defaultStallSecs = 10;
+static constexpr int ipcStallFactor = 3; /* unread connection input for 3x the stall limit */
+
+static char childRole[16];
+static int mainTid;
+static uintptr_t mainStackTop; /* main()'s frame: the main thread's stack is mapped from sp up to here */
+static int ipcFd = -1; /* the UI connection (argv[2]) */
+static std::atomic<int64_t> lastBeatMs; /* nowMs() of the main loop's last beat; 0: none yet */
+
+/* the program's code: .init starts it and .fini follows .text (a static ELF, crti/crtn) */
+extern "C" void _init(void);
+extern "C" void _fini(void);
+
+struct ThreadSample {
+    std::atomic<int> tid;
+    uint64_t pc, lr, fp, sp;
+    unsigned returns;
+    uint64_t ret[maxStackReturns];
+};
+static ThreadSample samples[maxSamples];
+static std::atomic<unsigned> sampleSlots;
+
+static bool isReturnAddress(uint64_t value)
+{
+    const uint64_t codeStart = reinterpret_cast<uintptr_t>(&_init), codeEnd = reinterpret_cast<uintptr_t>(&_fini);
+    if (value < codeStart + 4 || value >= codeEnd || (value & 3))
+        return false;
+    const uint32_t insn = *reinterpret_cast<const uint32_t*>(value - 4);
+    return (insn & 0xfc000000U) == 0x94000000U /* BL */ || (insn & 0xfffffc1fU) == 0xd63f0000U /* BLR */;
+}
+
+static void sampleHandler(int, siginfo_t*, void* context)
+{
+    const unsigned slot = sampleSlots.fetch_add(1);
+    if (slot >= maxSamples)
+        return;
+    const auto& mc = static_cast<ucontext_t*>(context)->uc_mcontext;
+    ThreadSample& s = samples[slot];
+    s.pc = mc.pc;
+    s.lr = mc.regs[30];
+    s.fp = mc.regs[29];
+    s.sp = mc.sp;
+    s.returns = 0;
+    const int tid = gettid();
+    if (tid == mainTid && mainStackTop > s.sp && mainStackTop - s.sp <= maxStackScan) {
+        for (auto* p = reinterpret_cast<const uint64_t*>(s.sp & ~uint64_t(7)); reinterpret_cast<uintptr_t>(p) < mainStackTop && s.returns < maxStackReturns; ++p) {
+            if (isReturnAddress(*p))
+                s.ret[s.returns++] = *p;
+        }
+    }
+    s.tid.store(tid, std::memory_order_release);
+}
+
+static gboolean heartbeat(gpointer)
+{
+    lastBeatMs.store(static_cast<int64_t>(nowMs()));
+    return G_SOURCE_CONTINUE;
+}
+
+/* before the role's main: the beat on the main context, the sampling signal, what to report on */
+static void initStallReport(int argc, char** argv, uintptr_t stackTop)
+{
+    mainTid = gettid();
+    mainStackTop = stackTop;
+    if (argc > 2)
+        ipcFd = atoi(argv[2]);
+    /* no report before the first beat: a role's start-up runs before its loop */
+    g_timeout_add_full(G_PRIORITY_HIGH, 1000, heartbeat, nullptr, nullptr);
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = sampleHandler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGUSR2, &action, nullptr);
+}
+
+struct ThreadCPU {
+    unsigned tid;
+    long long cpuUs;
+};
+
+/* the UI connection's socket holds unread input (-1: no socket); *revents gets poll()'s answer */
+static int ipcInput(unsigned* revents)
+{
+    if (ipcFd < 0)
+        return -1;
+    struct pollfd ipc = { ipcFd, POLLIN, 0 };
+    const int polled = poll(&ipc, 1, 0);
+    *revents = polled > 0 ? static_cast<unsigned>(ipc.revents) : 0U;
+    return polled > 0 && (ipc.revents & POLLIN) ? 1 : 0;
+}
+
+/* after the caller's first line: every thread, and in the first reports their registers */
+static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
+{
+    const int pid = getpid();
+
+    /* this process's threads, from the kernel's list of all of them */
+    std::vector<threadinfo_t> info(static_cast<size_t>(std::max(threadcount(), 64) + 64));
+    int count = threadsinfo(static_cast<int>(info.size()), PH_THREADINFO_ALL, info.data());
+    count = std::min(count, static_cast<int>(info.size()));
+    std::vector<ThreadCPU> current;
+    std::vector<int> tids;
+    const int self = gettid();
+    for (int i = 0; i < count; i++) {
+        if (info[i].pid != pid)
+            continue;
+        long long previousUs = -1;
+        for (const auto& p : previous) {
+            if (p.tid == info[i].tid)
+                previousUs = p.cpuUs;
+        }
+        const long long cpuUs = static_cast<long long>(info[i].cpuTime);
+        LOG("role=%s pid=%d stall-thread tid=%u%s state=%s cpu_ms=%lld delta_ms=%lld wait_ms=%lld prio=%d", childRole, pid,
+            info[i].tid, static_cast<int>(info[i].tid) == mainTid ? " main" : static_cast<int>(info[i].tid) == self ? " watchdog" : "",
+            info[i].state ? "sleep" : "ready", cpuUs / 1000, previousUs < 0 ? -1LL : (cpuUs - previousUs) / 1000,
+            static_cast<long long>(info[i].wait) / 1000, info[i].priority);
+        current.push_back({ info[i].tid, cpuUs });
+        if (static_cast<int>(info[i].tid) != self)
+            tids.push_back(static_cast<int>(info[i].tid));
+    }
+    previous = std::move(current);
+    if (report < stallFirstSampledReport || report > stallLastSampledReport)
+        return;
+
+    /* where each thread is: SIGUSR2, then what the handlers left */
+    for (auto& s : samples)
+        s.tid.store(0);
+    sampleSlots.store(0);
+    unsigned sent = 0;
+    for (int tid : tids) {
+        if (!sys_tkill(pid, tid, SIGUSR2))
+            sent++;
+    }
+    for (unsigned waited = 0; waited < 500 && std::min(sampleSlots.load(), maxSamples) < sent; waited += 10)
+        usleep(10 * 1000);
+    usleep(10 * 1000); /* the last handler's stores */
+    for (int tid : tids) {
+        const ThreadSample* found = nullptr;
+        for (const auto& s : samples) {
+            if (s.tid.load(std::memory_order_acquire) == tid)
+                found = &s;
+        }
+        const char* mark = tid == mainTid ? " main" : "";
+        if (!found) {
+            LOG("role=%s pid=%d stall-sample tid=%d%s none", childRole, pid, tid, mark);
+            continue;
+        }
+        LOG("role=%s pid=%d stall-sample tid=%d%s pc=0x%llx lr=0x%llx fp=0x%llx sp=0x%llx", childRole, pid, tid, mark,
+            static_cast<unsigned long long>(found->pc), static_cast<unsigned long long>(found->lr),
+            static_cast<unsigned long long>(found->fp), static_cast<unsigned long long>(found->sp));
+        if (found->returns) {
+            std::string line;
+            char word[24];
+            for (unsigned i = 0; i < found->returns; i++) {
+                snprintf(word, sizeof(word), " 0x%llx", static_cast<unsigned long long>(found->ret[i]));
+                line += word;
+            }
+            LOG("role=%s pid=%d stall-stack tid=%d ret=%s", childRole, pid, tid, line.c_str() + 1);
+        }
+    }
+}
+
+/*
  * A child never outlives the UI process. WebKit's children exit when they see their IPC
  * connection to the UI close, and back that up with 10 s watchdogs (the WebProcess's ends in
  * g_error(), which on Phoenix raises SIGTRAP rather than calling abort(), as GLib finds no
  * /proc/self/status). This is the Phoenix counterpart of Linux's PR_SET_PDEATHSIG: once the UI
  * is gone (the child has been reparented) the child gets a short grace period for WebKit's own
  * orderly exit, then _exit()s - so the next browser run never meets the previous run's children.
- * The same thread logs the child's memory footprint every WPE_BROWSER_RSS_SECS seconds.
+ * The same thread logs the child's memory footprint every WPE_BROWSER_RSS_SECS seconds and makes
+ * the stall report above.
  */
-static constexpr unsigned orphanPollMs = 100;
-static constexpr unsigned orphanGraceMs = 1500;
-
-static char childRole[16];
-
 static void* parentWatchdog(void* arg)
 {
     const pid_t parent = static_cast<pid_t>(reinterpret_cast<intptr_t>(arg));
     const char* rss = getenv("WPE_BROWSER_RSS_SECS");
     const unsigned rssPolls = rss ? static_cast<unsigned>(atoi(rss)) * (1000 / orphanPollMs) : 0;
-    unsigned polls = 0;
+    const char* stall = getenv("WPE_BROWSER_STALL_SECS");
+    const double stallMs = (stall ? atoi(stall) : defaultStallSecs) * 1000.0;
+    unsigned polls = 0, stalls = 0, reports = 0;
+    double stallSince = 0, nextReport = 0, ipcSince = 0;
+    bool ipcReported = false;
+    std::vector<ThreadCPU> cpu;
     while (getppid() == parent) {
         usleep(orphanPollMs * 1000);
-        if (rssPolls && ++polls % rssPolls == 0)
+        ++polls;
+        if (rssPolls && polls % rssPolls == 0)
             logFootprint(childRole);
+        if (stallMs <= 0)
+            continue;
+        const double now = nowMs(), beat = static_cast<double>(lastBeatMs.load());
+        if (!beat)
+            continue;
+        if (!stallSince && now - beat > stallMs) {
+            stallSince = beat;
+            stalls++;
+            reports = 0;
+            nextReport = now;
+        }
+        if (stallSince && beat > stallSince) {
+            LOG("role=%s pid=%d stall-end n=%u main_ms=%.0f", childRole, static_cast<int>(getpid()), stalls, beat - stallSince);
+            stallSince = 0;
+            cpu.clear();
+        }
+        if (stallSince && now >= nextReport) {
+            unsigned revents;
+            const int input = ipcInput(&revents);
+            LOG("role=%s pid=%d stall n=%u main_ms=%.0f report=%u ipc_in=%d ipc_revents=0x%x", childRole, static_cast<int>(getpid()),
+                stalls, now - stallSince, reports, input, revents);
+            stallReport(reports++, cpu);
+            nextReport = now + stallRepeatMs;
+        }
+        /* the main loop runs, but the connection's input stays unread: its receiving thread */
+        if (stallSince || polls % (1000 / orphanPollMs))
+            continue;
+        unsigned revents;
+        if (ipcInput(&revents) == 1) {
+            if (!ipcSince)
+                ipcSince = now;
+            else if (!ipcReported && now - ipcSince > ipcStallFactor * stallMs) {
+                ipcReported = true;
+                LOG("role=%s pid=%d ipc-stall readable_ms=%.0f main_beat_ms=%.0f ipc_revents=0x%x", childRole, static_cast<int>(getpid()),
+                    now - ipcSince, now - beat, revents);
+                std::vector<ThreadCPU> none;
+                stallReport(stallFirstSampledReport, none); /* 30 s of unread input already */
+            }
+        } else {
+            if (ipcReported)
+                LOG("role=%s pid=%d ipc-stall-end readable_ms=%.0f", childRole, static_cast<int>(getpid()), now - ipcSince);
+            ipcSince = 0;
+            ipcReported = false;
+        }
     }
     usleep(orphanGraceMs * 1000);
     LOG("role=%s pid=%d orphaned (UI pid %d gone %u ms ago), exiting", childRole, static_cast<int>(getpid()),
@@ -185,6 +458,9 @@ static void startParentWatchdog()
 
 /* --- UI role: options ----------------------------------------------------------------------- */
 
+static constexpr int defaultProcessCache = 2;
+static constexpr int defaultHangSecs = 30;
+
 static gboolean optHeadless;
 static char* optSnapshot;
 static char* optSize;
@@ -202,6 +478,11 @@ static char* optCycle;
 static int optCycleSecs;
 static int optRSSSecs;
 static char* optAuto;
+static int optProcessCache = -1;
+static gboolean optPrewarm;
+static gboolean optNoProcessSwap;
+static int optHangSecs = -1;
+static int optStallSecs = -1;
 static char** optURIs;
 
 static const GOptionEntry optionEntries[] = {
@@ -222,6 +503,11 @@ static const GOptionEntry optionEntries[] = {
     { "cycle-secs", 0, 0, G_OPTION_ARG_INT, &optCycleSecs, "Seconds per cycled page (default 60)", "S" },
     { "rss-secs", 0, 0, G_OPTION_ARG_INT, &optRSSSecs, "Log every process's memory footprint every S s", "S" },
     { "auto", 0, 0, G_OPTION_ARG_STRING, &optAuto, "Synthetic key input: <s>:key:<keys>,<s>:type:<text>,...", "STEPS" },
+    { "process-cache", 0, 0, G_OPTION_ARG_INT, &optProcessCache, "Web processes of recently left sites kept (default 2)", "N" },
+    { "prewarm", 0, 0, G_OPTION_ARG_NONE, &optPrewarm, "Keep a spare web process launched ahead", nullptr },
+    { "no-process-swap", 0, 0, G_OPTION_ARG_NONE, &optNoProcessSwap, "One web process for every site", nullptr },
+    { "hang-recovery", 0, 0, G_OPTION_ARG_INT, &optHangSecs, "Restart a web process unresponsive for S s during a navigation (default 30, 0 off)", "S" },
+    { "stall-secs", 0, 0, G_OPTION_ARG_INT, &optStallSecs, "Children report a main loop stalled for S s (default 10, 0 off)", "S" },
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_STRING_ARRAY, &optURIs, nullptr, "[URL|FILE|WORDS]" },
     { }
 };
@@ -239,6 +525,51 @@ static void optionsFromEnvironment()
         optAuto = g_strdup(g_getenv("WPE_BROWSER_AUTO"));
     if (optCycleSecs <= 0)
         optCycleSecs = 60;
+    auto number = [](const char* name, int fallback) {
+        const char* value = g_getenv(name);
+        return value && *value ? atoi(value) : fallback;
+    };
+    if (optProcessCache < 0)
+        optProcessCache = std::max(number("WPE_BROWSER_PROCESS_CACHE", defaultProcessCache), 0);
+    if (!optPrewarm)
+        optPrewarm = number("WPE_BROWSER_PREWARM", 0) != 0;
+    if (!optNoProcessSwap)
+        optNoProcessSwap = !number("WPE_BROWSER_PROCESS_SWAP", 1);
+    if (optHangSecs < 0)
+        optHangSecs = std::max(number("WPE_BROWSER_HANG_SECS", defaultHangSecs), 0);
+    if (optStallSecs < 0)
+        optStallSecs = std::max(number("WPE_BROWSER_STALL_SECS", defaultStallSecs), 0);
+}
+
+/*
+ * The process model (WebKit patch 0015 reads the WPE_PHOENIX_* variables when the web context is
+ * created, so this runs before anything creates it). WebKit's defaults are a desktop's; the Pi's:
+ *   - a process per site, swapped on cross-site navigation: WebKit's model, kept. One process
+ *     for everything (--no-process-swap) saves memory but gives up the isolation between sites,
+ *     and a page that wedges or crashes its process takes every later site with it;
+ *   - the WebProcess cache: 2 instead of ~15. A cached process saves a return to a recent site
+ *     the ~1.5 s of a process launch (B6 soak: GitHub `load started` 1.4 s after the request in
+ *     a new process, 0.3 s in a cached one); two cover going back and forth, and each one more
+ *     is a whole idle WebProcess (JSC heap, fonts, GL context) for 5 minutes;
+ *   - no prewarmed spare: the B6 soak left four prewarmed processes that never got a page.
+ */
+static void applyProcessModel()
+{
+    g_autofree char* cache = g_strdup_printf("%d", optProcessCache);
+    g_autofree char* stall = g_strdup_printf("%d", optStallSecs);
+    g_setenv("WPE_PHOENIX_PROCESS_CACHE", cache, TRUE);
+    g_setenv("WPE_PHOENIX_PREWARM", optPrewarm ? "1" : "0", TRUE);
+    g_setenv("WPE_PHOENIX_PROCESS_SWAP", optNoProcessSwap ? "0" : "1", TRUE);
+    g_setenv("WPE_BROWSER_STALL_SECS", stall, TRUE); /* for the children's watchdog */
+    LOG("process-model process-swap=%d prewarm=%d process-cache=%d hang-recovery=%d stall-secs=%d", !optNoProcessSwap,
+        optPrewarm ? 1 : 0, optProcessCache, optHangSecs, optStallSecs);
+    if (const char* channels = g_getenv("WEBKIT_DEBUG")) {
+#if ENABLE_RELEASE_LOG
+        LOG("webkit-debug channels=%s", channels);
+#else
+        LOG("webkit-debug channels=%s ignored: this build has no release logging (port USE flag release_log)", channels);
+#endif
+    }
 }
 
 /* --- UI role: state ------------------------------------------------------------------------- */
@@ -257,6 +588,97 @@ static void quit(int status)
 {
     exitStatus = status;
     g_main_loop_quit(mainLoop);
+}
+
+/* --- the navigation in flight, and the hang recovery ---------------------------------------- */
+
+/*
+ * A navigation this program issues (an address, the cycle, home, back, forward, reload) is
+ * pending until it commits or fails. WebKit hands it to the page's current web process first,
+ * which asks for the policy decision ("policy navigation") before the load starts, in that
+ * process or, after a process swap, in another one. A web process whose main thread no longer
+ * runs never answers: WebKit marks it unresponsive (after 3 s) and nothing else happens, so the
+ * view would wait forever - the B6 soak's stall. With --hang-recovery=S, a navigation that has
+ * waited S s on an unresponsive process gets that process terminated and is issued again, once;
+ * a new web process serves it.
+ */
+struct PendingNavigation {
+    char* uri { nullptr }; /* what is loaded again; null: nothing pending */
+    const char* kind { "load" };
+    double since { 0 };
+    bool asked { false }; /* the policy question for it came */
+    unsigned questions { 0 }; /* policy questions logged while it is pending */
+    bool started { false };
+    bool reported { false };
+    bool retry { false }; /* this is the recovery's second attempt */
+    guint timer { 0 };
+};
+static PendingNavigation pending;
+
+static guint64 pageID()
+{
+    return webView ? webkit_web_view_get_page_id(webView) : 0;
+}
+
+static void pendingDone()
+{
+    g_clear_pointer(&pending.uri, g_free);
+}
+
+static gboolean retryNavigation(gpointer data)
+{
+    const char* uri = static_cast<const char*>(data);
+    LOG("hang-recovery load uri=%s", uri);
+    webkit_web_view_load_uri(webView, uri);
+    return G_SOURCE_REMOVE;
+}
+
+static void navigationIssued(const char* kind, const char* uri, bool retry = false);
+
+static gboolean pendingCheck(gpointer)
+{
+    if (!pending.uri) {
+        pending.timer = 0;
+        return G_SOURCE_REMOVE;
+    }
+    const double waited = nowMs() - pending.since;
+    if (!optHangSecs || waited < optHangSecs * 1000.0)
+        return G_SOURCE_CONTINUE;
+    const bool responsive = webkit_web_view_get_is_web_process_responsive(webView);
+    if (responsive) {
+        /* a slow site, a long page or a stuck provisional process: noted once, never killed */
+        if (!pending.reported)
+            LOG("navigation-wait kind=%s waited_ms=%.0f asked=%d started=%d responsive=1 page-id=%llu uri=%s", pending.kind,
+                waited, pending.asked, pending.started, static_cast<unsigned long long>(pageID()), pending.uri);
+        pending.reported = true;
+        return G_SOURCE_CONTINUE;
+    }
+    if (pending.retry) {
+        LOG("hang-recovery gave-up waited_ms=%.0f page-id=%llu uri=%s", waited, static_cast<unsigned long long>(pageID()), pending.uri);
+        pendingDone();
+        pending.timer = 0;
+        return G_SOURCE_REMOVE;
+    }
+    LOG("hang-recovery terminate-web-process kind=%s waited_ms=%.0f asked=%d started=%d page-id=%llu uri=%s", pending.kind, waited,
+        pending.asked, pending.started, static_cast<unsigned long long>(pageID()), pending.uri);
+    char* uri = g_strdup(pending.uri);
+    webkit_web_view_terminate_web_process(webView);
+    navigationIssued("retry", uri, true);
+    g_idle_add_full(G_PRIORITY_DEFAULT, retryNavigation, uri, g_free);
+    return G_SOURCE_CONTINUE;
+}
+
+static void navigationIssued(const char* kind, const char* uri, bool retry)
+{
+    g_free(pending.uri);
+    pending.uri = g_strdup(uri && *uri ? uri : "about:blank");
+    pending.kind = kind;
+    pending.since = nowMs();
+    pending.asked = pending.started = pending.reported = false;
+    pending.questions = 0;
+    pending.retry = retry;
+    if (!pending.timer)
+        pending.timer = g_timeout_add_seconds(1, pendingCheck, nullptr);
 }
 
 /* --- addresses ------------------------------------------------------------------------------ */
@@ -459,8 +881,15 @@ static void pushChrome()
 
 static void loadAddress(const char* uri)
 {
-    if (uri && *uri)
-        webkit_web_view_load_uri(webView, uri);
+    if (!uri || !*uri)
+        return;
+    navigationIssued("load", uri);
+    webkit_web_view_load_uri(webView, uri);
+}
+
+static const char* historyURI(WebKitBackForwardListItem* item)
+{
+    return item ? webkit_back_forward_list_item_get_uri(item) : nullptr;
 }
 
 static void startEditing(const char* source)
@@ -500,21 +929,28 @@ static void chromeAction(const char* action, const char* source)
     if (!strcmp(action, "back")) {
         bool ok = webkit_web_view_can_go_back(webView);
         LOG("chrome action=back source=%s ok=%d", source, ok);
-        if (ok)
+        if (ok) {
+            navigationIssued("back", historyURI(webkit_back_forward_list_get_back_item(webkit_web_view_get_back_forward_list(webView))));
             webkit_web_view_go_back(webView);
+        }
     } else if (!strcmp(action, "forward")) {
         bool ok = webkit_web_view_can_go_forward(webView);
         LOG("chrome action=forward source=%s ok=%d", source, ok);
-        if (ok)
+        if (ok) {
+            navigationIssued("forward", historyURI(webkit_back_forward_list_get_forward_item(webkit_web_view_get_back_forward_list(webView))));
             webkit_web_view_go_forward(webView);
+        }
     } else if (!strcmp(action, "reload")) {
         LOG("chrome action=reload source=%s uri=%s", source, webkit_web_view_get_uri(webView));
+        navigationIssued("reload", webkit_web_view_get_uri(webView));
         webkit_web_view_reload(webView);
     } else if (!strcmp(action, "reload-nocache")) {
         LOG("chrome action=reload-nocache source=%s uri=%s", source, webkit_web_view_get_uri(webView));
+        navigationIssued("reload", webkit_web_view_get_uri(webView));
         webkit_web_view_reload_bypass_cache(webView);
     } else if (!strcmp(action, "stop")) {
         LOG("chrome action=stop source=%s loading=%d", source, webkit_web_view_is_loading(webView));
+        pendingDone();
         webkit_web_view_stop_loading(webView);
     } else if (!strcmp(action, "home")) {
         LOG("chrome action=home source=%s uri=%s", source, homeURI);
@@ -706,6 +1142,10 @@ static const char* loadEventName(WebKitLoadEvent event)
 static void loadChanged(WebKitWebView* view, WebKitLoadEvent event, gpointer)
 {
     LOG("load %s uri=%s", loadEventName(event), webkit_web_view_get_uri(view));
+    if (event == WEBKIT_LOAD_STARTED)
+        pending.started = true;
+    else if (event == WEBKIT_LOAD_COMMITTED)
+        pendingDone();
     pushChrome();
     if (event != WEBKIT_LOAD_FINISHED || firstLoadDone)
         return;
@@ -721,7 +1161,10 @@ static void loadChanged(WebKitWebView* view, WebKitLoadEvent event, gpointer)
 
 static gboolean loadFailed(WebKitWebView*, WebKitLoadEvent, const char* uri, GError* error, gpointer)
 {
-    LOG("load-failed uri=%s error=%s", uri, error ? error->message : "?");
+    LOG("load-failed uri=%s error=%s page-id=%llu", uri, error ? error->message : "?", static_cast<unsigned long long>(pageID()));
+    /* a load cancelled by the next one (the cycle, a new address) leaves that one pending */
+    if (!g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
+        pendingDone();
     return FALSE; /* WebKit's error page */
 }
 
@@ -731,12 +1174,33 @@ static gboolean loadFailedTLS(WebKitWebView*, const char* uri, GTlsCertificate*,
     return FALSE;
 }
 
-static void webProcessTerminated(WebKitWebView*, WebKitWebProcessTerminationReason reason, gpointer)
+static void webProcessTerminated(WebKitWebView* view, WebKitWebProcessTerminationReason reason, gpointer)
 {
-    LOG("web-process-terminated reason=%s", reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed"
-        : reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "memory-limit" : "api");
+    LOG("web-process-terminated reason=%s page-id=%llu uri=%s", reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed"
+        : reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "memory-limit" : "api",
+        static_cast<unsigned long long>(pageID()), webkit_web_view_get_uri(view));
+    if (!pending.retry)
+        pendingDone(); /* the hang recovery's own termination keeps its second attempt */
     if (optSnapshot || optExitAfterLoad)
         quit(3);
+}
+
+/* WebKit moved the view to another web process: a process swap (its WebPage has a new id) */
+static guint64 lastPageID;
+static void pageIDChanged(WebKitWebView* view, GParamSpec*, gpointer)
+{
+    const guint64 id = webkit_web_view_get_page_id(view);
+    LOG("page-swap page-id=%llu from=%llu pending_ms=%.0f uri=%s", static_cast<unsigned long long>(id),
+        static_cast<unsigned long long>(lastPageID), pending.uri ? nowMs() - pending.since : -1.0, webkit_web_view_get_uri(view));
+    lastPageID = id;
+}
+
+/* WebKit's verdict on the page's web process: 0 after 3 s without the answer to a message */
+static void responsiveChanged(WebKitWebView* view, GParamSpec*, gpointer)
+{
+    LOG("web-process responsive=%d page-id=%llu loading=%d pending_ms=%.0f uri=%s", webkit_web_view_get_is_web_process_responsive(view),
+        static_cast<unsigned long long>(webkit_web_view_get_page_id(view)), webkit_web_view_is_loading(view),
+        pending.uri ? nowMs() - pending.since : -1.0, webkit_web_view_get_uri(view));
 }
 
 static void titleChanged(WebKitWebView* view, GParamSpec*, gpointer)
@@ -755,26 +1219,49 @@ static void progressChanged(WebKitWebView* view, GParamSpec*, gpointer)
     pushChrome();
 }
 
-/* There is one view: target=_blank links and window.open() load in it. */
-static gboolean decidePolicy(WebKitWebView* view, WebKitPolicyDecision* decision, WebKitPolicyDecisionType type, gpointer)
+/*
+ * There is one view: target=_blank links and window.open() load in it. The other decisions are
+ * WebKit's defaults; two of them are logged, as the steps of a navigation: the question of the
+ * page's current web process for a pending navigation ("policy navigation": the process is
+ * alive and took the request) and the main resource's response ("policy response").
+ */
+static gboolean decidePolicy(WebKitWebView*, WebKitPolicyDecision* decision, WebKitPolicyDecisionType type, gpointer)
 {
-    if (type != WEBKIT_POLICY_DECISION_TYPE_NEW_WINDOW_ACTION)
+    if (type == WEBKIT_POLICY_DECISION_TYPE_RESPONSE) {
+        auto* response = WEBKIT_RESPONSE_POLICY_DECISION(decision);
+        if (webkit_response_policy_decision_is_main_frame_main_resource(response)) {
+            WebKitURIResponse* r = webkit_response_policy_decision_get_response(response);
+            LOG("policy response status=%u mime=%s page-id=%llu uri=%s", webkit_uri_response_get_status_code(r),
+                webkit_uri_response_get_mime_type(r), static_cast<unsigned long long>(pageID()), webkit_uri_response_get_uri(r));
+        }
         return FALSE;
+    }
     WebKitNavigationAction* action = webkit_navigation_policy_decision_get_navigation_action(WEBKIT_NAVIGATION_POLICY_DECISION(decision));
     const char* uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
+    if (type == WEBKIT_POLICY_DECISION_TYPE_NAVIGATION_ACTION) {
+        /* main frames and subframes alike: the first few while a navigation waits for its start */
+        if (pending.uri && !pending.started && pending.questions < 3) {
+            pending.questions++;
+            const bool ours = !g_strcmp0(uri, pending.uri);
+            pending.asked = pending.asked || ours;
+            LOG("policy navigation wait_ms=%.0f ours=%d redirect=%d page-id=%llu uri=%s", nowMs() - pending.since, ours,
+                webkit_navigation_action_is_redirect(action), static_cast<unsigned long long>(pageID()), uri ? uri : "");
+        }
+        return FALSE;
+    }
     LOG("new-window uri=%s opened=same-view via=policy", uri ? uri : "");
     webkit_policy_decision_ignore(decision);
     if (uri && *uri && strcmp(uri, "about:blank"))
-        webkit_web_view_load_uri(view, uri);
+        loadAddress(uri);
     return TRUE;
 }
 
-static WebKitWebView* createView(WebKitWebView* view, WebKitNavigationAction* action, gpointer)
+static WebKitWebView* createView(WebKitWebView*, WebKitNavigationAction* action, gpointer)
 {
     const char* uri = webkit_uri_request_get_uri(webkit_navigation_action_get_request(action));
     LOG("new-window uri=%s opened=same-view via=create", uri ? uri : "");
     if (uri && *uri && strcmp(uri, "about:blank"))
-        webkit_web_view_load_uri(view, uri);
+        loadAddress(uri);
     return nullptr;
 }
 
@@ -938,7 +1425,10 @@ static guint cycleNextIndex;
 static gboolean cycleNext(gpointer)
 {
     const char* uri = static_cast<const char*>(g_ptr_array_index(cyclePages, cycleNextIndex % cyclePages->len));
-    LOG("cycle n=%u uri=%s", ++cycleNextIndex, uri);
+    /* the state the previous navigation left: a still pending one never committed */
+    LOG("cycle n=%u loading=%d responsive=%d page-id=%llu pending_ms=%.0f uri=%s", ++cycleNextIndex, webkit_web_view_is_loading(webView),
+        webkit_web_view_get_is_web_process_responsive(webView), static_cast<unsigned long long>(pageID()),
+        pending.uri ? nowMs() - pending.since : -1.0, uri);
     stopEditing("cycle");
     loadAddress(uri);
     return G_SOURCE_CONTINUE;
@@ -961,9 +1451,25 @@ static void loadCycle(const char* list)
     LOG("cycle pages=%u secs=%d from=%s", cyclePages->len, optCycleSecs, file ? list : "list");
 }
 
+/* the kernel's page allocator: the RAM really in use, which the per-process footprints are not
+ * (a map entry's anonymous pages count its whole amap, so entries split from one mapping count it
+ * again and again: kernel vm/map.c, meminfo) */
+static void logSystemMemory()
+{
+    meminfo_t info;
+    memset(&info, 0, sizeof(info));
+    info.page.mapsz = -1;
+    info.entry.mapsz = -1;
+    info.entry.kmapsz = -1;
+    info.maps.mapsz = -1;
+    meminfo(&info);
+    LOG("sysmem used_kb=%u free_kb=%u", info.page.alloc / 1024, info.page.free / 1024);
+}
+
 static gboolean logUIFootprint(gpointer)
 {
     logFootprint("ui");
+    logSystemMemory();
     return G_SOURCE_CONTINUE;
 }
 
@@ -1061,6 +1567,7 @@ static int uiMain(int argc, char** argv)
     }
     g_option_context_free(context);
     optionsFromEnvironment();
+    applyProcessModel();
 
     int width = 1024, height = 768;
     if (optSize && sscanf(optSize, "%dx%d", &width, &height) != 2) {
@@ -1164,6 +1671,8 @@ static int uiMain(int argc, char** argv)
     g_signal_connect(webView, "load-failed", G_CALLBACK(loadFailed), nullptr);
     g_signal_connect(webView, "load-failed-with-tls-errors", G_CALLBACK(loadFailedTLS), nullptr);
     g_signal_connect(webView, "web-process-terminated", G_CALLBACK(webProcessTerminated), nullptr);
+    g_signal_connect(webView, "notify::page-id", G_CALLBACK(pageIDChanged), nullptr);
+    g_signal_connect(webView, "notify::is-web-process-responsive", G_CALLBACK(responsiveChanged), nullptr);
     g_signal_connect(webView, "notify::title", G_CALLBACK(titleChanged), nullptr);
     g_signal_connect(webView, "notify::estimated-load-progress", G_CALLBACK(progressChanged), nullptr);
     g_signal_connect(webView, "decide-policy", G_CALLBACK(decidePolicy), nullptr);
@@ -1184,6 +1693,7 @@ static int uiMain(int argc, char** argv)
         g_timeout_add_seconds(static_cast<guint>(optCycleSecs), cycleNext, nullptr);
     if (optRSSSecs > 0) {
         logFootprint("ui");
+        logSystemMemory();
         g_timeout_add_seconds(static_cast<guint>(optRSSSecs), logUIFootprint, nullptr);
     }
     if (optAuto)
@@ -1191,7 +1701,8 @@ static int uiMain(int argc, char** argv)
     g_unix_signal_add(SIGINT, quitOnSignal, nullptr);
     g_unix_signal_add(SIGTERM, quitOnSignal, nullptr);
 
-    webkit_web_view_load_uri(webView, firstURI);
+    lastPageID = webkit_web_view_get_page_id(webView);
+    loadAddress(firstURI);
     g_main_loop_run(mainLoop);
 
     LOG("exit status=%d", exitStatus);
@@ -1220,6 +1731,7 @@ int main(int argc, char** argv)
             LOG("unknown role %s", childRole);
             return 1;
         }
+        initStallReport(argc, argv, reinterpret_cast<uintptr_t>(__builtin_frame_address(0)));
         startParentWatchdog();
         int status = !strcmp(childRole, "web") ? WebKit::WebProcessMain(argc, argv) : WebKit::NetworkProcessMain(argc, argv);
         /* how long WebKit's own exit takes after the UI connection closed is the B4 orphan

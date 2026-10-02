@@ -1,0 +1,103 @@
+Subject: WPE on Phoenix: the process model is the launcher's to choose (process swap, prewarming, WebProcess cache)
+
+WPE hardcodes process swap on cross-site navigation, and its GLib API has no knob for the
+automatic prewarming of a spare web process or for the size of the WebProcess cache. WebKit's
+defaults are a desktop's: a 4 GB Raspberry Pi 4 gets a cache of about 15 web processes (four per GB of
+RAM), each kept 5 minutes, and a prewarmed process that the B6 soak never used (four of them
+were left idle). On Phoenix the launcher (wpe-browser --process-cache=N, --prewarm,
+--no-process-swap) sets three variables before it creates the web context:
+
+  WPE_PHOENIX_PROCESS_SWAP=0      one web process for every site
+  WPE_PHOENIX_PREWARM=0|1         automatic prewarming off / on (unset: WebKit's choice, on after
+                                  the first process swap)
+  WPE_PHOENIX_PROCESS_CACHE=N     at most N cached web processes, 0 none (unset: WebKit's sizing)
+
+and WebKit prints the result once, as Release builds have no RELEASE_LOG:
+
+  WPEB-WEBKIT process-model process-swap=1 prewarm=off process-cache=2
+
+Note that webkit_web_context_set_cache_model() is no substitute: the cache model decides the
+WebProcess cache's capacity only when the process pool is created (WebProcessPool::setCacheModel
+does not update it), which happens before an application can call it.
+
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebContext.cpp
+@@ -50,6 +50,9 @@
+ #include "WebKitWebsiteDataManagerPrivate.h"
+ #include "WebKitWebsitePoliciesPrivate.h"
+ #include "WebNotificationManagerProxy.h"
++#if OS(PHOENIX)
++#include "WebProcessCache.h"
++#endif
+ #include "WebProcessMessages.h"
+ #include "WebURLSchemeHandler.h"
+ #include "WebsiteDataStore.h"
+@@ -443,6 +446,19 @@
+ #else
+     configuration->setProcessSwapsOnNavigation(true);
+ #endif
++#if OS(PHOENIX)
++    // Phoenix-RTOS: the browser picks the process model for the board (wpe-browser
++    // --no-process-swap, --prewarm). WPE_PHOENIX_PROCESS_SWAP=0 keeps every site in one web
++    // process. WPE_PHOENIX_PREWARM=0|1 turns the automatic prewarming of a spare web process
++    // off or on; unset, WebKit turns it on after the first process swap.
++    // WPE_PHOENIX_PROCESS_CACHE sizes the WebProcess cache (WebProcessCache.cpp).
++    const char* processSwap = g_getenv("WPE_PHOENIX_PROCESS_SWAP");
++    if (processSwap)
++        configuration->setProcessSwapsOnNavigation(g_strcmp0(processSwap, "0"));
++    const char* prewarm = g_getenv("WPE_PHOENIX_PREWARM");
++    if (prewarm)
++        configuration->setIsAutomaticProcessWarmingEnabled(g_strcmp0(prewarm, "0"));
++#endif
+     if (priv->memoryPressureSettings) {
+         configuration->setMemoryPressureHandlerConfiguration(webkitMemoryPressureSettingsGetMemoryPressureHandlerConfiguration(priv->memoryPressureSettings));
+         // Once the settings have been passed to the ProcessPoolConfiguration, we don't need them anymore so we can free them.
+@@ -456,6 +472,12 @@
+ #endif
+ 
+     priv->processPool = WebProcessPool::create(configuration);
++#if OS(PHOENIX)
++    // what the logs of a run can be read against (Release builds have no RELEASE_LOG)
++    WTFLogAlways("WPEB-WEBKIT process-model process-swap=%d prewarm=%s process-cache=%u",
++        configuration->processSwapsOnNavigation(), prewarm ? (g_strcmp0(prewarm, "0") ? "on" : "off") : "auto",
++        priv->processPool->webProcessCache().capacity());
++#endif
+     priv->processPool->setUserMessageHandler([webContext](UserMessage&& message, CompletionHandler<void(UserMessage&&)>&& completionHandler) {
+         // Sink the floating ref.
+         GRefPtr<WebKitUserMessage> userMessage = webkitUserMessageCreate(WTF::move(message), WTF::move(completionHandler));
+diff --git a/Source/WebKit/UIProcess/WebProcessCache.cpp b/Source/WebKit/UIProcess/WebProcessCache.cpp
+--- a/Source/WebKit/UIProcess/WebProcessCache.cpp
++++ b/Source/WebKit/UIProcess/WebProcessCache.cpp
+@@ -36,6 +36,10 @@
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if OS(PHOENIX)
++#include <cstdlib>
++#endif
++
+ #define WEBPROCESSCACHE_RELEASE_LOG(fmt, ...) RELEASE_LOG(ProcessSwapping, "%p - [PID=%d] WebProcessCache::" fmt, this, ##__VA_ARGS__)
+ #define WEBPROCESSCACHE_RELEASE_LOG_ERROR(fmt, ...) RELEASE_LOG_ERROR(ProcessSwapping, "%p - [PID=%d] WebProcessCache::" fmt, this, ##__VA_ARGS__)
+ 
+@@ -548,6 +552,20 @@
+ #if !PLATFORM(COCOA)
+ void WebProcessCache::platformInitialize()
+ {
++#if OS(PHOENIX)
++    // Phoenix-RTOS: the browser sizes the cache for the board (wpe-browser --process-cache=N):
++    // WPE_PHOENIX_PROCESS_CACHE=N keeps at most N processes, 0 none. Unset: four per GB of RAM
++    // up to 32 (about 15 on a 4 GB Raspberry Pi 4), each kept for cachedProcessLifetime.
++    if (const char* value = getenv("WPE_PHOENIX_PROCESS_CACHE")) {
++        char* end = nullptr;
++        long requested = strtol(value, &end, 10);
++        if (end != value && !*end && requested >= 0 && requested <= 32) {
++            capacityOverride = static_cast<int>(requested);
++            updateCapacity(m_processPool.get());
++        } else
++            WTFLogAlways("WPEB-WEBKIT WPE_PHOENIX_PROCESS_CACHE=%s ignored (0-32)", value);
++    }
++#endif
+ }
+ #endif
+ 

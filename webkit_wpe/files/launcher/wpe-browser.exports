@@ -18,8 +18,10 @@
 	_ZN6WebKit26WebProcessExtensionManager10initializeEPNS_14InjectedBundleEPN3API6ObjectE;
 
 	/* checks/phx-probe-extension.so, the web process extension of the Pi check */
+	getpid;
 	g_printerr;
 	g_signal_connect_data;
 	g_variant_get_string;
 	webkit_web_page_get_id;
+	webkit_web_page_get_uri;
 };

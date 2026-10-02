@@ -10,7 +10,11 @@
 #            $HOME/.cache/wpe-browser, loads Wikipedia twice in two runs, lists the files after each
 #   persist-warm  after a reboot following `persist`: one more run on what the disk kept
 #   soak     30 minutes: the five sites in turn, one per minute (--cycle), the memory footprint
-#            of every process every 5 minutes, shmsrv's stats as often
+#            of every process and the system's free RAM every 5 minutes, shmsrv's stats as often;
+#            the probe extension names the web process of every document (WPEB-EXT lines).
+#            B6_SOAK_ARGS: more browser options (the process model: --process-cache=N,
+#            --prewarm, --no-process-swap, --hang-recovery=S, --stall-secs=S);
+#            B6_WEBKIT_DEBUG: WebKit log channels (WEBKIT_DEBUG; a release_log build only)
 #   keys     the chrome driven by synthetic keys (WPE_BROWSER_AUTO): the address bar, a new
 #            window request, a search, back, forward, reload, stop, cancel, home, quit
 #   keys-hid the same path end to end: HID boot reports appended to /tmp/kbd-inject, which
@@ -163,10 +167,15 @@ inner() {
 			done
 			;;
 		soak)
-			local secs=${B6_SOAK_SECS:-1800} every=${B6_SOAK_STAT_SECS:-300} p
+			local secs=${B6_SOAK_SECS:-1800} every=${B6_SOAK_STAT_SECS:-300} p args
+			# shellcheck disable=SC2206 # options, split on spaces
+			args=(${B6_SOAK_ARGS:-})
+			[ -z "${B6_WEBKIT_DEBUG:-}" ] || export WEBKIT_DEBUG="${B6_WEBKIT_DEBUG}"
+			echo "B6 soak args=${B6_SOAK_ARGS:-none} webkit_debug=${B6_WEBKIT_DEBUG:-none}"
 			shm_stats
 			WPE_BROWSER_CYCLE=/usr/share/wpe-browser/b6-sites.txt WPE_BROWSER_CYCLE_SECS=${B6_SOAK_CYCLE_SECS:-60} \
-				WPE_BROWSER_RSS_SECS=${every} "${BROWSER}" --cpu-rendering &
+				WPE_BROWSER_RSS_SECS=${every} "${BROWSER}" --cpu-rendering \
+				--web-extensions=/usr/lib/wpe-browser/pi-extensions "${args[@]}" &
 			p=$!
 			pids=("${p}")
 			while [ "${SECONDS}" -lt "${secs}" ] && alive "${p}"; do

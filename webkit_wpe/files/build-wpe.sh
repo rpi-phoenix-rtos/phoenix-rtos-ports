@@ -26,6 +26,11 @@
 #                   Unset (the port): plain ninja -- an image build holds that lock for its
 #                   whole run (rebuild-rpi4b-fast.sh) -- with -j capped at MemAvailable / 2 GB.
 #   PHX_CCACHE      auto (default: ccache when the host has it) | 0 | 1
+#   PHX_WPE_RELEASE_LOG
+#                   1: WebKit's RELEASE_LOG to stderr (ENABLE_RELEASE_LOG), so that WEBKIT_DEBUG=
+#                   ProcessSwapping,Process,Loading,... shows the process model at work; 0 (default):
+#                   compiled out, as in every Release build. Changing it rebuilds nearly all of
+#                   WebKit (cmakeconfig.h changes), ~2 h at -j8 without ccache hits
 #
 # Usage: build-wpe.sh --out <dir> [--dl <dir>] [-j N] [--src-copy]
 #            [--stage ruby|deps|compat|extract|configure|build|plugins|all] [--mesa-variant gles|wayland] [--clean]
@@ -475,6 +480,7 @@ WPE_CMAKE_OPTS=(
 	-DUSE_LIBBACKTRACE=OFF
 	-DUSE_SYSPROF_CAPTURE=OFF
 	-DENABLE_JOURNALD_LOG=OFF
+	-DENABLE_RELEASE_LOG="$([ "${PHX_WPE_RELEASE_LOG:-0}" = 1 ] && echo ON || echo OFF)"
 	-DENABLE_BUBBLEWRAP_SANDBOX=OFF
 	-DENABLE_WEBDRIVER=OFF
 	-DENABLE_DOCUMENTATION=OFF
