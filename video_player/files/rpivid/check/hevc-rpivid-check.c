@@ -11,15 +11,22 @@
  *   -T     hardware decoder threads (default 1: one block; more only tests FFmpeg's frame threading)
  *   -l     the hevc_rpivid "rpivid" level: 1 the verified tool set, 2 all tools (default: the
  *          decoder's own, i.e. FFMPEG_RPIVID or 1)
- *   -hw    only the hardware pass; -cpu only the CPU pass (timing; nothing compared)
+ *   -hw    only the hardware pass; -cpu only the CPU pass (timing; nothing compared, so
+ *          nothing hashed unless -md5)
  *   -md5   one "MD5 <pass> <frame> <pts> <md5>" line per frame (the md5 of the frame's
  *          planes as ffmpeg -f framemd5 hashes them, so it can be checked against a host)
  *   -crc   check every frame against the stream's own picture hash SEI (x265 --hash 1),
- *          independently of the other pass; counts in the pass lines
+ *          independently of the other pass; counts in the pass lines. The decoder then
+ *          computes an MD5 of every picture itself: that is in decode_ms/frame
  *
  * Every line of ours starts with "RPIVID-CHECK"; libav* messages (the decoder's
  * "rpivid:" lines among them) are printed to stdout too. Exit status: 0 when the passes
  * agree (or the one pass ran), 1 on a mismatch, 2 on an error.
+ *
+ * Timing: ms/frame is the pass's wall time per frame; of that, check_ms/frame is this
+ * tool's own work on the decoded frames (hashing them to compare the passes),
+ * demux_ms/frame reading the file (av_read_frame) and decode_ms/frame the rest: the
+ * decoder (avcodec_send_packet / avcodec_receive_frame).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -43,6 +50,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/md5.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
 
 typedef struct {
@@ -51,7 +59,11 @@ typedef struct {
 	int64_t *pts;
 	int n, cap;
 	int errors;                    /* frames with decode_error_flags */
+	int hash;                      /* hash the frames (to compare them, or for -md5) */
+	struct AVMD5 *md5ctx;
 	double wall, cpu;
+	double check_s;                /* of the wall time: this tool's own per-frame work */
+	double demux_s;                /* of the wall time: reading the file (av_read_frame) */
 	int w, h;
 	enum AVPixelFormat fmt;
 } pass_t;
@@ -65,7 +77,8 @@ static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
 	static int print_prefix = 1;
 	char line[1024];
 
-	if (level > (crc_mode ? AV_LOG_DEBUG : AV_LOG_INFO)) {
+	/* of the debug messages only the SEI hash verdict, so the others cost no formatting */
+	if ((level > AV_LOG_INFO) && (!crc_mode || (level > AV_LOG_DEBUG) || (strstr(fmt, "Verifying checksum") == NULL))) {
 		return;
 	}
 	av_log_format_line(avcl, level, fmt, vl, line, sizeof(line), &print_prefix);
@@ -129,14 +142,41 @@ static double cpu_seconds(void)
 }
 
 
-static int add_frame(pass_t *p, const AVFrame *f)
+/* The MD5 of the frame's planes packed without padding, as av_image_copy_to_buffer(..., 1)
+ * lays them out (and ffmpeg -f framemd5 hashes them), fed to MD5 a row at a time from the
+ * frame itself: no copy of the picture, and no picture-sized allocation per frame (one
+ * that libphoenix malloc maps and unmaps, page fault by page fault, every frame) */
+static int frame_md5(struct AVMD5 *md5, uint8_t out[16], const AVFrame *f)
 {
-	int size = av_image_get_buffer_size(f->format, f->width, f->height, 1);
-	uint8_t *buf;
+	const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
+	int linesize[4], nb_planes = 0, i, j, h, shift;
 
-	if (size <= 0) {
+	if ((desc == NULL) || ((desc->flags & (AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_HWACCEL)) != 0) ||
+			(av_image_fill_linesizes(linesize, f->format, f->width) < 0)) {
 		return -1;
 	}
+	for (i = 0; i < desc->nb_components; i++) {
+		nb_planes = FFMAX(desc->comp[i].plane, nb_planes);
+	}
+	nb_planes++;
+
+	av_md5_init(md5);
+	for (i = 0; i < nb_planes; i++) {
+		shift = ((i == 1) || (i == 2)) ? desc->log2_chroma_h : 0;
+		h = (f->height + (1 << shift) - 1) >> shift;
+		for (j = 0; j < h; j++) {
+			av_md5_update(md5, f->data[i] + (ptrdiff_t)j * f->linesize[i], linesize[i]);
+		}
+	}
+	av_md5_final(md5, out);
+	return 0;
+}
+
+
+static int add_frame(pass_t *p, const AVFrame *f)
+{
+	int64_t t0 = av_gettime_relative();
+
 	if (p->n == p->cap) {
 		int ncap = p->cap ? p->cap * 2 : 1024;
 		void *a = av_realloc_array(p->md5, ncap, sizeof(*p->md5)), *b;
@@ -152,13 +192,14 @@ static int add_frame(pass_t *p, const AVFrame *f)
 		p->pts = b;
 		p->cap = ncap;
 	}
-	buf = av_malloc(size);
-	if (buf == NULL) {
-		return -1;
+	if (p->hash) {
+		if (frame_md5(p->md5ctx, p->md5[p->n], f) < 0) {
+			return -1;
+		}
 	}
-	av_image_copy_to_buffer(buf, size, (const uint8_t *const *)f->data, f->linesize, f->format, f->width, f->height, 1);
-	av_md5_sum(p->md5[p->n], buf, size);
-	av_free(buf);
+	else {
+		memset(p->md5[p->n], 0, sizeof(p->md5[p->n]));
+	}
 	p->pts[p->n] = f->pts;
 	if (f->decode_error_flags) {
 		p->errors++;
@@ -176,6 +217,7 @@ static int add_frame(pass_t *p, const AVFrame *f)
 		printf("MD5 %s %d %" PRId64 " %s\n", p->name, p->n, f->pts, hex);
 	}
 	p->n++;
+	p->check_s += (av_gettime_relative() - t0) / 1e6;
 	return 0;
 }
 
@@ -194,7 +236,10 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 	char lv[16], cpu[48];
 
 	p->name = decoder;
-	if ((pkt == NULL) || (frame == NULL)) {
+	if (p->hash) {
+		p->md5ctx = av_md5_alloc();
+	}
+	if ((pkt == NULL) || (frame == NULL) || (p->hash && (p->md5ctx == NULL))) {
 		return -1;
 	}
 	ret = avformat_open_input(&fc, file, NULL, NULL);
@@ -248,7 +293,10 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 	t0 = av_gettime_relative();
 	c0 = cpu_seconds();
 	while (!done) {
+		int64_t r0 = av_gettime_relative();
+
 		ret = av_read_frame(fc, pkt);
+		p->demux_s += (av_gettime_relative() - r0) / 1e6;
 		if (ret < 0) {
 			ret = avcodec_send_packet(cc, NULL); /* drain */
 			done = 1;
@@ -270,7 +318,7 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 				break;
 			}
 			if (add_frame(p, frame) < 0) {
-				printf("RPIVID-CHECK error: out of memory\n");
+				printf("RPIVID-CHECK error: out of memory, or a pixel format it cannot hash\n");
 				done = 1;
 			}
 			av_frame_unref(frame);
@@ -290,14 +338,17 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 		snprintf(cpu, sizeof(cpu), "n/a");
 	}
 	printf("RPIVID-CHECK pass=%s threads=%d frames=%d size=%dx%d fmt=%s wall=%.2fs ms/frame=%.2f fps=%.1f cpu=%s error_frames=%d"
-		" sei_hash_checked=%d sei_hash_bad=%d\n", decoder, threads, p->n, p->w, p->h, av_get_pix_fmt_name(p->fmt), p->wall,
-		p->n ? p->wall * 1000.0 / p->n : 0.0, (p->wall > 0.0) ? p->n / p->wall : 0.0, cpu, p->errors, crc_checked, crc_bad);
+		" sei_hash_checked=%d sei_hash_bad=%d decode_ms/frame=%.2f demux_ms/frame=%.2f check_ms/frame=%.2f\n", decoder, threads, p->n,
+		p->w, p->h, av_get_pix_fmt_name(p->fmt), p->wall, p->n ? p->wall * 1000.0 / p->n : 0.0, (p->wall > 0.0) ? p->n / p->wall : 0.0,
+		cpu, p->errors, crc_checked, crc_bad, p->n ? (p->wall - p->check_s - p->demux_s) * 1000.0 / p->n : 0.0,
+		p->n ? p->demux_s * 1000.0 / p->n : 0.0, p->n ? p->check_s * 1000.0 / p->n : 0.0);
 
 out:
 	avcodec_free_context(&cc);
 	avformat_close_input(&fc);
 	av_packet_free(&pkt);
 	av_frame_free(&frame);
+	av_freep(&p->md5ctx);
 	return ret;
 }
 
@@ -347,6 +398,8 @@ int main(int argc, char **argv)
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	crc_mode = crc;
+	/* the frames are hashed to compare the two passes, or to print the hashes */
+	hw.hash = cpu.hash = (do_hw && do_cpu) || print_md5;
 	av_log_set_callback(log_cb);
 	printf("RPIVID-CHECK file=%s max_frames=%d cpu_threads=%d level=%d\n", file, max_frames, threads, level);
 

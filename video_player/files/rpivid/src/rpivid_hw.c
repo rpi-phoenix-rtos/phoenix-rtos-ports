@@ -298,6 +298,12 @@ uint32_t rpivid_hw_clock(const rpivid_hw_t *hw)
 }
 
 
+int rpivid_hw_irq(const rpivid_hw_t *hw)
+{
+	return hw->have_irq;
+}
+
+
 int rpivid_dma_alloc(rpivid_dma_t *d, size_t size)
 {
 	size_t pg = (size_t)sysconf(_SC_PAGESIZE);
@@ -607,6 +613,13 @@ void rpivid_hw_close(rpivid_hw_t *hw)
 
 
 uint32_t rpivid_hw_clock(const rpivid_hw_t *hw)
+{
+	(void)hw;
+	return 0;
+}
+
+
+int rpivid_hw_irq(const rpivid_hw_t *hw)
 {
 	(void)hw;
 	return 0;

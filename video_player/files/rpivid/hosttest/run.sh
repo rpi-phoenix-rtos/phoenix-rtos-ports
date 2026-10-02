@@ -170,9 +170,11 @@ if [ "${loop}" = 1 ]; then
 		for t in 1 "${threads}"; do
 			MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_LOG=/dev/null \
 				"${work}/hevc-rpivid-check" -l 2 -T "${t}" "${c}" >"${work}/${b}.loop${t}.out" 2>&1 || true
-			v="$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]*' "${work}/${b}.loop${t}.out" || echo 'verdict=none')"
+			# hw_used=1: a hardware pass that fell back to the CPU (e.g. the block's lock file held
+			# by a concurrent run) would be bit-exact against the CPU pass trivially
+			v="$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]* first_bad=[0-9-]* hw_used=[0-9]' "${work}/${b}.loop${t}.out" || echo 'verdict=none')"
 			echo "LOOP      ${b} threads=${t}: ${v}"
-			case "${v}" in *BIT-EXACT*) ;; *) n_loop_bad=$((n_loop_bad + 1)) ;; esac
+			case "${v}" in *BIT-EXACT*hw_used=1) ;; *) n_loop_bad=$((n_loop_bad + 1)) ;; esac
 		done
 	done
 	echo "RESULT loop_bad=${n_loop_bad}"
