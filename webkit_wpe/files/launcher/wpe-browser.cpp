@@ -181,9 +181,10 @@ static void recordExecutablePath(const char* argv0)
  *       socket)
  *
  * Before the loop's first beat a process is starting: its main thread runs the start-up phases
- * that startupPhase() names (the UI: "start", "display", "network-session", "web-context",
- * "web-view", "first-load", "main-loop"; a child: "process-main"). A phase that lasts longer than
- * the limit is a start-up stall, the same report under another first line, and its end:
+ * that startupPhase() names (the UI: "start", "display", "network-session" -- persistent:
+ * "session-new", "network-launch", "cookie-settings" --, "web-context", "web-view", "first-load",
+ * "main-loop"; a child: "process-main"). A phase that lasts longer than the limit is a start-up
+ * stall, the same report under another first line, and its end:
  *
  *   start-stall phase=P phase_ms=M report=R
  *   start-stall-end phase=P phase_ms=M
@@ -1613,10 +1614,16 @@ static WebKitNetworkSession* createNetworkSession()
             return webkit_network_session_new_ephemeral();
         }
     }
+    /* the steps a start-up stall report tells apart: the WebsiteDataStore (it waits for its
+     * WorkQueue threads to start), the NetworkProcess launch (the cookie manager starts
+     * observing the cookie store; posix_spawn() returns once the child has exec()ed), and the
+     * cookie settings (its first messages, which wait in a queue until it has started) */
+    startupPhase("session-new");
     WebKitNetworkSession* session = webkit_network_session_new(dataDir, cacheDir);
     g_autofree char* cookies = g_build_filename(dataDir, "cookies.sqlite", nullptr);
-    /* the cookie manager starts observing the cookie store: this launches the NetworkProcess */
+    startupPhase("network-launch");
     WebKitCookieManager* cookieManager = webkit_network_session_get_cookie_manager(session);
+    startupPhase("cookie-settings");
     webkit_cookie_manager_set_persistent_storage(cookieManager, cookies, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
     webkit_cookie_manager_set_accept_policy(cookieManager, WEBKIT_COOKIE_POLICY_ACCEPT_NO_THIRD_PARTY);
     /* cache-model: set with the web context (createWebContext()) */
