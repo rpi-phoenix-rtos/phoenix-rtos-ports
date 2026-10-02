@@ -1,0 +1,102 @@
+Subject: WTF: Phoenix threads: stack bounds, 1 MiB default stacks, pointer pthread_key_t, no ucontext yet
+
+StackBounds come from pthread_getattr_np() on the calling thread (a local compat until libphoenix
+has it, track B1). The libphoenix default thread stack is 256 KiB, so WTF asks for 1 MiB as it does
+for musl. pthread_key_t is a pointer on Phoenix, so the invalid key is nullptr. There is no
+ucontext_t until SA_SIGINFO delivery lands (track B4), so PlatformRegisters is the stack pointer
+only (no HAVE(MACHINE_CONTEXT)).
+
+diff --git a/Source/WTF/wtf/PlatformRegisters.h b/Source/WTF/wtf/PlatformRegisters.h
+index 37efb86d..9af07046 100644
+--- a/Source/WTF/wtf/PlatformRegisters.h
++++ b/Source/WTF/wtf/PlatformRegisters.h
+@@ -39,6 +39,9 @@
+ typedef ucontext_t mcontext_t;
+ #elif OS(QNX)
+ #include <ucontext.h>
++#elif OS(PHOENIX)
++// No ucontext_t on Phoenix until SA_SIGINFO delivery lands (browser track B4); without
++// HAVE(MACHINE_CONTEXT) PlatformRegisters below is just the stack pointer.
+ #else
+ #include <sys/ucontext.h>
+ #endif
+diff --git a/Source/WTF/wtf/StackBounds.cpp b/Source/WTF/wtf/StackBounds.cpp
+index d928bed8..1a506c5d 100644
+--- a/Source/WTF/wtf/StackBounds.cpp
++++ b/Source/WTF/wtf/StackBounds.cpp
+@@ -29,6 +29,14 @@
+ 
+ #include <windows.h>
+ 
++#elif OS(PHOENIX)
++
++#include <pthread.h>
++
++// TODO(browser-B1): libphoenix has no pthread_getattr_np() yet; tools/browser/jsc/compat provides
++// one for the calling thread only. Drop this declaration once <pthread.h> has it.
++extern "C" int pthread_getattr_np(pthread_t, pthread_attr_t*);
++
+ #elif OS(UNIX) || OS(HAIKU)
+ 
+ #include <pthread.h>
+@@ -93,6 +101,26 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+     return StackBounds { origin, bound };
+ }
+ 
++#elif OS(PHOENIX)
++
++// Phoenix can only report the stack of the calling thread (each stack is one anonymous map
++// entry; see the compat pthread_getattr_np), hence no HAVE(STACK_BOUNDS_FOR_NEW_THREAD).
++StackBounds StackBounds::currentThreadStackBoundsInternal()
++{
++    void* bound = nullptr;
++    size_t stackSize = 0;
++    pthread_attr_t sattr;
++    int rc = pthread_getattr_np(pthread_self(), &sattr);
++    RELEASE_ASSERT(!rc, rc);
++    rc = pthread_attr_getstack(&sattr, &bound, &stackSize);
++    RELEASE_ASSERT(!rc && bound && stackSize, rc);
++    pthread_attr_destroy(&sattr);
++WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
++    void* origin = static_cast<char*>(bound) + stackSize;
++WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
++    return StackBounds { origin, bound };
++}
++
+ #elif OS(UNIX) || OS(HAIKU)
+ 
+ #if OS(OPENBSD)
+diff --git a/Source/WTF/wtf/Threading.cpp b/Source/WTF/wtf/Threading.cpp
+index 7249ada7..6058cc89 100644
+--- a/Source/WTF/wtf/Threading.cpp
++++ b/Source/WTF/wtf/Threading.cpp
+@@ -123,9 +123,10 @@ static std::optional<size_t> NODELETE stackSize(ThreadType threadType)
+ 
+ #if defined(DEFAULT_THREAD_STACK_SIZE_IN_KB) && DEFAULT_THREAD_STACK_SIZE_IN_KB > 0
+     return DEFAULT_THREAD_STACK_SIZE_IN_KB * 1024;
+-#elif OS(LINUX) && !defined(__BIONIC__) && !defined(__GLIBC__)
++#elif (OS(LINUX) && !defined(__BIONIC__) && !defined(__GLIBC__)) || OS(PHOENIX)
+     // on libcs other than glibc and bionic (e.g. musl) we are either unsure how big
+-    // the default thread stack is, or we know it's too small - pick a robust default
++    // the default thread stack is, or we know it's too small - pick a robust default.
++    // Phoenix's default is 256 KiB (libphoenix arch/aarch64/limits.h).
+     return 1 * MB;
+ #else
+     // Use the platform's default stack size
+diff --git a/Source/WTF/wtf/ThreadingPrimitives.h b/Source/WTF/wtf/ThreadingPrimitives.h
+index 5b4c0629..f99f2433 100644
+--- a/Source/WTF/wtf/ThreadingPrimitives.h
++++ b/Source/WTF/wtf/ThreadingPrimitives.h
+@@ -116,7 +116,12 @@ private:
+ 
+ #if USE(PTHREADS)
+ 
++#if OS(PHOENIX)
++// pthread_key_t is a pointer on Phoenix (libphoenix <sys/types.h>); a created key is never null.
++static constexpr ThreadSpecificKey InvalidThreadSpecificKey = nullptr;
++#else
+ static constexpr ThreadSpecificKey InvalidThreadSpecificKey = PTHREAD_KEYS_MAX;
++#endif
+ 
+ inline void threadSpecificKeyCreate(ThreadSpecificKey* key, void (*destructor)(void *))
+ {

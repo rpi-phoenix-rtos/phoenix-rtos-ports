@@ -1,0 +1,7 @@
+# The B6 sites (wpe-browser --cycle / WPE_BROWSER_CYCLE: one address per line; plain words
+# are a DuckDuckGo search). /usr/share/wpe-browser/b6.sh soak cycles through them.
+https://en.wikipedia.org/wiki/Phoenix-RTOS
+https://github.com/phoenix-rtos/phoenix-rtos-kernel
+phoenix-rtos
+https://stackoverflow.com/questions/tagged/rtos
+https://www.bbc.com/news

@@ -1,0 +1,119 @@
+Subject: WTF: add OS(PHOENIX), a UNIX with FreeBSD-like generic fallbacks
+
+Phoenix-RTOS (aarch64, static userspace) defines __phoenix__. OS(PHOENIX) joins OS(UNIX); CMake
+recognises CMAKE_SYSTEM_NAME=Phoenix (tools/browser/jsc/cmake/Platform/Phoenix.cmake). It is ELF
+(InlineASM.h symbol syntax), counts cores with sysconf(_SC_NPROCESSORS_ONLN), has execinfo
+backtrace() and __int128, and can report stack bounds for the calling thread only (so no
+HAVE(STACK_BOUNDS_FOR_NEW_THREAD), as QNX).
+
+diff --git a/Source/WTF/wtf/InlineASM.h b/Source/WTF/wtf/InlineASM.h
+index 2937c456..a325970f 100644
+--- a/Source/WTF/wtf/InlineASM.h
++++ b/Source/WTF/wtf/InlineASM.h
+@@ -70,6 +70,7 @@
+     || OS(HPUX)                \
+     || OS(NETBSD)              \
+     || OS(OPENBSD)             \
++    || OS(PHOENIX)             \
+     || OS(QNX)
+     // ELF platform
+ #define HIDE_SYMBOL(name) ".hidden " #name
+@@ -89,6 +90,7 @@
+     || OS(HAIKU)               \
+     || OS(HURD)                \
+     || OS(NETBSD)              \
++    || OS(PHOENIX)             \
+     || OS(QNX)                 \
+     || OS(WINDOWS)
+     // GNU as-compatible syntax.
+diff --git a/Source/WTF/wtf/NumberOfCores.cpp b/Source/WTF/wtf/NumberOfCores.cpp
+index 74e17da4..799d4d59 100644
+--- a/Source/WTF/wtf/NumberOfCores.cpp
++++ b/Source/WTF/wtf/NumberOfCores.cpp
+@@ -33,7 +33,7 @@
+ 
+ #if OS(DARWIN)
+ #include <sys/sysctl.h>
+-#elif OS(LINUX) || OS(AIX) || OS(OPENBSD) || OS(NETBSD) || OS(FREEBSD) || OS(HAIKU)
++#elif OS(LINUX) || OS(AIX) || OS(OPENBSD) || OS(NETBSD) || OS(FREEBSD) || OS(HAIKU) || OS(PHOENIX)
+ #include <unistd.h>
+ #elif OS(QNX)
+ #include <sys/syspage.h>
+@@ -75,7 +75,7 @@ int numberOfProcessorCores()
+     int sysctlResult = sysctl(name.data(), name.size(), &result, &length, 0, 0);
+ 
+     s_numberOfCores = sysctlResult < 0 ? defaultIfUnavailable : result;
+-#elif OS(LINUX) || OS(AIX) || OS(OPENBSD) || OS(NETBSD) || OS(FREEBSD) || OS(HAIKU)
++#elif OS(LINUX) || OS(AIX) || OS(OPENBSD) || OS(NETBSD) || OS(FREEBSD) || OS(HAIKU) || OS(PHOENIX)
+     long sysconfResult = sysconf(_SC_NPROCESSORS_ONLN);
+ 
+     s_numberOfCores = sysconfResult < 0 ? defaultIfUnavailable : static_cast<int>(sysconfResult);
+diff --git a/Source/WTF/wtf/PlatformHave.h b/Source/WTF/wtf/PlatformHave.h
+index 2776e4f9..99dc0380 100644
+--- a/Source/WTF/wtf/PlatformHave.h
++++ b/Source/WTF/wtf/PlatformHave.h
+@@ -181,7 +181,7 @@
+ #endif // OS(DARWIN)
+ 
+ /* watchOS (ARM64_32) must not use int128_t because of wrong behavior. */
+-#if (OS(DARWIN) || OS(LINUX)) && CPU(ADDRESS64)
++#if (OS(DARWIN) || OS(LINUX) || OS(PHOENIX)) && CPU(ADDRESS64)
+ #define HAVE_INT128_T 1
+ #endif
+ 
+@@ -241,7 +241,7 @@
+ #define HAVE_MACHINE_CONTEXT 1
+ #endif
+ 
+-#if OS(DARWIN) || OS(HAIKU) || ((OS(LINUX) || OS(HURD)) && defined(__GLIBC__) && !defined(__UCLIBC__) && !CPU(MIPS))
++#if OS(DARWIN) || OS(HAIKU) || OS(PHOENIX) || ((OS(LINUX) || OS(HURD)) && defined(__GLIBC__) && !defined(__UCLIBC__) && !CPU(MIPS))
+ #define HAVE_BACKTRACE 1
+ #define HAVE_BACKTRACE_SYMBOLS 1
+ #endif
+@@ -434,7 +434,7 @@
+ #define HAVE_URL_FORMATTING 1
+ #endif
+ 
+-#if !OS(WINDOWS) && !OS(QNX)
++#if !OS(WINDOWS) && !OS(QNX) && !OS(PHOENIX)
+ #define HAVE_STACK_BOUNDS_FOR_NEW_THREAD 1
+ #endif
+ 
+diff --git a/Source/WTF/wtf/PlatformOS.h b/Source/WTF/wtf/PlatformOS.h
+index e3184e90..53dc8258 100644
+--- a/Source/WTF/wtf/PlatformOS.h
++++ b/Source/WTF/wtf/PlatformOS.h
+@@ -126,6 +126,11 @@
+ #define WTF_OS_QNX 1
+ #endif
+ 
++/* OS(PHOENIX) - Phoenix-RTOS */
++#if defined(__phoenix__)
++#define WTF_OS_PHOENIX 1
++#endif
++
+ /* OS(WINDOWS) - Any version of Windows */
+ #if defined(WIN32) || defined(_WIN32)
+ #define WTF_OS_WINDOWS 1
+@@ -142,6 +147,7 @@
+     || OS(LINUX)            \
+     || OS(NETBSD)           \
+     || OS(OPENBSD)          \
++    || OS(PHOENIX)          \
+     || defined(unix)        \
+     || defined(__unix)      \
+     || defined(__unix__)
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index d96e1850..c1866d6e 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -202,6 +202,9 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+             set(WTF_OS_MACOS 1)
+         elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
+             set(WTF_OS_LINUX 1)
++        elseif (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++            set(WTF_OS_PHOENIX 1)
++            set(WTF_OS_UNIX 1)
+         else ()
+             set(WTF_OS_UNIX 1)
+         endif ()

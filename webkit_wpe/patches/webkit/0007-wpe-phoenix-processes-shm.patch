@@ -1,0 +1,226 @@
+Subject: WebKit: Phoenix multi-call processes; SharedMemory and wl_shm pools over shmsrv; shm log
+
+One static program is the UI, web and network process: findWebKitProcess() returns
+WPE_PHOENIX_EXECUTABLE (recorded by the program's main) or WPE_PHOENIX_DEFAULT_EXECUTABLE, and
+ProcessLauncherGLib passes the child's role in WPE_PHOENIX_PROCESS_ROLE (WebKit's argv is
+unchanged). WebCore::SharedMemory and WPEPlatform's wl_shm pools allocate with memfd_create()
+from the wayland_phoenix compat library (shmsrv objects: contiguous, >= 1 MiB, one descriptor
+each). WPE_PHOENIX_SHM_LOG=1 prints every allocation, mapping and pool (re)size (PHXSHM lines),
+the input for the browser plan's B6 shm decision.
+
+diff --git a/Source/WebCore/platform/unix/SharedMemoryUnix.cpp b/Source/WebCore/platform/unix/SharedMemoryUnix.cpp
+index c534f8fe..cfdcc47b 100644
+--- a/Source/WebCore/platform/unix/SharedMemoryUnix.cpp
++++ b/Source/WebCore/platform/unix/SharedMemoryUnix.cpp
+@@ -50,8 +50,43 @@
+ #include <sys/syscall.h>
+ #endif
+ 
++#if OS(PHOENIX)
++#include <atomic>
++#include <stdio.h>
++// Phoenix-RTOS has no POSIX shared memory in libphoenix: memfd_create() comes from the
++// wayland_phoenix compat library (libwlphx-compat.a), backed by the shmsrv server (/shm/<id>,
++// pages memExport()ed, so every mmap() of the descriptor in any process maps the same pages).
++extern "C" int memfd_create(const char* name, unsigned flags);
++#ifndef MFD_CLOEXEC
++#define MFD_CLOEXEC 0x0001U
++#endif
++#endif
++
+ namespace WebCore {
+ 
++#if OS(PHOENIX)
++// The shm-model decision of the browser plan (B6) needs WebKit's allocation profile: every
++// shmsrv object is contiguous and fixed-size. WPE_PHOENIX_SHM_LOG=1 prints one line per
++// allocation and per mapping of a received handle.
++static bool shmLogEnabled()
++{
++    static const bool enabled = [] {
++        const char* value = getenv("WPE_PHOENIX_SHM_LOG");
++        return value && *value && *value != '0';
++    }();
++    return enabled;
++}
++
++static void shmLog(const char* what, size_t size, int fd)
++{
++    static std::atomic<unsigned> count;
++    static std::atomic<size_t> total;
++    unsigned n = ++count;
++    size_t t = (total += size);
++    fprintf(stderr, "PHXSHM %s pid=%d fd=%d size=%zu n=%u total=%zu\n", what, static_cast<int>(getpid()), fd, size, n, t);
++}
++#endif
++
+ SharedMemoryHandle::SharedMemoryHandle(const SharedMemoryHandle& handle)
+ {
+     m_handle = handle.m_handle.duplicate();
+@@ -80,6 +115,11 @@ static UnixFileDescriptor createSharedMemory()
+ {
+     int fileDescriptor = -1;
+ 
++#if OS(PHOENIX)
++    do {
++        fileDescriptor = memfd_create("WebKitSharedMemory", MFD_CLOEXEC);
++    } while (fileDescriptor == -1 && errno == EINTR);
++#else
+ #if HAVE(LINUX_MEMFD_H)
+     static bool isMemFdAvailable = true;
+     if (isMemFdAvailable) {
+@@ -115,6 +155,7 @@ static UnixFileDescriptor createSharedMemory()
+     if (fileDescriptor != -1)
+         shm_unlink(tempName.data());
+ #endif
++#endif // OS(PHOENIX)
+ 
+     return UnixFileDescriptor { fileDescriptor, UnixFileDescriptor::Adopt };
+ }
+@@ -136,6 +177,11 @@ RefPtr<SharedMemory> SharedMemory::allocate(size_t size)
+     if (data == MAP_FAILED)
+         return nullptr;
+ 
++#if OS(PHOENIX)
++    if (shmLogEnabled())
++        shmLog("alloc", size, fileDescriptor.value());
++#endif
++
+     RefPtr<SharedMemory> instance = adoptRef(new SharedMemory());
+     instance->m_data = data;
+     instance->m_fileDescriptor = WTF::move(fileDescriptor);
+@@ -153,6 +199,11 @@ RefPtr<SharedMemory> SharedMemory::map(Handle&& handle, Protection protection, C
+     if (data == MAP_FAILED)
+         return nullptr;
+ 
++#if OS(PHOENIX)
++    if (shmLogEnabled())
++        shmLog("map", handle.size(), handle.m_handle.value());
++#endif
++
+     RefPtr<SharedMemory> instance = adoptRef(new SharedMemory());
+     instance->m_data = data;
+     instance->m_size = handle.size();
+diff --git a/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp b/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp
+index 64bcde96..a33a0ac9 100644
+--- a/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp
++++ b/Source/WebKit/Shared/glib/ProcessExecutablePathGLib.cpp
+@@ -42,6 +42,19 @@ static String getExecutablePath()
+ }
+ #endif
+ 
++#if OS(PHOENIX)
++// Phoenix-RTOS has no shared libraries: the UI, web and network processes are one static
++// multi-call program, and every child runs that same executable. Its main() records its own
++// absolute path in WPE_PHOENIX_EXECUTABLE (inherited by the children); ProcessLauncherGLib
++// tells the child its role in WPE_PHOENIX_PROCESS_ROLE.
++static String findWebKitProcess(const ASCIILiteral)
++{
++    const char* executable = g_getenv("WPE_PHOENIX_EXECUTABLE");
++    if (executable && *executable)
++        return FileSystem::stringFromFileSystemRepresentation(executable);
++    return FileSystem::stringFromFileSystemRepresentation(WPE_PHOENIX_DEFAULT_EXECUTABLE);
++}
++#else
+ static String findWebKitProcess(const ASCIILiteral processName)
+ {
+ #if ENABLE(DEVELOPER_MODE)
+@@ -62,6 +75,7 @@ static String findWebKitProcess(const ASCIILiteral processName)
+ 
+     return FileSystem::pathByAppendingComponent(FileSystem::stringFromFileSystemRepresentation(PKGLIBEXECDIR), processName);
+ }
++#endif // OS(PHOENIX)
+ 
+ String executablePathOfWebProcess()
+ {
+diff --git a/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp b/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
+index 63a1abdf..31ed7c95 100644
+--- a/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
++++ b/Source/WebKit/UIProcess/Launcher/glib/ProcessLauncherGLib.cpp
+@@ -231,6 +231,13 @@ void ProcessLauncher::launchProcess()
+     int webkitClientSocketValue = webkitSocketPair.client.release();
+     g_subprocess_launcher_take_fd(launcher.get(), webkitClientSocketValue, webkitClientSocketValue);
+ 
++#if OS(PHOENIX)
++    // One multi-call executable for every process (ProcessExecutablePathGLib.cpp): the child's
++    // main() dispatches on this variable.
++    g_subprocess_launcher_setenv(launcher.get(), "WPE_PHOENIX_PROCESS_ROLE",
++        m_launchOptions.processType == ProcessLauncher::ProcessType::Network ? "network" : "web", TRUE);
++#endif
++
+ #if USE(SYSPROF_CAPTURE)
+     UnixFileDescriptor sysprofFd;
+ 
+diff --git a/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSHMPool.cpp b/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSHMPool.cpp
+index ea3de8b8..769298bd 100644
+--- a/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSHMPool.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/wayland/WPEWaylandSHMPool.cpp
+@@ -40,6 +40,28 @@
+ #include <sys/syscall.h>
+ #endif
+ 
++#if OS(PHOENIX)
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++// memfd_create() over shmsrv: the wayland_phoenix compat library (see SharedMemoryUnix.cpp).
++extern "C" int memfd_create(const char* name, unsigned flags);
++#ifndef MFD_CLOEXEC
++#define MFD_CLOEXEC 0x0001U
++#endif
++
++// WPE_PHOENIX_SHM_LOG=1: one line per wl_shm pool creation and resize (browser plan B6).
++static void phoenixSHMPoolLog(const char* what, size_t size, int fd)
++{
++    static const bool enabled = [] {
++        const char* value = getenv("WPE_PHOENIX_SHM_LOG");
++        return value && *value && *value != '0';
++    }();
++    if (enabled)
++        fprintf(stderr, "PHXSHM %s pid=%d fd=%d size=%zu\n", what, static_cast<int>(getpid()), fd, size);
++}
++#endif
++
+ namespace WPE {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(WaylandSHMPool);
+@@ -48,6 +70,11 @@ static UnixFileDescriptor createSharedMemory()
+ {
+     int fileDescriptor = -1;
+ 
++#if OS(PHOENIX)
++    do {
++        fileDescriptor = memfd_create("WPEWaylandSHMPool", MFD_CLOEXEC);
++    } while (fileDescriptor == -1 && errno == EINTR);
++#else
+ #if HAVE(LINUX_MEMFD_H)
+     static bool isMemFdAvailable = true;
+     if (isMemFdAvailable) {
+@@ -83,6 +110,7 @@ static UnixFileDescriptor createSharedMemory()
+     if (fileDescriptor != -1)
+         shm_unlink(tempName.data());
+ #endif
++#endif // OS(PHOENIX)
+ 
+     return UnixFileDescriptor { fileDescriptor, UnixFileDescriptor::Adopt };
+ }
+@@ -102,6 +130,9 @@ std::unique_ptr<WaylandSHMPool> WaylandSHMPool::create(struct wl_shm* shm, size_
+     if (data == MAP_FAILED)
+         return nullptr;
+ 
++#if OS(PHOENIX)
++    phoenixSHMPoolLog("wlpool", size, fd.value());
++#endif
+     return makeUnique<WaylandSHMPool>(data, size, WTF::move(fd), shm);
+ }
+ 
+@@ -134,6 +165,10 @@ int WaylandSHMPool::allocate(size_t size)
+ 
+ bool WaylandSHMPool::resize(size_t size)
+ {
++#if OS(PHOENIX)
++    // shmsrv objects have a fixed size once mapped: a failed ftruncate() here shows in the log.
++    phoenixSHMPoolLog("wlpool-resize", size, m_fd.value());
++#endif
+     while (ftruncate(m_fd.value(), size) == -1) {
+         if (errno != EINTR)
+             return false;

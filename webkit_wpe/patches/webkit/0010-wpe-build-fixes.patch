@@ -1,0 +1,101 @@
+Subject: WPE: build fixes for ENABLE_VIDEO=OFF, USE_LIBDRM=OFF, OpenSSL 3 and a libc without MSG_CTRUNC
+
+JSHTMLMediaElementCustom.cpp is compiled with ENABLE_VIDEO=OFF and needs #if ENABLE(VIDEO).
+AcceleratedBackingStore.cpp compares against DRM_FORMAT_XRGB8888 without <drm_fourcc.h> when
+USE_LIBDRM=OFF: define the fourcc. CryptoKeyRSAOpenSSL.cpp: OpenSSL 3's EVP_PKEY_get0_RSA()
+returns const RSA*. libphoenix has no MSG_CTRUNC (its kernel never truncates control data):
+skip that check where the flag is undefined.
+
+diff --git a/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp b/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
+index 61c33bf7..4c6615a7 100644
+--- a/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
++++ b/Source/WebCore/bindings/js/JSHTMLMediaElementCustom.cpp
+@@ -24,6 +24,9 @@
+  */
+ 
+ #include "config.h"
++
++#if ENABLE(VIDEO)
++
+ #include "JSHTMLMediaElement.h"
+ 
+ #include "TrackOpaqueRoot.h"
+@@ -40,3 +43,5 @@ void JSHTMLMediaElement::visitAdditionalChildrenInGCThread(Visitor& visitor)
+ DEFINE_VISIT_ADDITIONAL_CHILDREN_IN_GC_THREAD(JSHTMLMediaElement);
+ 
+ } // namespace WebCore
++
++#endif // ENABLE(VIDEO)
+diff --git a/Source/WebCore/crypto/openssl/CryptoKeyRSAOpenSSL.cpp b/Source/WebCore/crypto/openssl/CryptoKeyRSAOpenSSL.cpp
+index cfc7adfc..78fb3699 100644
+--- a/Source/WebCore/crypto/openssl/CryptoKeyRSAOpenSSL.cpp
++++ b/Source/WebCore/crypto/openssl/CryptoKeyRSAOpenSSL.cpp
+@@ -37,7 +37,7 @@
+ 
+ namespace WebCore {
+ 
+-static size_t getRSAModulusLength(RSA* rsa)
++static size_t getRSAModulusLength(const RSA* rsa)
+ {
+     if (!rsa)
+         return 0;
+@@ -164,7 +164,7 @@ bool CryptoKeyRSA::isRestrictedToHash(CryptoAlgorithmIdentifier& identifier) con
+ 
+ size_t CryptoKeyRSA::keySizeInBits() const
+ {
+-    RSA* rsa = EVP_PKEY_get0_RSA(m_platformKey.get());
++    const RSA* rsa = EVP_PKEY_get0_RSA(m_platformKey.get());
+     if (!rsa)
+         return 0;
+ 
+@@ -297,7 +297,7 @@ ExceptionOr<Vector<uint8_t>> CryptoKeyRSA::exportPkcs8() const
+ 
+ auto CryptoKeyRSA::algorithm() const -> KeyAlgorithm
+ {
+-    RSA* rsa = EVP_PKEY_get0_RSA(platformKey());
++    const RSA* rsa = EVP_PKEY_get0_RSA(platformKey());
+ 
+     // FIXME: `CryptoRsaKeyAlgorithm` stores `modulusLength` as an `unsigned` requiring us to cast below. We should find a way to remove the need for a cast / ensure the cast is safe and doesn't overflow.
+ 
+@@ -330,7 +330,7 @@ auto CryptoKeyRSA::algorithm() const -> KeyAlgorithm
+ 
+ std::unique_ptr<CryptoKeyRSAComponents> CryptoKeyRSA::exportData() const
+ {
+-    RSA* rsa = EVP_PKEY_get0_RSA(platformKey());
++    const RSA* rsa = EVP_PKEY_get0_RSA(platformKey());
+     if (!rsa)
+         return nullptr;
+ 
+diff --git a/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp b/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
+index d5b3cce6..c7c149cf 100644
+--- a/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
++++ b/Source/WebKit/Platform/IPC/glib/ConnectionGLib.cpp
+@@ -255,10 +255,12 @@ static ssize_t readBytesFromSocket(GSocket* socket, Vector<uint8_t>& buffer, Vec
+     if (bytesRead <= 0)
+         return bytesRead;
+ 
++#if defined(MSG_CTRUNC) // not in Phoenix-RTOS's libphoenix, whose kernel never truncates control data
+     if (flags & MSG_CTRUNC) {
+         // Control data has been discarded, so consider this a read failure.
+         return -1;
+     }
++#endif
+ 
+     buffer.shrink(bytesRead);
+     for (int i = 0; i < messagesCount; ++i) {
+diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+index 22c44ab7..aa6ced85 100644
+--- a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
++++ b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+@@ -43,6 +43,11 @@
+ #include <drm_fourcc.h>
+ #endif
+ 
++#ifndef DRM_FORMAT_XRGB8888
++// USE_LIBDRM=OFF: the one fourcc this file compares against (drm_fourcc.h: fourcc_code('X', 'R', '2', '4'))
++#define DRM_FORMAT_XRGB8888 0x34325258
++#endif
++
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ #include <skia/core/SkColorSpace.h>
+ #include <skia/core/SkPixmap.h>

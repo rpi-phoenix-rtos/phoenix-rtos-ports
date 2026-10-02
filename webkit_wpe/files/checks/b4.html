@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<!-- B4 test page (tools/browser/wpe/README.md "Pi check"): deterministic layout, text in the
+     staged DejaVu fonts, CSS boxes/gradients, a 2D canvas and a JS result. No network, no
+     animation, no time-dependent content, so two renderings of it are pixel-identical. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>B4 WPE Phoenix</title>
+<style>
+  html, body { margin: 0; background: #ffffff; font-family: "DejaVu Sans", sans-serif; }
+  h1 { margin: 16px; font-size: 32px; color: #1a3d7c; }
+  p { margin: 0 16px 12px; font-size: 16px; line-height: 22px; }
+  .row { display: flex; gap: 12px; margin: 16px; }
+  .box { width: 120px; height: 80px; border-radius: 12px; }
+  .r { background: #d33; } .g { background: #3a3; } .b { background: #33d; }
+  .grad { background: linear-gradient(90deg, #ff0 0%, #0ff 100%); }
+  .mono { font-family: "DejaVu Sans Mono", monospace; }
+  table { margin: 16px; border-collapse: collapse; }
+  td { border: 1px solid #444; padding: 4px 10px; }
+  #js { color: #a0a; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>WPE WebKit on Phoenix-RTOS</h1>
+<p>B4: WebCore lays out and paints this page in software (Skia raster) in the WebProcess.</p>
+<p class="mono">monospace: 0123456789 abcdefghijklmnopqrstuvwxyz</p>
+<p>Unicode (ICU + HarfBuzz): Zażółć gęślą jaźń — Ελληνικά — Кириллица</p>
+<div class="row"><div class="box r"></div><div class="box g"></div><div class="box b"></div><div class="box grad"></div></div>
+<table><tr><td>1</td><td>two</td><td>3.0</td></tr><tr><td>four</td><td>5</td><td>six</td></tr></table>
+<canvas id="c" width="480" height="120" style="margin: 0 16px; border: 1px solid #000"></canvas>
+<p>JavaScript: <span id="js">not run</span></p>
+<script>
+  // deterministic: integers only, no Date/Math.random
+  let sum = 0;
+  for (let i = 1; i <= 100000; i++) sum = (sum + i * i) % 1000003;
+  const words = ["phoenix", "rtos", "wpe", "webkit"].map(w => w.toUpperCase()).join("-");
+  document.getElementById("js").textContent = "sum=" + sum + " " + words + " " + JSON.stringify({a: [1, 2, 3]});
+  const ctx = document.getElementById("c").getContext("2d");
+  ctx.fillStyle = "#f80"; ctx.fillRect(10, 10, 100, 100);
+  ctx.strokeStyle = "#00f"; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(200, 60, 45, 0, 2 * Math.PI); ctx.stroke();
+  ctx.fillStyle = "#000"; ctx.font = "24px DejaVu Sans"; ctx.fillText("canvas 2D", 270, 70);
+  document.title = "B4 WPE Phoenix " + sum;
+</script>
+</body>
+</html>
