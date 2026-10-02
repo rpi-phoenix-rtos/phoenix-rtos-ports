@@ -1,0 +1,156 @@
+Subject: ANGLE on Phoenix-RTOS: the platform, its pthread/dlfcn/libstdc++ differences, and the linked system EGL
+
+WebGL in WPE runs on WebKit's bundled ANGLE, OpenGL ES backend over the system EGL
+(USE_SYSTEM_EGL; PlatformWPE.cmake defines ANGLE_PLATFORM_LINUX for every non-Android WPE build,
+which ANGLE needs to pick DisplayEGL). Only compiled with ENABLE_WEBGL=ON (the port's USE flag
+webgl). Found by compiling all ANGLE objects of an ENABLE_WEBGL=ON configure for aarch64-phoenix:
+
+- common/platform.h: __phoenix__ was in no list (#error Unsupported platform); it is POSIX.
+- common/tls.h: pthread_key_t is a pointer on Phoenix, so TLS_INVALID_INDEX cannot be a
+  static_cast of -1.
+- common/SimpleMutex.h: the futex mutex is enabled for ANGLE_PLATFORM_LINUX; Phoenix has no
+  futex(2) (<linux/futex.h>, SYS_futex), so it takes the portable mutex.
+- common/system_utils_posix.cpp: libphoenix's <dlfcn.h> has no RTLD_NOLOAD; a static program has
+  nothing "already loaded" to find, so that lookup fails cleanly.
+- common/log_utils.h: a libstdc++ built without wchar_t support (_GLIBCXX_USE_WCHAR_T unset, as
+  Phoenix's toolchain) has no std::wostream; its FmtHexHelper operator is left out there.
+- libANGLE/renderer/gl/egl/FunctionsEGLDL.cpp: FunctionsEGLDL dlopen()s "libEGL.so.1" and looks up
+  eglGetProcAddress in it. Phoenix programs are static: Mesa's EGL is linked into wpe-browser and
+  there is no libEGL.so.1. On Phoenix FunctionsEGLDL takes the linked eglGetProcAddress; Mesa
+  resolves every EGL and GL ES entry point through it (EGL_KHR_get_all_proc_addresses), so no
+  dlsym() fallback is needed. No symbol clash: ANGLE's own entry points are EGL_*/GL_*, and WebKit
+  builds no ANGLE libEGL.
+
+diff --git a/Source/ThirdParty/ANGLE/src/common/platform.h b/Source/ThirdParty/ANGLE/src/common/platform.h
+--- a/Source/ThirdParty/ANGLE/src/common/platform.h
++++ b/Source/ThirdParty/ANGLE/src/common/platform.h
+@@ -25,7 +25,7 @@
+ #    define ANGLE_PLATFORM_POSIX 1
+ #elif defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) ||              \
+     defined(__DragonFly__) || defined(__sun) || defined(__GLIBC__) || defined(__GNU__) || \
+-    defined(__QNX__) || defined(__Fuchsia__) || defined(__HAIKU__)
++    defined(__QNX__) || defined(__Fuchsia__) || defined(__HAIKU__) || defined(__phoenix__)
+ #    define ANGLE_PLATFORM_POSIX 1
+ #else
+ #    error Unsupported platform.
+diff --git a/Source/ThirdParty/ANGLE/src/common/tls.h b/Source/ThirdParty/ANGLE/src/common/tls.h
+--- a/Source/ThirdParty/ANGLE/src/common/tls.h
++++ b/Source/ThirdParty/ANGLE/src/common/tls.h
+@@ -42,7 +42,12 @@
+ #    define TLS_INVALID_INDEX (TLS_OUT_OF_INDEXES)
+ #elif defined(ANGLE_PLATFORM_POSIX)
+ typedef pthread_key_t TLSIndex;
+-#    define TLS_INVALID_INDEX (static_cast<angle::TLSIndex>(-1))
++#    if defined(__phoenix__)
++// Phoenix-RTOS: pthread_key_t is a pointer
++#        define TLS_INVALID_INDEX (reinterpret_cast<angle::TLSIndex>(static_cast<intptr_t>(-1)))
++#    else
++#        define TLS_INVALID_INDEX (static_cast<angle::TLSIndex>(-1))
++#    endif
+ #else
+ #    error Unsupported platform.
+ #endif
+diff --git a/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h b/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h
+--- a/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h
++++ b/Source/ThirdParty/ANGLE/src/common/SimpleMutex.h
+@@ -33,8 +33,9 @@
+ //
+ // There is no TSAN support for futex currently, so it is disabled in that case
+ #if !defined(ANGLE_WITH_TSAN)
+-#    if defined(ANGLE_PLATFORM_LINUX) || defined(ANGLE_PLATFORM_ANDROID)
+-// Linux has had futexes for a very long time.  Assume support.
++#    if (defined(ANGLE_PLATFORM_LINUX) && !defined(__phoenix__)) || defined(ANGLE_PLATFORM_ANDROID)
++// Linux has had futexes for a very long time.  Assume support. (Phoenix-RTOS builds ANGLE with
++// ANGLE_PLATFORM_LINUX, WebKit's PlatformWPE.cmake, but has no futex(2).)
+ #        define ANGLE_USE_FUTEX 1
+ #    elif defined(ANGLE_PLATFORM_WINDOWS) && !defined(ANGLE_ENABLE_WINDOWS_UWP) && \
+         !defined(ANGLE_WINDOWS_NO_FUTEX)
+diff --git a/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp b/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
+--- a/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
++++ b/Source/ThirdParty/ANGLE/src/common/system_utils_posix.cpp
+@@ -213,7 +213,16 @@
+     int extraFlags = 0;
+     if (searchType == SearchType::AlreadyLoaded)
+     {
++#if defined(RTLD_NOLOAD)
+         extraFlags = RTLD_NOLOAD;
++#else
++        // no RTLD_NOLOAD (Phoenix-RTOS: static programs, nothing is loaded behind the program's back)
++        if (errorOut)
++        {
++            *errorOut = "RTLD_NOLOAD is not supported";
++        }
++        return nullptr;
++#endif
+     }
+ 
+     std::string fullPath = directory + libraryName;
+diff --git a/Source/ThirdParty/ANGLE/src/common/log_utils.h b/Source/ThirdParty/ANGLE/src/common/log_utils.h
+--- a/Source/ThirdParty/ANGLE/src/common/log_utils.h
++++ b/Source/ThirdParty/ANGLE/src/common/log_utils.h
+@@ -136,10 +136,13 @@
+         return FmtHexAutoSized(os, fmt.mValue, fmt.mPrefix, "0x", '0');
+     }
+ 
++#if !defined(__GLIBCXX__) || defined(_GLIBCXX_USE_WCHAR_T)
++    // (a libstdc++ built without wchar_t support, e.g. Phoenix-RTOS's, has no std::wostream)
+     friend std::wostream &operator<<(std::wostream &wos, const FmtHexHelper &fmt)
+     {
+         return FmtHexAutoSized(wos, fmt.mValue, fmt.mPrefix, L"0x", L'0');
+     }
++#endif
+ };
+ 
+ }  // namespace priv
+diff --git a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/egl/FunctionsEGLDL.cpp b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/egl/FunctionsEGLDL.cpp
+--- a/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/egl/FunctionsEGLDL.cpp
++++ b/Source/ThirdParty/ANGLE/src/libANGLE/renderer/gl/egl/FunctionsEGLDL.cpp
+@@ -10,6 +10,15 @@
+ 
+ #include <dlfcn.h>
+ 
++#if defined(__phoenix__)
++// Phoenix-RTOS has no shared libraries: the system EGL (Mesa) is linked into the program, so
++// its eglGetProcAddress is called directly instead of being looked up in a dlopen()ed
++// libEGL.so.1. Mesa's eglGetProcAddress resolves every EGL and GL ES entry point
++// (EGL_KHR_get_all_proc_addresses). ANGLE's own entry points are EGL_*/GL_* (WebKit links no
++// ANGLE libEGL), so the name binds to Mesa's.
++extern "C" __eglMustCastToProperFunctionPointerType EGLAPIENTRY eglGetProcAddress(const char *procname);
++#endif
++
+ namespace rx
+ {
+ namespace
+@@ -34,6 +43,12 @@
+                                       void *eglHandle)
+ {
+ 
++#if defined(__phoenix__)
++    (void)libName;
++    (void)eglHandle;
++    mGetProcAddressPtr = eglGetProcAddress;
++    return FunctionsEGL::initialize(platformType, nativeDisplay);
++#else
+     if (eglHandle)
+     {
+         // If the handle is provided, use it.
+@@ -60,6 +75,7 @@
+     }
+ 
+     return FunctionsEGL::initialize(platformType, nativeDisplay);
++#endif
+ }
+ 
+ void *FunctionsEGLDL::getProcAddress(const char *name) const
+@@ -69,7 +85,11 @@
+     {
+         return f;
+     }
++#if defined(__phoenix__)
++    return nullptr;
++#else
+     return dlsym(nativeEGLHandle, name);
++#endif
+ }
+ 
+ }  // namespace rx

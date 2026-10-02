@@ -25,6 +25,9 @@
 	#   patches/webkit/0016       frames to the compositor as dma-bufs without GBM, opt-in
 	#                             (WPE_PHOENIX_DMABUF=1, wpe-browser --dmabuf); no fence
 	#                             descriptors across processes
+	#   patches/webkit/0017       ANGLE (WebGL) on Phoenix: platform, TLS, mutex, dlfcn, and the linked
+	#                             Mesa EGL instead of dlopen()ing libEGL.so.1 (compiled only
+	#                             with USE webgl)
 	#   files/build-wpe.sh        the build (also run by tools/browser/wpe/build.sh for scratch
 	#                             builds): host ruby if missing, a private dependency prefix,
 	#                             the libphoenix compat objects, CMake + ninja, the link checks
@@ -77,7 +80,10 @@
 	# release_log: WebKit's RELEASE_LOG compiled in (WEBKIT_DEBUG=ProcessSwapping,Process,Loading
 	#      etc. print to stderr). Off: compiled out, as in any Release build. Toggling it rebuilds
 	#      nearly all of WebKit (~2 h without ccache).
-	iuse="rootfs checks release_log"
+	# webgl: WebGL (ENABLE_WEBGL: WebKit's bundled ANGLE on Mesa's GLES 3.1, patch 0017;
+	#      wpe-browser --webgl turns it on per run). Off: no WebGL, no ANGLE. Toggling it rebuilds
+	#      nearly all of WebKit, and ANGLE on top.
+	iuse="rootfs checks release_log webgl"
 
 	supports="phoenix>=3.3"
 }
@@ -130,6 +136,7 @@ p_build() {
 		PHX_OPENSSL="${dep[openssl]}" PHX_EPOXY="${dep[libepoxy]}" PHX_MESA="${dep[mesa_drm]}" \
 		PHX_WAYLAND="${dep[wayland_phoenix]}" WEBKIT_SRC="${PREFIX_PORT_WORKDIR%/}" \
 		PHX_WPE_RELEASE_LOG="$(b_use release_log && echo 1 || echo 0)" \
+		PHX_WPE_WEBGL="$(b_use webgl && echo 1 || echo 0)" \
 		"${F}/build-wpe.sh" --out "${out}" --dl "${PHOENIX_DISTFILES:-${HOME}/.phoenix-distfiles}/newlane" \
 		--src-copy -j 8 || b_die "webkit_wpe: build-wpe.sh failed"
 

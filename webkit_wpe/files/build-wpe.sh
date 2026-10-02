@@ -31,6 +31,9 @@
 #                   ProcessSwapping,Process,Loading,... shows the process model at work; 0 (default):
 #                   compiled out, as in every Release build. Changing it rebuilds nearly all of
 #                   WebKit (cmakeconfig.h changes), ~2 h at -j8 without ccache hits
+#   PHX_WPE_WEBGL   1: WebGL (ENABLE_WEBGL, which builds WebKit's bundled ANGLE: its OpenGL ES
+#                   backend over the linked Mesa EGL, patch 0017); 0 (default): no WebGL. Changing
+#                   it rebuilds nearly all of WebKit, plus ANGLE
 #
 # Usage: build-wpe.sh --out <dir> [--dl <dir>] [-j N] [--src-copy]
 #            [--stage ruby|deps|compat|extract|configure|build|plugins|all] [--mesa-variant gles|wayland] [--clean]
@@ -461,8 +464,9 @@ WPE_CMAKE_OPTS=(
 	-DENABLE_THUNDER=OFF
 	-DUSE_GSTREAMER=OFF
 	-DENABLE_SPEECH_SYNTHESIS=OFF
-	# graphics: no WebGL/WebXR/Vulkan yet (B7)
-	-DENABLE_WEBGL=OFF
+	# graphics: WebGL (ANGLE on GLES 3.1) only with PHX_WPE_WEBGL=1 (browser milestone B7); no
+	# WebXR, no Vulkan
+	-DENABLE_WEBGL="$([ "${PHX_WPE_WEBGL:-0}" = 1 ] && echo ON || echo OFF)"
 	-DENABLE_WEBXR=OFF
 	-DUSE_VULKAN=OFF
 	-DUSE_SKIA_OPENTYPE_SVG=ON
@@ -607,6 +611,12 @@ check_program() {
 			webkit_user_script_new_for_world webkit_cookie_manager_set_persistent_storage _ZN3WTF15memoryFootprintEv; do
 		grep -qE " [TtWD] ${s}\$" <<< "${syms}" || { echo "build-wpe.sh: wpe-browser has no ${s}" >&2; exit 1; }
 	done
+	# WebGL: ANGLE's entry points, as WebCore calls them (EGL_*/GL_*: no clash with Mesa's egl*/gl*)
+	if [ "${PHX_WPE_WEBGL:-0}" = 1 ]; then
+		for s in EGL_GetPlatformDisplayEXT GL_BindTexture; do
+			grep -qE " [TtW] ${s}\$" <<< "${syms}" || { echo "build-wpe.sh: a webgl build without ${s}" >&2; exit 1; }
+		done
+	fi
 	# mimalloc IS malloc (the override), as in the jsc shell
 	[ "$(grep -E ' T (malloc|mi_malloc)$' <<< "${syms}" | awk '{print $1}' | sort -u | wc -l)" = 1 ] \
 		|| { echo "build-wpe.sh: malloc is not mimalloc's" >&2; exit 1; }
