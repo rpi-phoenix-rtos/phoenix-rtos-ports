@@ -2,7 +2,7 @@
 #
 # b6.sh -- the browser plan's B6 checks ("a usable browser"), one psh command each:
 #
-#     /bin/bash /usr/share/wpe-browser/b6.sh sites|persist|persist-warm|soak|keys|keys-hid
+#     /bin/bash /usr/share/wpe-browser/b6.sh sites|persist|persist-warm|soak|start|keys|keys-hid
 #
 #   sites    /bin/browser with its start page, then Wikipedia, GitHub, a DuckDuckGo search,
 #            Stack Overflow and BBC News, one window after another (XFCE_AUTOSTART items)
@@ -15,6 +15,10 @@
 #            B6_SOAK_ARGS: more browser options (the process model: --process-cache=N,
 #            --prewarm, --no-process-swap, --hang-recovery=S, --stall-secs=S);
 #            B6_WEBKIT_DEBUG: WebKit log channels (WEBKIT_DEBUG; a release_log build only)
+#   start    the UI start-up with what the soak adds to it: a persistent session and the web
+#            process extensions, B6_START_RUNS (4) browser runs on the start page with
+#            --exit-after-load, each given B6_START_SECS (60) before it counts as hung and is
+#            killed (the b29 soak's UI never reached its main loop, where --timeout would fire)
 #   keys     the chrome driven by synthetic keys (WPE_BROWSER_AUTO): the address bar, a new
 #            window request, a search, back, forward, reload, stop, cancel, home, quit
 #   keys-hid the same path end to end: HID boot reports appended to /tmp/kbd-inject, which
@@ -188,6 +192,34 @@ inner() {
 			echo "B6 soak browser rc=$? t=${SECONDS}"
 			shm_stats
 			;;
+		start)
+			local runs=${B6_START_RUNS:-4} secs=${B6_START_SECS:-60} run p waited pass=0
+			for ((run = 1; run <= runs; run++)); do
+				echo "B6 start run=${run} t=${SECONDS}"
+				"${BROWSER}" --cpu-rendering --web-extensions=/usr/lib/wpe-browser/pi-extensions --exit-after-load \
+					/usr/share/wpe-browser/start.html &
+				p=$!
+				pids=("${p}")
+				waited=0
+				while alive "${p}" && [ "${waited}" -lt "${secs}" ]; do
+					pause 1
+					waited=$((waited + 1))
+				done
+				if alive "${p}"; then
+					# a UI blocked before its main loop does not take SIGTERM (a GLib source)
+					echo "B6 start run=${run} HUNG after ${secs}s, killed"
+					kill -KILL "${p}" 2>/dev/null
+					wait "${p}"
+				else
+					wait "${p}"
+					local rc=$?
+					echo "B6 start run=${run} rc=${rc} secs=${waited}"
+					[ "${rc}" -eq 0 ] && pass=$((pass + 1))
+				fi
+				pause 3
+			done
+			echo "B6 start result pass=${pass}/${runs}"
+			;;
 		keys)
 			# <seconds from start>:key:<keys> | :type:<text>; the timings leave the LLInt time to
 			# load each page (Wikipedia ~22 s on B5)
@@ -255,6 +287,7 @@ case "${mode}" in
 	persist) export B6_INNER=persist XFCE_AUTOSTART="${item}" HOLD=${B6_HOLD:-360} ;;
 	persist-warm) export B6_INNER=persist-warm XFCE_AUTOSTART="${item}" HOLD=${B6_HOLD:-240} ;;
 	soak) export B6_INNER=soak XFCE_AUTOSTART="${item}" HOLD=${B6_HOLD:-1920} ;;
+	start) export B6_INNER=start XFCE_AUTOSTART="${item}" HOLD=${B6_HOLD:-360} ;;
 	keys) export B6_INNER=keys XFCE_AUTOSTART="${item}" HOLD=${B6_HOLD:-420} ;;
 	keys-hid)
 		# an empty file before the session: libinput-phoenix opens it once labwc starts
@@ -263,7 +296,7 @@ case "${mode}" in
 		export B6_INNER=keys-hid XFCE_AUTOSTART="${item}" HOLD=${B6_HOLD:-260} INPUT_EXTRA=${INJECT}:keyboard
 		;;
 	*)
-		echo "usage: /bin/bash ${SELF} sites|persist|persist-warm|soak|keys|keys-hid"
+		echo "usage: /bin/bash ${SELF} sites|persist|persist-warm|soak|start|keys|keys-hid"
 		exit 2
 		;;
 esac

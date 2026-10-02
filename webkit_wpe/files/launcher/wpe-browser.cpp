@@ -36,8 +36,9 @@
  *     --hang-recovery=S     when a navigation's web process stays unresponsive for S s,
  *                           terminate it and load the page again (WPE_BROWSER_HANG_SECS;
  *                           default 30, 0 off)
- *     --stall-secs=S        every child reports a main thread that has not run its event loop
- *                           for S s (WPE_BROWSER_STALL_SECS; default 10, 0 off); see stallReport()
+ *     --stall-secs=S        every process, the UI included, reports a main thread that has not
+ *                           run its event loop for S s, or stays in one start-up phase as long
+ *                           (WPE_BROWSER_STALL_SECS; default 10, 0 off); see stallReport()
  *   Test knobs (also from the environment, for runs started where only one argument fits):
  *     --cycle=LIST          load the next page of LIST every --cycle-secs (WPE_BROWSER_CYCLE):
  *                           comma-separated entries, or the path of a file with one per line
@@ -164,7 +165,8 @@ static void recordExecutablePath(const char* argv0)
 }
 
 /*
- * The main-thread stall report (every child; WPE_BROWSER_STALL_SECS, default 10 s, 0 off).
+ * The main-thread stall report (every process, the UI included; WPE_BROWSER_STALL_SECS, default
+ * 10 s, 0 off).
  *
  * A web process whose main thread stops running its event loop stops answering the UI: no
  * navigation reaches it any more, and WebKit only marks it unresponsive. This says where it
@@ -175,10 +177,27 @@ static void recordExecutablePath(const char* argv0)
  *   stall n=K main_ms=M ipc_in=0|1 ipc_revents=0x..
  *       ipc_in: the socket of the UI connection holds unread input. 1 = the UI's messages wait for
  *       a main thread that does not take them; 0 while the UI reports the process unresponsive =
- *       the UI's sends do not arrive (the connection, not this process)
+ *       the UI's sends do not arrive (the connection, not this process); -1 in the UI (no such
+ *       socket)
+ *
+ * Before the loop's first beat a process is starting: its main thread runs the start-up phases
+ * that startupPhase() names (the UI: "start", "display", "network-session", "web-context",
+ * "web-view", "first-load", "main-loop"; a child: "process-main"). A phase that lasts longer than
+ * the limit is a start-up stall, the same report under another first line, and its end:
+ *
+ *   start-stall phase=P phase_ms=M report=R
+ *   start-stall-end phase=P phase_ms=M
+ *
+ * (the b29 soak: the UI blocked for 14 minutes between "web-extensions" and "session persistent"
+ * and said nothing, as the loop had never beaten). Both stalls go on with:
+ *
  *   stall-thread tid=T [main] state=ready|sleep cpu_ms=C delta_ms=D wait_ms=W prio=P
  *       every thread of the process (the kernel's threadsinfo): D is the CPU time since the
  *       previous report, so a busy thread has D close to the time between reports, a blocked one 0
+ *   stall-child pid=C tid=T state=ready|sleep cpu_ms=C wait_ms=W name=N
+ *       every thread of a child process (a process launch that never got to the child's main():
+ *       WebKit spawns with posix_spawn(), whose vfork() keeps the caller's thread waiting until
+ *       the child has exec()ed)
  *   stall-sample tid=T [main] pc=.. lr=.. fp=.. sp=..   (or "none")
  *       the registers where SIGUSR2 interrupted each thread, in reports 2-4 of a stall only (from
  *       60 s on: a long task on a slow page must not get its system calls interrupted);
@@ -210,11 +229,20 @@ static constexpr size_t maxStackScan = 512 * 1024;
 static constexpr int defaultStallSecs = 10;
 static constexpr int ipcStallFactor = 3; /* unread connection input for 3x the stall limit */
 
-static char childRole[16];
+static char processRole[16]; /* "ui", "web" or "network" */
 static int mainTid;
 static uintptr_t mainStackTop; /* main()'s frame: the main thread's stack is mapped from sp up to here */
-static int ipcFd = -1; /* the UI connection (argv[2]) */
+static int ipcFd = -1; /* a child's UI connection (argv[2]); the UI has none */
 static std::atomic<int64_t> lastBeatMs; /* nowMs() of the main loop's last beat; 0: none yet */
+static std::atomic<const char*> startPhase { "start" }; /* until the first beat: what main() runs */
+static std::atomic<int64_t> startPhaseMs;
+
+/* the start-up step the main thread enters (a start-up stall report names it) */
+static void startupPhase(const char* name)
+{
+    startPhaseMs.store(static_cast<int64_t>(nowMs()));
+    startPhase.store(name);
+}
 
 /* the program's code: .init starts it and .fini follows .text (a static ELF, crti/crtn) */
 extern "C" void _init(void);
@@ -266,14 +294,14 @@ static gboolean heartbeat(gpointer)
     return G_SOURCE_CONTINUE;
 }
 
-/* before the role's main: the beat on the main context, the sampling signal, what to report on */
-static void initStallReport(int argc, char** argv, uintptr_t stackTop)
+/* before the role's main (on its main thread): the beat on the main context, the sampling
+ * signal; ipc: a child's UI connection, -1 in the UI */
+static void initStallReport(int ipc)
 {
     mainTid = gettid();
-    mainStackTop = stackTop;
-    if (argc > 2)
-        ipcFd = atoi(argv[2]);
-    /* no report before the first beat: a role's start-up runs before its loop */
+    ipcFd = ipc;
+    startupPhase("start");
+    /* the beat says the loop runs; until its first one, the start-up phases are watched */
     g_timeout_add_full(G_PRIORITY_HIGH, 1000, heartbeat, nullptr, nullptr);
     struct sigaction action;
     memset(&action, 0, sizeof(action));
@@ -312,15 +340,20 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
     std::vector<int> tids;
     const int self = gettid();
     for (int i = 0; i < count; i++) {
-        if (info[i].pid != pid)
+        if (info[i].pid != pid) {
+            if (info[i].ppid == pid)
+                LOG("role=%s pid=%d stall-child pid=%d tid=%u state=%s cpu_ms=%lld wait_ms=%lld name=%.64s", processRole, pid,
+                    static_cast<int>(info[i].pid), info[i].tid, info[i].state ? "sleep" : "ready",
+                    static_cast<long long>(info[i].cpuTime) / 1000, static_cast<long long>(info[i].wait) / 1000, info[i].name);
             continue;
+        }
         long long previousUs = -1;
         for (const auto& p : previous) {
             if (p.tid == info[i].tid)
                 previousUs = p.cpuUs;
         }
         const long long cpuUs = static_cast<long long>(info[i].cpuTime);
-        LOG("role=%s pid=%d stall-thread tid=%u%s state=%s cpu_ms=%lld delta_ms=%lld wait_ms=%lld prio=%d", childRole, pid,
+        LOG("role=%s pid=%d stall-thread tid=%u%s state=%s cpu_ms=%lld delta_ms=%lld wait_ms=%lld prio=%d", processRole, pid,
             info[i].tid, static_cast<int>(info[i].tid) == mainTid ? " main" : static_cast<int>(info[i].tid) == self ? " watchdog" : "",
             info[i].state ? "sleep" : "ready", cpuUs / 1000, previousUs < 0 ? -1LL : (cpuUs - previousUs) / 1000,
             static_cast<long long>(info[i].wait) / 1000, info[i].priority);
@@ -352,10 +385,10 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
         }
         const char* mark = tid == mainTid ? " main" : "";
         if (!found) {
-            LOG("role=%s pid=%d stall-sample tid=%d%s none", childRole, pid, tid, mark);
+            LOG("role=%s pid=%d stall-sample tid=%d%s none", processRole, pid, tid, mark);
             continue;
         }
-        LOG("role=%s pid=%d stall-sample tid=%d%s pc=0x%llx lr=0x%llx fp=0x%llx sp=0x%llx", childRole, pid, tid, mark,
+        LOG("role=%s pid=%d stall-sample tid=%d%s pc=0x%llx lr=0x%llx fp=0x%llx sp=0x%llx", processRole, pid, tid, mark,
             static_cast<unsigned long long>(found->pc), static_cast<unsigned long long>(found->lr),
             static_cast<unsigned long long>(found->fp), static_cast<unsigned long long>(found->sp));
         if (found->returns) {
@@ -365,7 +398,7 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
                 snprintf(word, sizeof(word), " 0x%llx", static_cast<unsigned long long>(found->ret[i]));
                 line += word;
             }
-            LOG("role=%s pid=%d stall-stack tid=%d ret=%s", childRole, pid, tid, line.c_str() + 1);
+            LOG("role=%s pid=%d stall-stack tid=%d ret=%s", processRole, pid, tid, line.c_str() + 1);
         }
     }
 }
@@ -378,29 +411,54 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
  * is gone (the child has been reparented) the child gets a short grace period for WebKit's own
  * orderly exit, then _exit()s - so the next browser run never meets the previous run's children.
  * The same thread logs the child's memory footprint every WPE_BROWSER_RSS_SECS seconds and makes
- * the stall report above.
+ * the stall report above. In the UI process (parent 0: nothing to outlive; its footprint has a
+ * main-loop timer) the thread makes the stall report only.
  */
-static void* parentWatchdog(void* arg)
+static void* watchdog(void* arg)
 {
     const pid_t parent = static_cast<pid_t>(reinterpret_cast<intptr_t>(arg));
-    const char* rss = getenv("WPE_BROWSER_RSS_SECS");
+    const char* rss = parent ? getenv("WPE_BROWSER_RSS_SECS") : nullptr;
     const unsigned rssPolls = rss ? static_cast<unsigned>(atoi(rss)) * (1000 / orphanPollMs) : 0;
     const char* stall = getenv("WPE_BROWSER_STALL_SECS");
     const double stallMs = (stall ? atoi(stall) : defaultStallSecs) * 1000.0;
     unsigned polls = 0, stalls = 0, reports = 0;
     double stallSince = 0, nextReport = 0, ipcSince = 0;
     bool ipcReported = false;
+    const char* stalledPhase = nullptr; /* the start-up phase reported as stalled */
+    double stalledPhaseSince = 0;
     std::vector<ThreadCPU> cpu;
-    while (getppid() == parent) {
+    while (!parent || getppid() == parent) {
         usleep(orphanPollMs * 1000);
         ++polls;
         if (rssPolls && polls % rssPolls == 0)
-            logFootprint(childRole);
+            logFootprint(processRole);
         if (stallMs <= 0)
             continue;
         const double now = nowMs(), beat = static_cast<double>(lastBeatMs.load());
-        if (!beat)
+        const char* phase = beat ? nullptr : startPhase.load();
+        if (stalledPhase && phase != stalledPhase) {
+            LOG("role=%s pid=%d start-stall-end phase=%s phase_ms=%.0f", processRole, static_cast<int>(getpid()), stalledPhase,
+                now - stalledPhaseSince);
+            stalledPhase = nullptr;
+            cpu.clear();
+        }
+        if (!beat) {
+            /* starting: the main thread has been in one phase for longer than the limit */
+            const double since = static_cast<double>(startPhaseMs.load());
+            if (!stalledPhase && now - since > stallMs) {
+                stalledPhase = phase;
+                stalledPhaseSince = since;
+                reports = 0;
+                nextReport = now;
+            }
+            if (stalledPhase && now >= nextReport) {
+                LOG("role=%s pid=%d start-stall phase=%s phase_ms=%.0f report=%u", processRole, static_cast<int>(getpid()),
+                    stalledPhase, now - stalledPhaseSince, reports);
+                stallReport(reports++, cpu);
+                nextReport = now + stallRepeatMs;
+            }
             continue;
+        }
         if (!stallSince && now - beat > stallMs) {
             stallSince = beat;
             stalls++;
@@ -408,14 +466,14 @@ static void* parentWatchdog(void* arg)
             nextReport = now;
         }
         if (stallSince && beat > stallSince) {
-            LOG("role=%s pid=%d stall-end n=%u main_ms=%.0f", childRole, static_cast<int>(getpid()), stalls, beat - stallSince);
+            LOG("role=%s pid=%d stall-end n=%u main_ms=%.0f", processRole, static_cast<int>(getpid()), stalls, beat - stallSince);
             stallSince = 0;
             cpu.clear();
         }
         if (stallSince && now >= nextReport) {
             unsigned revents;
             const int input = ipcInput(&revents);
-            LOG("role=%s pid=%d stall n=%u main_ms=%.0f report=%u ipc_in=%d ipc_revents=0x%x", childRole, static_cast<int>(getpid()),
+            LOG("role=%s pid=%d stall n=%u main_ms=%.0f report=%u ipc_in=%d ipc_revents=0x%x", processRole, static_cast<int>(getpid()),
                 stalls, now - stallSince, reports, input, revents);
             stallReport(reports++, cpu);
             nextReport = now + stallRepeatMs;
@@ -429,34 +487,35 @@ static void* parentWatchdog(void* arg)
                 ipcSince = now;
             else if (!ipcReported && now - ipcSince > ipcStallFactor * stallMs) {
                 ipcReported = true;
-                LOG("role=%s pid=%d ipc-stall readable_ms=%.0f main_beat_ms=%.0f ipc_revents=0x%x", childRole, static_cast<int>(getpid()),
+                LOG("role=%s pid=%d ipc-stall readable_ms=%.0f main_beat_ms=%.0f ipc_revents=0x%x", processRole, static_cast<int>(getpid()),
                     now - ipcSince, now - beat, revents);
                 std::vector<ThreadCPU> none;
                 stallReport(stallFirstSampledReport, none); /* 30 s of unread input already */
             }
         } else {
             if (ipcReported)
-                LOG("role=%s pid=%d ipc-stall-end readable_ms=%.0f", childRole, static_cast<int>(getpid()), now - ipcSince);
+                LOG("role=%s pid=%d ipc-stall-end readable_ms=%.0f", processRole, static_cast<int>(getpid()), now - ipcSince);
             ipcSince = 0;
             ipcReported = false;
         }
     }
     usleep(orphanGraceMs * 1000);
-    LOG("role=%s pid=%d orphaned (UI pid %d gone %u ms ago), exiting", childRole, static_cast<int>(getpid()),
+    LOG("role=%s pid=%d orphaned (UI pid %d gone %u ms ago), exiting", processRole, static_cast<int>(getpid()),
         static_cast<int>(parent), orphanGraceMs);
     _exit(0);
     return nullptr;
 }
 
-static void startParentWatchdog()
+/* parent: the UI process of a child, 0 in the UI */
+static void startWatchdog(pid_t parent)
 {
     pthread_attr_t attr;
     pthread_t thread;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     pthread_attr_setstacksize(&attr, 64 * 1024);
-    if (pthread_create(&thread, &attr, parentWatchdog, reinterpret_cast<void*>(static_cast<intptr_t>(getppid()))))
-        LOG("role=%s pid=%d: no parent watchdog (pthread_create failed)", childRole, static_cast<int>(getpid()));
+    if (pthread_create(&thread, &attr, watchdog, reinterpret_cast<void*>(static_cast<intptr_t>(parent))))
+        LOG("role=%s pid=%d: no watchdog (pthread_create failed)", processRole, static_cast<int>(getpid()));
     pthread_attr_destroy(&attr);
 }
 
@@ -513,7 +572,7 @@ static const GOptionEntry optionEntries[] = {
     { "prewarm", 0, 0, G_OPTION_ARG_NONE, &optPrewarm, "Keep a spare web process launched ahead", nullptr },
     { "no-process-swap", 0, 0, G_OPTION_ARG_NONE, &optNoProcessSwap, "One web process for every site", nullptr },
     { "hang-recovery", 0, 0, G_OPTION_ARG_INT, &optHangSecs, "Restart a web process unresponsive for S s during a navigation (default 30, 0 off)", "S" },
-    { "stall-secs", 0, 0, G_OPTION_ARG_INT, &optStallSecs, "Children report a main loop stalled for S s (default 10, 0 off)", "S" },
+    { "stall-secs", 0, 0, G_OPTION_ARG_INT, &optStallSecs, "Every process reports a main loop (or start-up) stalled for S s (default 10, 0 off)", "S" },
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_STRING_ARRAY, &optURIs, nullptr, "[URL|FILE|WORDS]" },
     { }
 };
@@ -1556,14 +1615,38 @@ static WebKitNetworkSession* createNetworkSession()
     }
     WebKitNetworkSession* session = webkit_network_session_new(dataDir, cacheDir);
     g_autofree char* cookies = g_build_filename(dataDir, "cookies.sqlite", nullptr);
+    /* the cookie manager starts observing the cookie store: this launches the NetworkProcess */
     WebKitCookieManager* cookieManager = webkit_network_session_get_cookie_manager(session);
     webkit_cookie_manager_set_persistent_storage(cookieManager, cookies, WEBKIT_COOKIE_PERSISTENT_STORAGE_SQLITE);
     webkit_cookie_manager_set_accept_policy(cookieManager, WEBKIT_COOKIE_POLICY_ACCEPT_NO_THIRD_PARTY);
-    /* the default, but the disk cache depends on it */
-    webkit_web_context_set_cache_model(webkit_web_context_get_default(), WEBKIT_CACHE_MODEL_WEB_BROWSER);
+    /* cache-model: set with the web context (createWebContext()) */
     LOG("session persistent data=%s cache=%s cookies=%s cookie-policy=no-third-party cache-model=web-browser",
         dataDir, cacheDir, cookies);
     return session;
+}
+
+/*
+ * The web context: WebKit's process pool, the web processes' settings. Made after the network
+ * session, in MiniBrowser's order (Tools/MiniBrowser/wpe/main.cpp: the session and its cookie
+ * settings, then the context): the b29 soak made it first (for --web-extensions) and its UI never
+ * got past the network session that followed. Nothing in WebKit makes that order wait (every
+ * message a session sends to a NetworkProcess that is still launching is queued, and a sync one
+ * fails at once), so that stall is the watchdog's to explain; this order is the one every working
+ * run used. The extensions only have to be set before the first web process starts, which is
+ * the web view's first load.
+ */
+static WebKitWebContext* createWebContext()
+{
+    WebKitWebContext* webContext = webkit_web_context_get_default();
+    /* the default, but the disk cache depends on it */
+    webkit_web_context_set_cache_model(webContext, WEBKIT_CACHE_MODEL_WEB_BROWSER);
+    /* The WebProcess's injected bundle (libWPEInjectedBundle.so, dlopen()ed) loads these. */
+    if (optWebExtensions) {
+        webkit_web_context_set_web_process_extensions_directory(webContext, optWebExtensions);
+        webkit_web_context_set_web_process_extensions_initialization_user_data(webContext, g_variant_new_string("wpe-browser"));
+        LOG("web-extensions dir=%s", optWebExtensions);
+    }
+    return webContext;
 }
 
 /* --- UI role: main ---------------------------------------------------------------------------- */
@@ -1618,7 +1701,10 @@ static int uiMain(int argc, char** argv)
     }
     g_option_context_free(context);
     optionsFromEnvironment();
-    applyProcessModel();
+    applyProcessModel(); /* also WPE_BROWSER_STALL_SECS, which the watchdog reads */
+    snprintf(processRole, sizeof(processRole), "ui");
+    initStallReport(-1);
+    startWatchdog(0);
 
     int width = 1024, height = 768;
     if (optSize && sscanf(optSize, "%dx%d", &width, &height) != 2) {
@@ -1650,6 +1736,7 @@ static int uiMain(int argc, char** argv)
 
     mainLoop = g_main_loop_new(nullptr, FALSE);
 
+    startupPhase("display");
     WPEDisplay* display = nullptr;
     if (optHeadless) {
 #if ENABLE_WPE_PLATFORM_HEADLESS
@@ -1673,18 +1760,13 @@ static int uiMain(int argc, char** argv)
     LOG("display %s", G_OBJECT_TYPE_NAME(display));
     g_signal_connect(display, "disconnected", G_CALLBACK(displayDisconnected), nullptr);
 
-    /* The WebProcess's injected bundle (libWPEInjectedBundle.so, dlopen()ed) loads these; set
-     * before the first web process starts. */
-    if (optWebExtensions) {
-        WebKitWebContext* webContext = webkit_web_context_get_default();
-        webkit_web_context_set_web_process_extensions_directory(webContext, optWebExtensions);
-        webkit_web_context_set_web_process_extensions_initialization_user_data(webContext, g_variant_new_string("wpe-browser"));
-        LOG("web-extensions dir=%s", optWebExtensions);
-    }
-
+    startupPhase("network-session");
     WebKitNetworkSession* session = createNetworkSession();
     if (optIgnoreTLSErrors)
         webkit_network_session_set_tls_errors_policy(session, WEBKIT_TLS_ERRORS_POLICY_IGNORE);
+    startupPhase("web-context");
+    createWebContext();
+    startupPhase("web-view");
     WebKitSettings* settings = webkit_settings_new_with_settings(
         "enable-webgl", FALSE,
         "enable-media", FALSE,
@@ -1771,7 +1853,9 @@ static int uiMain(int argc, char** argv)
     g_unix_signal_add(SIGTERM, quitOnSignal, nullptr);
 
     lastPageID = webkit_web_view_get_page_id(webView);
+    startupPhase("first-load"); /* launches the first WebProcess */
     loadAddress(firstURI);
+    startupPhase("main-loop"); /* until its first beat */
     g_main_loop_run(mainLoop);
 
     LOG("exit status=%d", exitStatus);
@@ -1785,6 +1869,7 @@ static int uiMain(int argc, char** argv)
 int main(int argc, char** argv)
 {
     startMs = nowMs();
+    mainStackTop = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
     setvbuf(stderr, nullptr, _IOLBF, 0);
     recordExecutablePath(argv[0]);
 
@@ -1793,19 +1878,20 @@ int main(int argc, char** argv)
 
     const char* role = getenv("WPE_PHOENIX_PROCESS_ROLE");
     if (role && *role) {
-        snprintf(childRole, sizeof(childRole), "%s", role);
+        snprintf(processRole, sizeof(processRole), "%s", role);
         unsetenv("WPE_PHOENIX_PROCESS_ROLE"); /* not for this process's own children */
-        LOG("role=%s pid=%d ppid=%d argc=%d", childRole, static_cast<int>(getpid()), static_cast<int>(getppid()), argc);
-        if (strcmp(childRole, "web") && strcmp(childRole, "network")) {
-            LOG("unknown role %s", childRole);
+        LOG("role=%s pid=%d ppid=%d argc=%d", processRole, static_cast<int>(getpid()), static_cast<int>(getppid()), argc);
+        if (strcmp(processRole, "web") && strcmp(processRole, "network")) {
+            LOG("unknown role %s", processRole);
             return 1;
         }
-        initStallReport(argc, argv, reinterpret_cast<uintptr_t>(__builtin_frame_address(0)));
-        startParentWatchdog();
-        int status = !strcmp(childRole, "web") ? WebKit::WebProcessMain(argc, argv) : WebKit::NetworkProcessMain(argc, argv);
+        initStallReport(argc > 2 ? atoi(argv[2]) : -1);
+        startWatchdog(getppid());
+        startupPhase("process-main");
+        int status = !strcmp(processRole, "web") ? WebKit::WebProcessMain(argc, argv) : WebKit::NetworkProcessMain(argc, argv);
         /* how long WebKit's own exit takes after the UI connection closed is the B4 orphan
          * question: this line and the watchdog's say which path ended the process */
-        LOG("role=%s pid=%d main returned %d", childRole, static_cast<int>(getpid()), status);
+        LOG("role=%s pid=%d main returned %d", processRole, static_cast<int>(getpid()), status);
         return status;
     }
     return uiMain(argc, argv);
