@@ -86,6 +86,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,12 +133,31 @@ static double nowMs()
 
 static double startMs;
 
-#define LOG(...)                                                    \
-    do {                                                            \
-        fprintf(stderr, "WPEB t=%.0f ", nowMs() - startMs);         \
-        fprintf(stderr, __VA_ARGS__);                               \
-        fputc('\n', stderr);                                        \
-    } while (0)
+/* One line, one write(2): no stdio. A child stuck in exit() can hold the stdio locks for good
+ * (b32-mem: 12 children past "main returned" never ended, each holding ~330 MB), and a watchdog
+ * that logged through stderr then waited behind it instead of ending the process. */
+static void logLine(const char* format, ...) __attribute__((format(printf, 1, 2)));
+static void logLine(const char* format, ...)
+{
+    char line[1024];
+    int n = snprintf(line, sizeof(line), "WPEB t=%.0f ", nowMs() - startMs);
+    va_list args;
+    va_start(args, format);
+    int m = vsnprintf(line + n, sizeof(line) - n - 1, format, args);
+    va_end(args);
+    n += std::min(std::max(m, 0), static_cast<int>(sizeof(line)) - n - 2);
+    line[n++] = '\n';
+    for (int off = 0; off < n;) {
+        ssize_t w = write(STDERR_FILENO, line + off, n - off);
+        if (w < 0 && errno == EINTR)
+            continue;
+        if (w <= 0)
+            break;
+        off += static_cast<int>(w);
+    }
+}
+
+#define LOG(...) logLine(__VA_ARGS__)
 
 static void logFootprint(const char* role)
 {
@@ -232,6 +252,7 @@ static constexpr unsigned orphanPollMs = 100;
 static constexpr unsigned orphanGraceMs = 1500;
 static constexpr unsigned stallRepeatMs = 60000;
 static constexpr unsigned stallFirstSampledReport = 1; /* the report 60 s into a stall */
+static constexpr unsigned exitGraceMs = 5000; /* a child's exit() after its main returned */
 static constexpr unsigned stallLastSampledReport = 3;
 static constexpr unsigned maxSamples = 64;
 static constexpr unsigned maxStackReturns = 32;
@@ -246,6 +267,8 @@ static int ipcFd = -1; /* a child's UI connection (argv[2]); the UI has none */
 static std::atomic<int64_t> lastBeatMs; /* nowMs() of the main loop's last beat; 0: none yet */
 static std::atomic<const char*> startPhase { "start" }; /* until the first beat: what main() runs */
 static std::atomic<int64_t> startPhaseMs;
+static std::atomic<int64_t> exitStartMs; /* a child: nowMs() when its main returned (exit() runs) */
+static std::atomic<int> childExitStatus;
 
 /* the start-up step the main thread enters (a start-up stall report names it) */
 static void startupPhase(const char* name)
@@ -444,6 +467,8 @@ static void* watchdog(void* arg)
     while (!parent || getppid() == parent) {
         usleep(orphanPollMs * 1000);
         ++polls;
+        if (exitStartMs.load() && nowMs() - static_cast<double>(exitStartMs.load()) > exitGraceMs)
+            break; /* exit() hangs: reported and ended below */
         if (rssPolls && polls % rssPolls == 0)
             logFootprint(processRole);
         if (stallMs <= 0)
@@ -512,6 +537,18 @@ static void* watchdog(void* arg)
             ipcSince = 0;
             ipcReported = false;
         }
+    }
+    if (const int64_t exitMs = exitStartMs.load()) {
+        /* main returned, but exit() (C++ static destructors, atexit handlers, the stdio flush)
+         * has not ended the process: where it waits, then the end exit() did not reach */
+        if (nowMs() - static_cast<double>(exitMs) < exitGraceMs)
+            usleep(static_cast<useconds_t>((exitGraceMs - (nowMs() - static_cast<double>(exitMs))) * 1000));
+        LOG("role=%s pid=%d exit-stall exit_ms=%.0f parent=%s", processRole, static_cast<int>(getpid()),
+            nowMs() - static_cast<double>(exitMs), getppid() == parent ? "alive" : "gone");
+        std::vector<ThreadCPU> none;
+        stallReport(stallFirstSampledReport, none);
+        LOG("role=%s pid=%d exit-stall _exit(%d)", processRole, static_cast<int>(getpid()), childExitStatus.load());
+        _exit(childExitStatus.load());
     }
     usleep(orphanGraceMs * 1000);
     LOG("role=%s pid=%d orphaned (UI pid %d gone %u ms ago), exiting", processRole, static_cast<int>(getpid()),
@@ -2043,6 +2080,8 @@ int main(int argc, char** argv)
         /* how long WebKit's own exit takes after the UI connection closed is the B4 orphan
          * question: this line and the watchdog's say which path ended the process */
         LOG("role=%s pid=%d main returned %d", processRole, static_cast<int>(getpid()), status);
+        childExitStatus.store(status);
+        exitStartMs.store(static_cast<int64_t>(nowMs())); /* the watchdog ends a hung exit() */
         return status;
     }
     return uiMain(argc, argv);
