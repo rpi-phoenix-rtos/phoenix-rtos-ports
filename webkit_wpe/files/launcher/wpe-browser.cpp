@@ -32,6 +32,9 @@
  *                           edge; never: no toolbar (WPE_BROWSER_TOOLBAR; headless: never)
  *     --no-chrome           the same as --toolbar=never
  *     --search=PREFIX       where plain words go (default DuckDuckGo's HTML search)
+ *     --autoplay=POLICY     <video>/<audio> autoplay in a build with media (USE video): muted
+ *                           (default, WebKit's: only without sound), allow, deny
+ *                           (WPE_BROWSER_AUTOPLAY)
  *   The process model (WebKit patch 0015; also from the environment). WebKit's own defaults are a
  *   desktop's: on a 4 GB Pi ~15 cached web processes and a prewarmed spare one.
  *     --process-cache=N     keep the web processes of at most N recently left sites, for a quick
@@ -557,6 +560,9 @@ static gboolean optPrewarm;
 static gboolean optNoProcessSwap;
 static int optHangSecs = -1;
 static int optStallSecs = -1;
+#if ENABLE_VIDEO
+static char* optAutoplay;
+#endif
 static char** optURIs;
 
 static const GOptionEntry optionEntries[] = {
@@ -586,6 +592,9 @@ static const GOptionEntry optionEntries[] = {
     { "no-process-swap", 0, 0, G_OPTION_ARG_NONE, &optNoProcessSwap, "One web process for every site", nullptr },
     { "hang-recovery", 0, 0, G_OPTION_ARG_INT, &optHangSecs, "Restart a web process unresponsive for S s during a navigation (default 30, 0 off)", "S" },
     { "stall-secs", 0, 0, G_OPTION_ARG_INT, &optStallSecs, "Every process reports a main loop (or start-up) stalled for S s (default 10, 0 off)", "S" },
+#if ENABLE_VIDEO
+    { "autoplay", 0, 0, G_OPTION_ARG_STRING, &optAutoplay, "Media autoplay: muted (default), allow, deny", "POLICY" },
+#endif
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_STRING_ARRAY, &optURIs, nullptr, "[URL|FILE|WORDS]" },
     { }
 };
@@ -605,6 +614,10 @@ static void optionsFromEnvironment()
         optCycleSecs = 60;
     if (!optToolbar && g_getenv("WPE_BROWSER_TOOLBAR"))
         optToolbar = g_strdup(g_getenv("WPE_BROWSER_TOOLBAR"));
+#if ENABLE_VIDEO
+    if (!optAutoplay && g_getenv("WPE_BROWSER_AUTOPLAY"))
+        optAutoplay = g_strdup(g_getenv("WPE_BROWSER_AUTOPLAY"));
+#endif
     auto number = [](const char* name, int fallback) {
         const char* value = g_getenv(name);
         return value && *value ? atoi(value) : fallback;
@@ -1872,9 +1885,24 @@ static int uiMain(int argc, char** argv)
     startupPhase("web-context");
     createWebContext();
     startupPhase("web-view");
+#if ENABLE_VIDEO
+    /* <video>/<audio>: a build with media (the port's USE video: ENABLE_VIDEO with WebKit patch
+     * 0030's FFmpeg player). A build without it has no engine, so media stay off there. */
+    const char* autoplay = optAutoplay ? optAutoplay : "muted";
+    WebKitAutoplayPolicy autoplayPolicy = WEBKIT_AUTOPLAY_ALLOW_WITHOUT_SOUND;
+    if (!strcmp(autoplay, "allow"))
+        autoplayPolicy = WEBKIT_AUTOPLAY_ALLOW;
+    else if (!strcmp(autoplay, "deny"))
+        autoplayPolicy = WEBKIT_AUTOPLAY_DENY;
+    else if (strcmp(autoplay, "muted")) {
+        fprintf(stderr, "wpe-browser: --autoplay wants muted, allow or deny\n");
+        return 1;
+    }
+    LOG("media autoplay=%s", autoplay);
+#endif
     WebKitSettings* settings = webkit_settings_new_with_settings(
         "enable-webgl", static_cast<gboolean>(ENABLE_WEBGL && optWebGL),
-        "enable-media", FALSE,
+        "enable-media", ENABLE_VIDEO ? TRUE : FALSE,
         "enable-webaudio", FALSE,
         "enable-developer-extras", FALSE,
         "enable-page-cache", FALSE,
@@ -1914,14 +1942,23 @@ static int uiMain(int argc, char** argv)
         LOG("chrome on world=%s search=%s home=%s", chromeWorld, optSearch ? optSearch : defaultSearch, homeURI);
     }
 
+#if ENABLE_VIDEO
+    WebKitWebsitePolicies* policies = webkit_website_policies_new_with_policies("autoplay", autoplayPolicy, nullptr);
+#endif
     webView = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
         "display", display,
         "network-session", session,
         "settings", settings,
         "user-content-manager", contentManager,
+#if ENABLE_VIDEO
+        "website-policies", policies,
+#endif
         nullptr));
     g_object_unref(settings);
     g_object_unref(contentManager);
+#if ENABLE_VIDEO
+    g_object_unref(policies);
+#endif
 
     g_signal_connect(webView, "load-changed", G_CALLBACK(loadChanged), nullptr);
     g_signal_connect(webView, "load-failed", G_CALLBACK(loadFailed), nullptr);
