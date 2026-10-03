@@ -402,11 +402,12 @@ stage_deps() {
 		# (-pthread: the Phoenix gcc rejects it; pthreads are libphoenix. So is -lpthread -- a link to
 		# libphoenix.a -- and FFmpeg's Libs name it: met early on the link line, it made ld take
 		# libphoenix's allocator (malloc_dl.o) for _malloc_init before the compat objects define it,
-		# next to mimalloc: "multiple definition of malloc" (build 35))
+		# next to mimalloc: "multiple definition of malloc" (build 35). The same for -lm: libm.a is
+		# libphoenix.a too, and every link ends with it anyway, after the compat objects)
 		[ -z "${PHX_FFMPEG:-}" ] || sed -i -e "s|${PHX_FFMPEG%/}|${V}|g" "${f}"
 		sed -i -e "s|^prefix=.*|prefix=${V}|" -e "s|${GTK}/deps/[a-z0-9_-]*|${V}|g" -e "s|${WKD}/deps/sqlite3|${V}|g" \
 			-e "s|${WKD}|${V}|g" -e "s|${OSSL}|${V}|g" -e "s|${ICUP}|${V}|g" -e "s|${WLP}/prefix|${V}|g" -e "s|${B}|${V}|g" \
-			-e "s/ -pthread\b//g" -e "s/^\(Cflags\|Libs\): -pthread\b/\1:/" -e "s/ -lpthread\b//g" "${f}"
+			-e "s/ -pthread\b//g" -e "s/^\(Cflags\|Libs\): -pthread\b/\1:/" -e "s/ -lpthread\b//g" -e "s/ -lm\b//g" "${f}"
 	done
 
 	cat > "${VN}/pkg-config" <<EOF
