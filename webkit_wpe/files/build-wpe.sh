@@ -599,7 +599,9 @@ stage_configure() {
 	mkdir -p "${wb}"
 	# pkg_check_modules() caches its results: a changed dependency view needs a fresh cache
 	if [ -f "${wb}/CMakeCache.txt" ] && ! cmp -s "${V}/link-extra.txt" "${wb}.deps"; then rm -f "${wb}/CMakeCache.txt"; fi
-	PATH="$(dirname "${RUBY}"):${PATH}" cmake -G Ninja -S "${wsrc}" -B "${wb}" \
+	# pkg-config results are cached (pkgcfg_lib_*, __pkg_config_checked_*): a dependency whose .pc
+	# changed (FFmpeg's -lpthread, build 35) kept its old link flags. Re-read them every configure.
+	PATH="$(dirname "${RUBY}"):${PATH}" cmake -G Ninja -S "${wsrc}" -B "${wb}" -U "pkgcfg_lib_*" -U "__pkg_config_checked_*" \
 		-DCMAKE_TOOLCHAIN_FILE="${tcf}" "${WPE_CMAKE_OPTS[@]}" "${launcher[@]}" \
 		-DICU_ROOT="${V}" \
 		-DCMAKE_INSTALL_PREFIX=/usr \
