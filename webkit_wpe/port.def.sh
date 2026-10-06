@@ -35,7 +35,7 @@
 	#                             with USE webgl)
 	#   patches/webkit/0018       WPEPlatform Wayland: the event source never prepares a read twice
 	#                             (a skipped check() left the UI waiting on itself)
-	#   patches/webkit/0019       the frame watch: where each process's frame pipeline stands, for
+	#   patches/webkit/0020       the frame watch: where each process's frame pipeline stands, for
 	#                             the launcher's frame-stall reports (a page that stops drawing
 	#                             while every main loop runs)
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore

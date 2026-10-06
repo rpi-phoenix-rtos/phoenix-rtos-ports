@@ -286,7 +286,7 @@ static std::atomic<unsigned> presentedTotal;
 static std::atomic<int64_t> presentedLastMs;
 static std::atomic<int> presentStallMs; /* --frame-stall-secs in ms; 0: off */
 
-/* WebKit patch 0019 (PhoenixFrameWatch.h): this process's frame pipeline as one line, and the
+/* WebKit patch 0020 (PhoenixFrameWatch.h): this process's frame pipeline as one line, and the
  * kind of stall it is in (0: none) when a wait in it has lasted longer than limitMs. ui selects
  * the UI process's half (the backing store, the display link) or the web process's (the
  * compositor, the rendering updates). */
@@ -512,7 +512,7 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
 }
 
 /*
- * The frame watch (WebKit patch 0019; every web process and the UI, once a second, with the stall
+ * The frame watch (WebKit patch 0020; every web process and the UI, once a second, with the stall
  * limit of --stall-secs). A page can stop drawing while every main loop runs: the compositing
  * thread stuck inside a frame, a rendering update waiting for tiles or for the UI's frame-done,
  * the UI waiting for the compositor's frame callback. The patch records where each frame is; a
