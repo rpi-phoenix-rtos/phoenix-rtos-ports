@@ -1,0 +1,138 @@
+Subject: WPE on Phoenix: the UI process lets the web process render one frame ahead (opt-in)
+
+AcceleratedBackingStore sends FrameDone to the web process when WPEView's buffer-rendered fires,
+i.e. when the compositor's wl_surface.frame callback for that frame comes, and the web process's
+ThreadedCompositor does not composite again until FrameDone (State::InProgress until
+frameComplete()). WPEViewWayland cannot have two frames in flight either (it RELEASE_ASSERTs on a
+second render_buffer before the frame callback). So exactly one frame is in flight, and every
+stage of the path runs in series once per frame: the web process's composite (with shared-memory
+frames also its GPU readback into the ShareableBitmap), this process's copy of the frame into a
+wl_shm pool, the compositor's upload of it, its composite and its wait for the next vblank. On the
+Raspberry Pi 4 (labwc on the V3D, a 1000x620 view, CPU raster, shared-memory frames) that held a
+30 fps <video> to ~10 composited frames per second whatever the video's size, and labwc flipped
+once per composited frame: the sum of the stages, not any one of them, sets the rate.
+
+With WPE_PHOENIX_FRAME_AHEAD=1 (wpe-browser --frame-ahead) FrameDone goes as soon as a frame has
+been committed to the compositor, so the web process renders frame N+1 while the compositor shows
+frame N. A frame that arrives while frame N still waits for its frame callback is held as the
+pending buffer (the web process sends no further frame until its FrameDone, so at most one is
+held) and committed from bufferRendered(); its FrameDone goes then. Still exactly one FrameDone
+per Frame, still at most one frame committed per frame callback, so the web process runs at most
+one frame ahead of the screen and requestAnimationFrame stays paced by the compositor. The web
+process's swap chain holds the committed, the held and the rendering target (4 at most). The rate
+becomes that of the slower side instead of the sum of both; latency grows by up to one frame.
+
+Off by default until the Pi's A/B (wpe-browser's b8.sh transport). The UI process says which
+pacing a view uses, once per backing store:
+
+  WPEB-WEBKIT frame-pacing pid=<p> ahead=0|1
+
+diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h
+--- a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h
++++ b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.h
+@@ -110,6 +110,14 @@
+     HashMap<uint64_t, GRefPtr<WPEBuffer>> m_buffers;
+     HashMap<WPEBuffer*, uint64_t> m_bufferIDs;
+     std::optional<unsigned> m_targetBufferCount;
++#if OS(PHOENIX)
++    // One frame ahead (WPE_PHOENIX_FRAME_AHEAD=1): FrameDone goes when a frame is committed to the
++    // compositor, not when its frame callback comes; a frame that arrives while the previous one
++    // still waits for its callback is held in m_pendingBuffer until then.
++    bool m_frameAhead { false };
++    bool m_waitingForFrameCallback { false };
++    bool m_isRenderingBuffer { false };
++#endif
+ };
+ 
+ } // namespace WebKit
+diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+--- a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
++++ b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+@@ -37,6 +37,13 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/glib/GUniquePtr.h>
+ 
++#if OS(PHOENIX)
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <wtf/SetForScope.h>
++#endif
++
+ #if OS(ANDROID)
+ #include <drm/drm_fourcc.h>
+ #elif USE(LIBDRM)
+@@ -85,6 +92,18 @@
+         auto& backingStore = *static_cast<AcceleratedBackingStore*>(userData);
+         backingStore.toplevelChanged();
+     }), this);
++
++#if OS(PHOENIX)
++    // Phoenix-RTOS: with one frame in flight, the web process composites frame N+1 only after the
++    // compositor's frame callback for frame N, so every cost of the path adds up per frame: the
++    // web process's composite (and, with shared-memory frames, its GPU readback), this process's
++    // copy into wl_shm, the compositor's upload and its wait for the next vblank. One frame ahead,
++    // the web process renders the next frame while the compositor shows this one, so the frame
++    // rate is set by the slower side instead of their sum (wpe-browser --frame-ahead).
++    const char* frameAhead = getenv("WPE_PHOENIX_FRAME_AHEAD");
++    m_frameAhead = frameAhead && !strcmp(frameAhead, "1");
++    WTFLogAlways("WPEB-WEBKIT frame-pacing pid=%d ahead=%d", getpid(), m_frameAhead);
++#endif
+ }
+ 
+ AcceleratedBackingStore::~AcceleratedBackingStore()
+@@ -286,6 +305,15 @@
+     if (!wpe_view_get_toplevel(m_wpeView.get()))
+         return;
+ 
++#if OS(PHOENIX)
++    // One frame ahead: the frame on its way to the screen has not had its frame callback yet, so
++    // this one waits here; bufferRendered() commits it.
++    if (m_frameAhead && m_waitingForFrameCallback)
++        return;
++    SetForScope isRenderingBuffer(m_isRenderingBuffer, true);
++    m_waitingForFrameCallback = true;
++#endif
++
+     // Rely on the layout of IntRect matching that of WPERectangle
+     // to pass directly a pointer below instead of using copies.
+     static_assert(sizeof(WebCore::IntRect) == sizeof(WPERectangle));
+@@ -296,10 +324,19 @@
+     GUniqueOutPtr<GError> error;
+     if (!wpe_view_render_buffer(m_wpeView.get(), m_pendingBuffer.get(), rects, m_pendingDamageRects.size(), &error.outPtr())) {
+         g_warning("Failed to render frame: %s", error->message);
++#if OS(PHOENIX)
++        m_waitingForFrameCallback = false;
++#endif
+         frameDone();
+         m_pendingBuffer = nullptr;
+-    } else
++    } else {
+         m_committedBuffer = WTF::move(m_pendingBuffer);
++#if OS(PHOENIX)
++        // The web process may render the next frame now, while the compositor shows this one.
++        if (m_frameAhead)
++            frameDone();
++#endif
++    }
+     m_pendingDamageRects = { };
+ }
+ 
+@@ -311,6 +348,17 @@
+ 
+ void AcceleratedBackingStore::bufferRendered()
+ {
++#if OS(PHOENIX)
++    m_waitingForFrameCallback = false;
++    if (m_frameAhead) {
++        // This frame's FrameDone went when it was committed. A frame held meanwhile goes to the
++        // compositor now, unless its rendering fence is still pending (the fence monitor commits
++        // it then) or this is the view answering synchronously from inside renderPendingBuffer().
++        if (!m_isRenderingBuffer && m_webPage && m_pendingBuffer && !m_fenceMonitor.hasFileDescriptor())
++            renderPendingBuffer();
++        return;
++    }
++#endif
+     frameDone();
+ }
+ 
