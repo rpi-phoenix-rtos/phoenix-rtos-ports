@@ -199,18 +199,15 @@ diff --git a/Source/WebKit/UIProcess/DisplayLink.cpp b/Source/WebKit/UIProcess/D
 diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
 --- a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
 +++ b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
-@@ -37,6 +37,10 @@
- #include <wtf/TZoneMallocInlines.h>
- #include <wtf/glib/GUniquePtr.h>
- 
-+#if OS(PHOENIX)
+@@ -42,6 +42,7 @@
+ #include <string.h>
+ #include <unistd.h>
+ #include <wtf/SetForScope.h>
 +#include "PhoenixFrameWatch.h"
-+#endif
-+
+ #endif
+ 
  #if OS(ANDROID)
- #include <drm/drm_fourcc.h>
- #elif USE(LIBDRM)
-@@ -106,6 +110,9 @@
+@@ -125,6 +126,9 @@
              frameDone();
              m_pendingBuffer = nullptr;
              m_pendingDamageRects = { };
@@ -220,7 +217,7 @@ diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/We
          }
          m_buffers.clear();
          m_bufferIDs.clear();
-@@ -199,6 +206,9 @@
+@@ -218,6 +222,9 @@
  void AcceleratedBackingStore::frame(uint64_t bufferID, Rects&& damageRects, WTF::UnixFileDescriptor&& renderingFenceFD)
  {
      ASSERT(!m_pendingBuffer);
@@ -230,7 +227,7 @@ diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/We
      auto* buffer = m_buffers.get(bufferID);
      if (!buffer) {
          frameDone();
-@@ -206,6 +216,9 @@
+@@ -225,6 +232,9 @@
      }
  
      m_pendingBuffer = buffer;
@@ -240,7 +237,7 @@ diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/We
      m_pendingDamageRects = WTF::move(damageRects);
      if (wpe_display_use_explicit_sync(wpe_view_get_display(m_wpeView.get()))) {
          wpe_buffer_set_rendering_fence(m_pendingBuffer.get(), renderingFenceFD.release());
-@@ -294,28 +307,51 @@
+@@ -322,14 +332,24 @@
      const auto* rects = !m_pendingDamageRects.isEmpty() ? reinterpret_cast<const WPERectangle*>(m_pendingDamageRects.span().data()) : nullptr;
  
      GUniqueOutPtr<GError> error;
@@ -251,21 +248,21 @@ diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/We
 +#endif
      if (!wpe_view_render_buffer(m_wpeView.get(), m_pendingBuffer.get(), rects, m_pendingDamageRects.size(), &error.outPtr())) {
          g_warning("Failed to render frame: %s", error->message);
-+#if OS(PHOENIX)
+ #if OS(PHOENIX)
+         m_waitingForFrameCallback = false;
 +        PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.renderFailed);
 +        PhoenixFrameWatch::uiProcess.committedMs.store(0, std::memory_order_relaxed);
-+#endif
+ #endif
          frameDone();
          m_pendingBuffer = nullptr;
--    } else
-+    } else {
+     } else {
 +#if OS(PHOENIX)
 +        PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.framesRendered);
 +#endif
          m_committedBuffer = WTF::move(m_pendingBuffer);
-+    }
-     m_pendingDamageRects = { };
- }
+ #if OS(PHOENIX)
+         // The web process may render the next frame now, while the compositor shows this one.
+@@ -342,6 +362,9 @@
  
  void AcceleratedBackingStore::frameDone()
  {
@@ -275,15 +272,16 @@ diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/We
      if (RefPtr legacyMainFrameProcess = m_legacyMainFrameProcess.get())
          legacyMainFrameProcess->send(Messages::AcceleratedSurface::FrameDone(), m_surfaceID);
  }
- 
+@@ -349,6 +372,8 @@
  void AcceleratedBackingStore::bufferRendered()
  {
-+#if OS(PHOENIX)
+ #if OS(PHOENIX)
 +    PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.buffersRendered);
 +    PhoenixFrameWatch::uiProcess.committedMs.store(0, std::memory_order_relaxed);
-+#endif
-     frameDone();
- }
+     m_waitingForFrameCallback = false;
+     if (m_frameAhead) {
+         // This frame's FrameDone went when it was committed. A frame held meanwhile goes to the
+@@ -364,6 +389,9 @@
  
  void AcceleratedBackingStore::bufferReleased(WPEBuffer* buffer)
  {
