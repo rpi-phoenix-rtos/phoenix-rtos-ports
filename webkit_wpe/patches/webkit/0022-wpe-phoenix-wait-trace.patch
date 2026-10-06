@@ -1,0 +1,327 @@
+Subject: WPE on Phoenix: the wait trace and the display refresh in the frame watch (diagnostic)
+
+Build 36's WebGL check (b36-gate, B7 webgl-ab) no longer froze, as build 35 did ~15 s in: with
+patch 0021 the page's requestAnimationFrame stopped for ~4 s at a time (the page's raf-stall
+lines, idle_ms 3067..3860, every one resumed by the watch's next 1 s tick) and then went on,
+2-7 times a minute, in every run (JIT off, ephemeral session). The main loops kept running and
+the frame watch, at its 10 s limit, never fired. So something in the frame path waited for a
+wake-up that did not come, and since 0021 a timeout ends that wait; reading the code did not pin
+which wait. This patch makes one Pi run name it, without changing what the browser does:
+
+- WTF (ThreadingPOSIX.cpp): with WPE_PHOENIX_WAIT_TRACE=1 (or =<ms>), every WTF wait that lasted
+  500 ms or more (or <ms>) -- ParkingLot's parks, and through them Lock, Condition,
+  BinarySemaphore and the IPC timeouts all end in ThreadCondition::wait()/timedWait() -- says,
+  when it returns, whether it timed out or was woken, how long it waited and asked to, which
+  thread, and the return addresses on that thread's stack (rate-limited, stderr):
+
+    WPEB-WEBKIT wait-trace pid= tid= thread= wait=timed|untimed result=timeout|woken
+        waited_ms= asked_ms= suppressed= ret=0x.. ...
+
+  WTF threads are named on Phoenix too (pthread_setname_np(), kept by libphoenix), so thread=
+  says "ThreadedComposi", "VBlankMonitor", "SkiaGPUWorker" and so on.
+
+- The frame watch (patch 0020) also follows the display refreshes that drive
+  requestAnimationFrame in the web process: when its WebDisplayRefreshMonitor started and
+  stopped the UI's display link and when the last refresh reached the main thread. A new stall
+  kind, no-refresh, is a link that is on with no refresh for longer than the limit; the web
+  line ends with
+
+    display-link on=0|1 link_ms= starts= stops= refreshes= refresh_ms=
+
+Run with wpe-browser --stall-secs=2 --frame-stall-secs=2, each pause of 2 s or more gets a
+frame-stall (web) and a present-stall (UI) report naming the pipeline stage it is in, and the
+wait trace names the wait whose timeout ended it. OS(PHOENIX) only; diagnostic, to be removed
+with the root cause's fix.
+
+diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+--- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
++++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+@@ -77,6 +77,15 @@
+ #include <mach/thread_switch.h>
+ #endif
+ 
++#if OS(PHOENIX)
++#include <atomic>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/threads.h>
++#include <unistd.h>
++#endif
++
+ #if OS(QNX)
+ #define SA_RESTART 0
+ #endif
+@@ -372,6 +381,16 @@ void Thread::initializeCurrentThreadInternal(const char* threadName)
+     rename_thread(find_thread(nullptr), normalizeThreadName(threadName));
+ #elif OS(LINUX)
+     prctl(PR_SET_NAME, normalizeThreadName(threadName));
++#elif OS(PHOENIX)
++    // libphoenix keeps a name per thread (15 characters and the NUL, as Linux) for
++    // pthread_getname_np(); the wait trace below prints it. "org.webkit.ThreadedCompositor"
++    // becomes "ThreadedComposi": the last dotted component, cut to fit.
++    if (threadName) {
++        const char* dot = strrchr(threadName, '.');
++        char name[16];
++        snprintf(name, sizeof(name), "%s", dot && dot[1] ? dot + 1 : threadName);
++        pthread_setname_np(pthread_self(), name);
++    }
+ #else
+     UNUSED_PARAM(threadName);
+ #endif
+@@ -674,11 +693,129 @@ ThreadCondition::~ThreadCondition()
+ {
+     pthread_cond_destroy(&m_condition);
+ }
+-    
++
++#if OS(PHOENIX)
++// The wait trace (Phoenix-RTOS diagnostic; WPE_PHOENIX_WAIT_TRACE=1, or =<ms>). Every WTF wait --
++// ParkingLot's parks and through them Lock, Condition, BinarySemaphore and the IPC layer's waits
++// -- ends in ThreadCondition::wait() or timedWait(). With the variable set, each one that lasted
++// at least the threshold (500 ms for 1..9, otherwise the given milliseconds) says so when it
++// returns, on stderr, at most 16 lines a second (suppressed= counts the rest):
++//
++//   WPEB-WEBKIT wait-trace pid=P tid=T thread=NAME wait=timed|untimed result=timeout|woken
++//       waited_ms=W asked_ms=A suppressed=S ret=0x.. 0x.. ...
++//
++// A timed wait that ran to its timeout names a missed wake-up that the timeout covered; an
++// untimed one woken after a long time names a thread that sat idle (or blocked) that long. ret=
++// lists the return addresses found on the waiting thread's stack (words in the program's code
++// just after a BL/BLR: WebKit keeps no frame pointers), the nearest first; symbolise them with
++// addr2line -f -C -e <the unstripped wpe-browser>. Off (one getenv() at the first wait) costs
++// nothing else.
++extern "C" void _init(void) __attribute__((weak));
++extern "C" void _fini(void) __attribute__((weak));
++// StackBounds.cpp: the calling thread's stack (libphoenix has no pthread_getattr_np() of its own)
++extern "C" int pthread_getattr_np(pthread_t, pthread_attr_t*);
++
++static int64_t phoenixWaitTraceThresholdMs()
++{
++    static std::atomic<int64_t> threshold { -1 };
++    int64_t value = threshold.load(std::memory_order_relaxed);
++    if (value >= 0)
++        return value;
++    const char* env = getenv("WPE_PHOENIX_WAIT_TRACE");
++    long requested = env ? strtol(env, nullptr, 10) : 0;
++    value = requested <= 0 ? 0 : requested < 10 ? 500 : requested;
++    threshold.store(value, std::memory_order_relaxed);
++    return value;
++}
++
++static int64_t phoenixMonotonicMs()
++{
++    timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return static_cast<int64_t>(now.tv_sec) * 1000 + now.tv_nsec / 1000000;
++}
++
++static bool phoenixIsReturnAddress(uintptr_t value)
++{
++    const uintptr_t codeStart = reinterpret_cast<uintptr_t>(&_init), codeEnd = reinterpret_cast<uintptr_t>(&_fini);
++    if (!codeStart || !codeEnd || value < codeStart + 4 || value >= codeEnd || (value & 3))
++        return false;
++    const uint32_t insn = *reinterpret_cast<const uint32_t*>(value - 4);
++    return (insn & 0xfc000000U) == 0x94000000U /* BL */ || (insn & 0xfffffc1fU) == 0xd63f0000U /* BLR */;
++}
++
++static NEVER_INLINE void phoenixWaitTraceEnd(int64_t startMs, int64_t thresholdMs, int64_t askedMs, bool timedOut)
++{
++    const int64_t nowMs = phoenixMonotonicMs();
++    const int64_t waitedMs = nowMs - startMs;
++    if (waitedMs < thresholdMs)
++        return;
++
++    static constexpr unsigned linesPerSecond = 16;
++    static std::atomic<int64_t> windowStartMs { 0 };
++    static std::atomic<unsigned> linesInWindow { 0 };
++    static std::atomic<unsigned> suppressed { 0 };
++    int64_t window = windowStartMs.load(std::memory_order_relaxed);
++    if (nowMs - window >= 1000 && windowStartMs.compare_exchange_strong(window, nowMs, std::memory_order_relaxed))
++        linesInWindow.store(0, std::memory_order_relaxed);
++    if (linesInWindow.fetch_add(1, std::memory_order_relaxed) >= linesPerSecond) {
++        suppressed.fetch_add(1, std::memory_order_relaxed);
++        return;
++    }
++
++    char name[16];
++    if (pthread_getname_np(pthread_self(), name, sizeof(name)) || !name[0])
++        snprintf(name, sizeof(name), "-");
++
++    char line[640];
++    int length = snprintf(line, sizeof(line), "WPEB-WEBKIT wait-trace pid=%d tid=%d thread=%s wait=%s result=%s waited_ms=%lld asked_ms=%lld suppressed=%u ret=",
++        static_cast<int>(getpid()), static_cast<int>(gettid()), name, askedMs < 0 ? "untimed" : "timed", timedOut ? "timeout" : "woken",
++        static_cast<long long>(waitedMs), static_cast<long long>(askedMs), suppressed.exchange(0, std::memory_order_relaxed));
++
++    // The return addresses on this thread's stack, up to 16 KiB above here and never past its top
++    static constexpr unsigned maxReturns = 16;
++    static constexpr uintptr_t maxScan = 16 * 1024;
++    const uintptr_t here = reinterpret_cast<uintptr_t>(__builtin_frame_address(0)) & ~static_cast<uintptr_t>(7);
++    uintptr_t origin = 0;
++    pthread_attr_t attributes;
++    if (!pthread_getattr_np(pthread_self(), &attributes)) {
++        void* bound = nullptr;
++        size_t size = 0;
++        if (!pthread_attr_getstack(&attributes, &bound, &size) && bound)
++            origin = reinterpret_cast<uintptr_t>(bound) + size;
++        pthread_attr_destroy(&attributes);
++    }
++    const uintptr_t top = origin > here ? std::min(origin, here + maxScan) : here;
++    unsigned returns = 0;
++    for (uintptr_t at = here; at + sizeof(uint64_t) <= top && returns < maxReturns && length > 0 && length < static_cast<int>(sizeof(line)) - 24; at += sizeof(uint64_t)) {
++        const uintptr_t value = *reinterpret_cast<const uintptr_t*>(at);
++        if (!phoenixIsReturnAddress(value))
++            continue;
++        length += snprintf(line + length, sizeof(line) - length, "%s0x%lx", returns ? " " : "", static_cast<unsigned long>(value));
++        returns++;
++    }
++    if (length < 0)
++        return;
++    if (length > static_cast<int>(sizeof(line)) - 2)
++        length = sizeof(line) - 2;
++    line[length++] = '\n';
++    ssize_t written = write(STDERR_FILENO, line, length);
++    UNUSED_VARIABLE(written);
++}
++#endif
++
+ void ThreadCondition::wait(Mutex& mutex)
+ {
++#if OS(PHOENIX)
++    const int64_t traceMs = phoenixWaitTraceThresholdMs();
++    const int64_t startMs = traceMs ? phoenixMonotonicMs() : 0;
++#endif
+     int result = pthread_cond_wait(&m_condition, &mutex.impl());
+     ASSERT_UNUSED(result, !result);
++#if OS(PHOENIX)
++    if (traceMs)
++        phoenixWaitTraceEnd(startMs, traceMs, -1, false);
++#endif
+ }
+ 
+ bool ThreadCondition::timedWait(Mutex& mutex, WallTime absoluteTime)
+@@ -719,7 +856,12 @@ bool ThreadCondition::timedWait(Mutex& mutex, WallTime absoluteTime)
+         targetTime.tv_sec++;
+         targetTime.tv_nsec -= 1000000000;
+     }
+-    return !pthread_cond_clockwait(&m_condition, &mutex.impl(), CLOCK_MONOTONIC, &targetTime);
++    const int64_t traceMs = phoenixWaitTraceThresholdMs();
++    const int64_t startMs = traceMs ? phoenixMonotonicMs() : 0;
++    int result = pthread_cond_clockwait(&m_condition, &mutex.impl(), CLOCK_MONOTONIC, &targetTime);
++    if (traceMs)
++        phoenixWaitTraceEnd(startMs, traceMs, static_cast<int64_t>(remaining * 1000), result == ETIMEDOUT);
++    return !result;
+ #else
+     double rawSeconds = absoluteTime.secondsSinceEpoch().value();
+ 
+diff --git a/Source/WebKit/Shared/PhoenixFrameWatch.h b/Source/WebKit/Shared/PhoenixFrameWatch.h
+--- a/Source/WebKit/Shared/PhoenixFrameWatch.h
++++ b/Source/WebKit/Shared/PhoenixFrameWatch.h
+@@ -76,6 +76,16 @@ struct WebProcessState {
+     std::atomic<int64_t> renderingUpdateMs { 0 };
+     std::atomic<bool> waitingForRenderer { false };
+     std::atomic<int64_t> waitingForRendererMs { 0 };
++    // WebDisplayRefreshMonitor and WebProcess (main thread): the display refreshes that drive
++    // requestAnimationFrame. The display link is on while this process has asked the UI's
++    // DisplayLink for refreshes (StartDisplayLink, until StopDisplayLink); each refresh that
++    // reaches the main thread counts in refreshes.
++    std::atomic<bool> displayLinkOn { false };
++    std::atomic<int64_t> displayLinkChangeMs { 0 };
++    std::atomic<uint64_t> displayLinkStarts { 0 };
++    std::atomic<uint64_t> displayLinkStops { 0 };
++    std::atomic<uint64_t> refreshes { 0 };
++    std::atomic<int64_t> refreshMs { 0 };
+ };
+ 
+ struct UIProcessState {
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
+@@ -1009,11 +1009,15 @@ int wpe_phoenix_frame_watch(int ui, int64_t limitMs, char* line, size_t size)
+     } else if (!suspended && load(s.waitingForRenderer) && exceeds(age(s.waitingForRendererMs))) {
+         kind = 6;
+         kindName = "renderer"; // the main thread waits for a composition that never reports back
++    } else if (!suspended && load(s.displayLinkOn) && exceeds(now - std::max(load(s.displayLinkChangeMs), load(s.refreshMs)))) {
++        kind = 9;
++        kindName = "no-refresh"; // requestAnimationFrame asked the UI's display link for a refresh, none came
+     }
+     snprintf(line, size, "frame-watch kind=%s compositor state=%s state_ms=%lld phase=%s phase_ms=%lld compositions=%llu"
+         " suspended=%u tiles_waiting=%d tiles_wait_ms=%lld tiles_pending=%d frames_sent=%llu frame_sent_ms=%lld"
+         " frames_done=%llu frame_done_ms=%lld released=%llu targets_locked=%u targets_free=%u no_target=%llu"
+-        " updates=%llu update_ms=%lld waiting_for_renderer=%d renderer_wait_ms=%lld", kindName,
++        " updates=%llu update_ms=%lld waiting_for_renderer=%d renderer_wait_ms=%lld"
++        " display-link on=%d link_ms=%lld starts=%llu stops=%llu refreshes=%llu refresh_ms=%lld", kindName,
+         state < std::size(stateNames) ? stateNames[state] : "?", age(s.stateMs),
+         phase < std::size(phaseNames) ? phaseNames[phase] : "?", age(s.phaseMs),
+         static_cast<unsigned long long>(load(s.compositions)), load(s.suspended), load(s.waitingForTiles) ? 1 : 0,
+@@ -1023,7 +1027,9 @@ int wpe_phoenix_frame_watch(int ui, int64_t limitMs, char* line, size_t size)
+         static_cast<unsigned long long>(load(s.buffersReleased)), load(s.targetsLocked), load(s.targetsFree),
+         static_cast<unsigned long long>(load(s.noTarget)), static_cast<unsigned long long>(load(s.renderingUpdates)),
+         age(s.renderingUpdateMs), load(s.waitingForRenderer) ? 1 : 0,
+-        load(s.waitingForRenderer) ? age(s.waitingForRendererMs) : -1LL);
++        load(s.waitingForRenderer) ? age(s.waitingForRendererMs) : -1LL,
++        load(s.displayLinkOn) ? 1 : 0, age(s.displayLinkChangeMs), static_cast<unsigned long long>(load(s.displayLinkStarts)),
++        static_cast<unsigned long long>(load(s.displayLinkStops)), static_cast<unsigned long long>(load(s.refreshes)), age(s.refreshMs));
+     return kind;
+ }
+ #endif // OS(PHOENIX)
+diff --git a/Source/WebKit/WebProcess/WebPage/WebDisplayRefreshMonitor.cpp b/Source/WebKit/WebProcess/WebPage/WebDisplayRefreshMonitor.cpp
+--- a/Source/WebKit/WebProcess/WebPage/WebDisplayRefreshMonitor.cpp
++++ b/Source/WebKit/WebProcess/WebPage/WebDisplayRefreshMonitor.cpp
+@@ -36,6 +36,10 @@
+ #include <WebCore/DisplayRefreshMonitor.h>
+ #include <wtf/text/TextStream.h>
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#endif
++
+ #if PLATFORM(MAC)
+ #include <WebCore/RunLoopObserver.h>
+ #endif
+@@ -96,6 +100,10 @@ bool WebDisplayRefreshMonitor::startNotificationMechanism()
+     m_runLoopObserver->schedule(retainPtr(CFRunLoopGetCurrent()).get());
+ #endif
+     m_displayLinkIsActive = true;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::webProcess.displayLinkOn.store(true, std::memory_order_relaxed);
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.displayLinkStarts, &PhoenixFrameWatch::webProcess.displayLinkChangeMs);
++#endif
+ 
+     return true;
+ }
+@@ -111,6 +119,10 @@ void WebDisplayRefreshMonitor::stopNotificationMechanism()
+     m_runLoopObserver->invalidate();
+ #endif
+     m_displayLinkIsActive = false;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::webProcess.displayLinkOn.store(false, std::memory_order_relaxed);
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.displayLinkStops, &PhoenixFrameWatch::webProcess.displayLinkChangeMs);
++#endif
+ }
+ 
+ void WebDisplayRefreshMonitor::adjustPreferredFramesPerSecond(FramesPerSecond preferredFramesPerSecond)
+diff --git a/Source/WebKit/WebProcess/WebProcess.cpp b/Source/WebKit/WebProcess/WebProcess.cpp
+--- a/Source/WebKit/WebProcess/WebProcess.cpp
++++ b/Source/WebKit/WebProcess/WebProcess.cpp
+@@ -273,6 +273,10 @@
+ #include <WebCore/GraphicsContextGLTextureMapperGBM.h>
+ #endif
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#endif
++
+ #undef WEBPROCESS_RELEASE_LOG
+ #define RELEASE_LOG_SESSION_ID (m_sessionID ? m_sessionID->toUInt64() : 0)
+ #if RELEASE_LOG_DISABLED
+@@ -2388,6 +2392,9 @@ void WebProcess::setAppBadge(WebCore::Frame* frame, const WebCore::SecurityOrigi
+ void WebProcess::displayDidRefresh(uint32_t displayID, const DisplayUpdate& displayUpdate)
+ {
+     ASSERT(RunLoop::isMain());
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.refreshes, &PhoenixFrameWatch::webProcess.refreshMs);
++#endif
+     protect(eventDispatcher())->notifyScrollingTreesDisplayDidRefresh(displayID);
+     DisplayRefreshMonitorManager::sharedManager().displayDidRefresh(displayID, displayUpdate);
+ }

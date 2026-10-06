@@ -527,8 +527,10 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
  *       (a rendering update waits for tiles still painting), frame-done (the UI never answered
  *       the frame), no-frame (a composition sent no frame, so none can complete), scheduled (a
  *       composition due that the compositing thread never ran), renderer (the main thread
- *       waits for a composition that never reports back); UI: ui-pending (a received frame
- *       not handed to the view), ui-callback (the compositor never sent the frame callback)
+ *       waits for a composition that never reports back), no-refresh (requestAnimationFrame
+ *       asked the UI's display link for a refresh and none came: patch 0022); UI: ui-pending (a
+ *       received frame not handed to the view), ui-callback (the compositor never sent the
+ *       frame callback)
  *
  * Report 0 comes with the thread list (stall-thread), report 1, 20 s later if the stall lasts,
  * with every thread's registers and stack (stall-sample, stall-stack), and then asks the peer
@@ -544,7 +546,8 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
  *   present-stall n=K report=R presented=N idle_ms=M frame-watch kind=.. backing-store ...
  *
  * The UI's line also counts the display link's ticks and the ticks it sent (fired=) to a web
- * process's requestAnimationFrame.
+ * process's requestAnimationFrame. A present stall asks the peers for their reports with its first
+ * report already (a frame stall only with its second, 20 s on).
  */
 struct FrameStall {
     explicit FrameStall(const char* name)
@@ -552,6 +555,7 @@ struct FrameStall {
     {
     }
     const char* what; /* "frame-stall" or "present-stall" */
+    bool peersAtFirstReport = false; /* ask the peers for theirs with report 0, not only report 1 */
     unsigned count = 0;
     double since = 0; /* when the current one began; 0: none */
     unsigned reports = 0;
@@ -600,7 +604,7 @@ static void frameStallStep(FrameStall& stall, bool stalled, const char* line)
         return;
     LOG("role=%s pid=%d %s n=%u report=%u %s", processRole, pid, stall.what, stall.count, stall.reports, line);
     stallReport(stall.reports ? stallFirstSampledReport : 0, stall.cpu);
-    if (stall.reports++)
+    if (stall.reports++ || stall.peersAtFirstReport)
         askPeersForReports();
 }
 
@@ -631,6 +635,9 @@ static void* watchdog(void* arg)
     /* the frame watch: the web process's compositor, the UI's backing store and its view */
     const int frameRole = !strcmp(processRole, "ui") ? 1 : !strcmp(processRole, "web") ? 0 : -1;
     FrameStall frameStall("frame-stall"), presentStall("present-stall");
+    /* a view that stopped presenting: the web process's frame watch and thread samples come with
+     * the first report, while a short pause (B7's ~4 s requestAnimationFrame pauses) still lasts */
+    presentStall.peersAtFirstReport = true;
     double lastRequestReport = -static_cast<double>(reportRequestMinMs);
     char frameLine[768];
     while (!parent || getppid() == parent) {

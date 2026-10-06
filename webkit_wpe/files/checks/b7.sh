@@ -21,6 +21,12 @@
 #               W1c --cpu-rendering, --webgl            (the Skia GPU painting threads' part)
 #               W1e the control with --ephemeral        (build 35's session: no console lines, but
 #                                                         the page's title still names a stall)
+#             Build 36 paused instead of freezing (rAF stopped ~4 s at a time, then resumed), so
+#             each run also names the pause: WPE_PHOENIX_WAIT_TRACE=1 (WebKit patch 0022: every WTF
+#             wait of 500 ms or more, timed out or woken, with its thread and return addresses)
+#             and the frame watch at 2 s instead of 10 (--stall-secs=2 --frame-stall-secs=2: the
+#             web process's frame-stall kind -- render, tiles, frame-done, renderer, no-refresh --
+#             and the UI's display link, for every pause; frame-stall-end gives its length)
 #   headless  no session: the B4 checksum with this binary (crc32=c3e96bf3), once as is and once
 #             with --dmabuf, which a headless view must refuse (same checksum)
 #
@@ -113,10 +119,12 @@ inner() {
 			;;
 		webgl-ab)
 			local page="${PAGES}/b7-webgl.html?secs=60&tris=20000"
-			run W1 "${page}" --webgl
-			run W1n "${page}" JSC_useJIT=false --webgl
-			run W1c "${page}" --webgl --cpu-rendering
-			run W1e "${page}" --webgl --ephemeral
+			local trace=(WPE_PHOENIX_WAIT_TRACE=1)
+			local watch=(--stall-secs=2 --frame-stall-secs=2)
+			run W1 "${page}" "${trace[@]}" --webgl "${watch[@]}"
+			run W1n "${page}" "${trace[@]}" JSC_useJIT=false --webgl "${watch[@]}"
+			run W1c "${page}" "${trace[@]}" --webgl --cpu-rendering "${watch[@]}"
+			run W1e "${page}" "${trace[@]}" --webgl --ephemeral "${watch[@]}"
 			;;
 	esac
 	echo "B7 ${B7_INNER} done t=${SECONDS}"
