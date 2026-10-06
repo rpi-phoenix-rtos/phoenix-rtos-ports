@@ -12,7 +12,61 @@
  static void
  wait_for_reply(struct rpc_context *rpc, struct sync_cb_data *cb_data)
  {
-@@ -262,6 +267,7 @@
+@@ -256,12 +261,61 @@
+ 	}
+ }
+ 
++/* Complete every PDU this context still holds, with an error, before a sync
++ * call gives up on its reply.
++ *
++ * A sync call's cb_data lives on the caller's stack, and every PDU issued for it
++ * points at that cb_data. Returning while any such PDU is still queued leaves a
++ * pointer into a dead frame: whoever completes the PDU later -- a reconnect that
++ * finally gets a reply, or rpc_destroy_context() cancelling it -- writes
++ * is_finished/status into whatever frame occupies that stack slot by then.
++ *
++ * rpc_disconnect() alone is not enough. It only fails the queued PDUs when it
++ * finds the transport connected, and returns early otherwise. A PDU that hit its
++ * per-PDU timeout has been through rpc_reconnect_requeue(), which clears
++ * is_connected and moves it back to the outqueue -- so a deadline that expires
++ * during a reconnect, which is exactly when a deadline expires, finds
++ * is_connected == 0 and the PDUs survive. Nor does rpc_error_all_pdus() see a
++ * reply that was being read when we stopped: rpc_find_pdu() unlinks that PDU
++ * into rpc->pdu, so put it back on the outqueue first, as
++ * rpc_reconnect_requeue() does.
++ *
++ * The context is unusable afterwards -- no socket (nfs_get_fd() == -1), no
++ * reconnect pending -- and the caller is expected to rebuild it. */
++static void
++abandon_all_pdus(struct rpc_context *rpc, const char *error)
++{
++	rpc_disconnect(rpc, error);
++
++	/* No more callbacks from a reconnect that rpc_disconnect() cut short. */
++	rpc->connect_cb = NULL;
++	/* Mid-reconnect, the previous socket is parked in old_fd (to be dup2()'d
++	 * over by the new connection) and rpc_get_fd() reports it. Nothing else
++	 * closes it -- not rpc_disconnect(), not rpc_destroy_context() -- so close
++	 * it here: otherwise every abandoned call leaks a socket, and the context
++	 * still looks connected to anyone asking nfs_get_fd(). */
++	if (rpc->old_fd) {
++		close(rpc->old_fd);
++		rpc->old_fd = 0;
++	}
++
++	if (rpc->pdu != NULL) {
++		rpc_return_to_outqueue(rpc, rpc->pdu);
++		rpc->pdu = NULL;
++	}
++	rpc->inpos = 0;
++	rpc->state = READ_RM;
++
++	rpc_error_all_pdus(rpc, error);
++}
++
+ static void
+ wait_for_nfs_reply(struct nfs_context *nfs, struct sync_cb_data *cb_data)
+ {
  	struct pollfd pfd;
  	int revents;
  	int ret;
@@ -20,7 +74,7 @@
  
  #ifdef HAVE_MULTITHREADING
          if(nfs->rpc->multithreading_enabled) {
-@@ -269,6 +275,28 @@
+@@ -269,6 +323,28 @@
                  return;
          }
  #endif
@@ -49,17 +103,16 @@
  	while (!cb_data->is_finished) {
  
  		pfd.fd = nfs_get_fd(nfs);
-@@ -290,6 +318,16 @@
+@@ -290,6 +366,15 @@
                          rpc_error_all_pdus(nfs->rpc, "RPC ERROR: Failed to reconnect async");
  			break;
  		}
 +
 +		if (deadline > 0 && rpc_current_time() > deadline) {
 +			nfs_set_error(nfs, "Timeout reached");
-+			/* Drop the connection and complete every outstanding PDU.
-+			 * cb_data lives on our caller's stack, so the queued PDU
-+			 * that still points at it must not outlive this frame. */
-+			rpc_disconnect(nfs->rpc, "RPC ERROR: sync call timed out");
++			/* cb_data lives on our caller's stack: no PDU that
++			 * points at it may outlive this frame. */
++			abandon_all_pdus(nfs->rpc, "RPC ERROR: sync call timed out");
 +			cb_data->status = -ETIMEDOUT;
 +			break;
 +		}
