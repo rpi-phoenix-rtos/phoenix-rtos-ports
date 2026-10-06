@@ -4,7 +4,9 @@
   (b8.html?src=file:///usr/share/video-demo/h264-720p30-aac.mp4); the page plays it once with
   the native controls and reports through console.log, which wpe-browser writes to stdout:
   every line starts with "B8PAGE ". canPlayType() answers for the codecs the FFmpeg engine claims
-  come first. Copyright 2026 Phoenix Systems. SPDX-License-Identifier: BSD-3-Clause
+  come first. Optional: &seek=<at>:<to> seeks once; &loop=<n> plays with the loop attribute
+  until it has wrapped n times, then to the end; &again=<to> seeks to <to> 1 s after the first
+  'ended' and plays to the end again. Copyright 2026 Phoenix Systems. SPDX-License-Identifier: BSD-3-Clause
 -->
 <html>
 <head>
@@ -38,10 +40,21 @@ for (const type of ['video/mp4; codecs="avc1.4d401f, mp4a.40.2"', 'video/mp4; co
 report("src " + src);
 v.addEventListener("loadedmetadata", () => report("loadedmetadata size=" + v.videoWidth + "x" + v.videoHeight + " duration=" + v.duration.toFixed(2)));
 v.addEventListener("canplay", () => report("canplay ready=" + v.readyState));
-v.addEventListener("playing", () => report("playing current=" + v.currentTime.toFixed(2)));
+let playingAt = -1;
+v.addEventListener("playing", () => {
+    if (playingAt < 0)
+        playingAt = performance.now();
+    report("playing current=" + v.currentTime.toFixed(2));
+});
 v.addEventListener("pause", () => report("pause current=" + v.currentTime.toFixed(2)));
 v.addEventListener("seeked", () => report("seeked current=" + v.currentTime.toFixed(2)));
-v.addEventListener("ended", () => report("ended current=" + v.currentTime.toFixed(2)));
+// "ended current=<clip time> n=<count> since_play=<s of wall time since the first 'playing'>"
+let endedCount = 0;
+v.addEventListener("ended", () => {
+    endedCount++;
+    report("ended current=" + v.currentTime.toFixed(2) + " n=" + endedCount + " paused=" + v.paused
+        + " since_play=" + (playingAt < 0 ? "-" : ((performance.now() - playingAt) / 1000).toFixed(2)));
+});
 v.addEventListener("error", () => report("error code=" + (v.error ? v.error.code : "?") + " message=" + (v.error ? v.error.message : "")));
 let last = -1;
 v.addEventListener("timeupdate", () => {
@@ -62,6 +75,34 @@ if (seek) {
             report("seek-request from=" + v.currentTime.toFixed(2) + " to=" + to);
             v.currentTime = to;
         }
+    });
+}
+// optional loop check: b8.html?src=...&loop=<n>: the loop attribute until n wraps to the start
+const loops = Number(params.get("loop") || 0);
+if (loops > 0) {
+    let wraps = 0, lastTime = 0;
+    v.loop = true;
+    v.addEventListener("timeupdate", () => {
+        if (v.currentTime + 1 < lastTime) {
+            wraps++;
+            report("looped n=" + wraps + " from=" + lastTime.toFixed(2) + " to=" + v.currentTime.toFixed(2));
+            if (wraps >= loops)
+                v.loop = false;
+        }
+        lastTime = v.currentTime;
+    });
+}
+// optional seek after the end: b8.html?src=...&again=<to>
+const again = params.get("again");
+if (again !== null) {
+    v.addEventListener("ended", () => {
+        if (endedCount !== 1)
+            return;
+        setTimeout(() => {
+            report("after-end-seek from=" + v.currentTime.toFixed(2) + " to=" + Number(again));
+            v.currentTime = Number(again);
+            v.play().catch((e) => report("after-end-play rejected " + e.name));
+        }, 1000);
     });
 }
 v.src = src;

@@ -1,0 +1,58 @@
+Subject: WTF on Phoenix: ThreadCondition::timedWait waits on the monotonic clock (timed waits never timed out)
+
+ThreadCondition is PTHREAD_COND_INITIALIZER-initialised and timedWait() passes a WallTime
+deadline to pthread_cond_timedwait(), which reads it on the condition variable's clock. POSIX's
+default clock is CLOCK_REALTIME; libphoenix's is CLOCK_MONOTONIC (kept on purpose: the wall clock
+jumps from 1970 to the present during boot). A wall-clock deadline read on the monotonic clock
+lies some 56 years ahead, so every timed wait in WebKit -- ParkingLot's timed parks and through
+them Condition::waitFor/waitUntil, BinarySemaphore::waitFor, the IPC layer's timeouts -- lasted
+until the next signal. First seen as <video> never reaching its end (B8: the FFmpeg engine's
+packet queues wait 20 ms for a packet and would then drain the decoder; after the last packet
+nothing signals them).
+
+On Phoenix the remaining interval is waited with pthread_cond_clockwait(CLOCK_MONOTONIC), the
+condition variable's own clock, so a step of the wall clock (boot, NTP) does not stretch or cut
+the wait; ParkingLot re-checks its own deadline after every wake-up. Other platforms keep
+pthread_cond_timedwait().
+
+diff --git a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+--- a/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
++++ b/Source/WTF/wtf/posix/ThreadingPOSIX.cpp
+@@ -698,6 +698,29 @@
+         return true;
+     }
+ 
++#if OS(PHOENIX)
++    // libphoenix's condition variables wait on CLOCK_MONOTONIC (POSIX's default is
++    // CLOCK_REALTIME) and pthread_cond_timedwait() reads the deadline on that clock: a wall-clock
++    // deadline would lie decades ahead and every timed wait (ParkingLot, Condition::waitFor)
++    // would last until a signal. Wait for the same interval on the monotonic clock, which also
++    // ignores steps of the wall clock (boot, NTP); ParkingLot re-checks its own deadline.
++    double remaining = std::max(0.0, (absoluteTime - WallTime::now()).value());
++    if (remaining > 1E9) {
++        // decades: as good as no deadline (and no time_t overflow below)
++        wait(mutex);
++        return true;
++    }
++    timespec targetTime;
++    clock_gettime(CLOCK_MONOTONIC, &targetTime);
++    time_t remainingSeconds = static_cast<time_t>(remaining);
++    targetTime.tv_sec += remainingSeconds;
++    targetTime.tv_nsec += static_cast<long>((remaining - remainingSeconds) * 1E9);
++    if (targetTime.tv_nsec >= 1000000000) {
++        targetTime.tv_sec++;
++        targetTime.tv_nsec -= 1000000000;
++    }
++    return !pthread_cond_clockwait(&m_condition, &mutex.impl(), CLOCK_MONOTONIC, &targetTime);
++#else
+     double rawSeconds = absoluteTime.secondsSinceEpoch().value();
+ 
+     time_t timeSeconds = static_cast<time_t>(rawSeconds);
+@@ -708,6 +731,7 @@
+     targetTime.tv_nsec = timeNanoseconds;
+ 
+     return pthread_cond_timedwait(&m_condition, &mutex.impl(), &targetTime) == 0;
++#endif
+ }
+ 
+ void ThreadCondition::signal()

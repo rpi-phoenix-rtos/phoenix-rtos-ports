@@ -971,7 +971,7 @@ diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cp
 new file mode 100644
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
-@@ -0,0 +1,1148 @@
+@@ -0,0 +1,1200 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -1213,16 +1213,22 @@ new file mode 100644
 +    queue.condition.notifyAll();
 +}
 +
-+auto MediaPlayerPrivateFFmpeg::queueGet(PacketQueue& queue, AVPacket* packet, unsigned& serial, Seconds timeout) -> Get
++// Waits up to `timeout` for a packet. The wait also ends at once on an abort, on a flush (a
++// serial other than the caller's `knownSerial`) and, unless the caller has `drained` its decoder
++// already, at the end of the stream: none of these depends on the timeout firing. `serial` is
++// the queue's serial the result belongs to.
++auto MediaPlayerPrivateFFmpeg::queueGet(PacketQueue& queue, AVPacket* packet, unsigned knownSerial, bool drained, unsigned& serial, Seconds timeout) -> Get
 +{
 +    Locker locker { queue.lock };
-+    if (queue.packets.isEmpty() && !queue.aborted)
-+        queue.condition.waitFor(queue.lock, timeout);
++    queue.condition.waitFor(queue.lock, timeout, [&] {
++        assertIsHeld(queue.lock);
++        return !queue.packets.isEmpty() || queue.aborted || queue.serial != knownSerial || (queue.end && !drained);
++    });
 +    serial = queue.serial;
 +    if (queue.aborted)
 +        return Get::Aborted;
 +    if (queue.packets.isEmpty())
-+        return Get::Empty;
++        return queue.end ? Get::End : Get::Empty;
 +    AVPacket* head = queue.packets.takeFirst();
 +    queue.bytes -= head->size;
 +    av_packet_move_ref(packet, head);
@@ -1239,6 +1245,14 @@ new file mode 100644
 +    }
 +    queue.bytes = 0;
 +    queue.serial++;
++    queue.end = false;
++    queue.condition.notifyAll();
++}
++
++void MediaPlayerPrivateFFmpeg::queueSetEnd(PacketQueue& queue)
++{
++    Locker locker { queue.lock };
++    queue.end = true;
 +    queue.condition.notifyAll();
 +}
 +
@@ -1394,7 +1408,7 @@ new file mode 100644
 +    m_audioFeedStart = { };
 +    m_stream = nullptr;
 +    m_videoStream = m_audioStream = -1;
-+    m_eof = m_videoDone = m_audioDone = m_endPosted = false;
++    m_videoDrainedSerial = m_audioDrainedSerial = kNotDrained;
 +    if (auto seekPromise = std::exchange(m_seekPromise, std::nullopt))
 +        seekPromise->reject(PlatformMediaError::Cancelled);
 +}
@@ -1488,15 +1502,19 @@ new file mode 100644
 +    if (m_videoStream >= 0) {
 +        m_videoThread = Thread::create("FFmpegVideo"_s, [this] { videoThread(); }, ThreadType::Graphics, Thread::QOS::UserInteractive,
 +            Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(kThreadStack));
-+    } else
-+        m_videoDone = true;
++    }
 +    if (m_audioStream >= 0) {
 +        m_audioThread = Thread::create("FFmpegAudio"_s, [this] { audioThread(); }, ThreadType::Audio, Thread::QOS::UserInteractive,
 +            Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(kThreadStack));
-+    } else
-+        m_audioDone = true;
++    }
 +
++    // One pass reads from the start or from a seek target to the end of the file. Only this
++    // thread starts a pass (flushes the queues to a new serial), so it can tell whether both
++    // decoding threads drained the current pass without racing a seek.
 +    AVPacket* packet = av_packet_alloc();
++    bool eof = false, endPosted = false;
++    unsigned generation = 0;
++    uint64_t videoPackets = 0, audioPackets = 0;
 +    while (!m_quit) {
 +        bool seek;
 +        double target;
@@ -1504,6 +1522,8 @@ new file mode 100644
 +            Locker locker { m_seekLock };
 +            seek = std::exchange(m_seekRequested, false);
 +            target = m_seekTarget;
++            if (seek)
++                generation = m_seekGeneration;
 +        }
 +        if (seek) {
 +            int64_t ts = static_cast<int64_t>(target * AV_TIME_BASE);
@@ -1511,33 +1531,58 @@ new file mode 100644
 +                ts += m_format->start_time;
 +            int ret = avformat_seek_file(m_format, -1, INT64_MIN, ts, ts, 0);
 +            log("seek target=%.3f rc=%d", target, ret);
++            eof = endPosted = false;
++            videoPackets = audioPackets = 0;
 +            queueFlush(m_videoQueue);
 +            queueFlush(m_audioQueue);
-+            m_eof = m_videoDone = m_audioDone = m_endPosted = false;
-+            m_videoDone = m_videoStream < 0;
-+            m_audioDone = m_audioStream < 0;
++        }
++        if (eof) {
++            if (!endPosted && playedToEnd()) {
++                endPosted = true;
++                callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, generation] {
++                    if (RefPtr protectedThis = weakThis.get())
++                        protectedThis->didEnd(generation);
++                });
++            }
++            usleep(10000);
++            continue;
 +        }
 +        bool full = queueBytes(m_videoQueue) + queueBytes(m_audioQueue) > kQueueMaxBytes
 +            || ((m_videoStream < 0 || queueLength(m_videoQueue) > kQueueMaxPackets) && (m_audioStream < 0 || queueLength(m_audioQueue) > kQueueMaxPackets));
-+        if (m_eof || full) {
++        if (full) {
 +            usleep(10000);
 +            continue;
 +        }
 +        int ret = av_read_frame(m_format, packet);
 +        if (ret < 0) {
-+            if (ret != AVERROR_EOF && ret != AVERROR_EXIT && !avio_feof(m_format->pb))
++            if (m_quit)
++                break;
++            // the end of the file, or a read error (played up to there)
++            if (ret != AVERROR_EOF && !avio_feof(m_format->pb))
 +                log("read-error rc=%d (%s)", ret, av_err2str(ret));
-+            m_eof = true;
++            log("eof packets video=%llu audio=%llu", static_cast<unsigned long long>(videoPackets), static_cast<unsigned long long>(audioPackets));
++            eof = true;
++            queueSetEnd(m_videoQueue);
++            queueSetEnd(m_audioQueue);
 +            continue;
 +        }
-+        if (packet->stream_index == m_videoStream)
++        if (packet->stream_index == m_videoStream) {
++            videoPackets++;
 +            queuePut(m_videoQueue, packet);
-+        else if (packet->stream_index == m_audioStream)
++        } else if (packet->stream_index == m_audioStream) {
++            audioPackets++;
 +            queuePut(m_audioQueue, packet);
-+        else
++        } else
 +            av_packet_unref(packet);
 +    }
 +    av_packet_free(&packet);
++}
++
++// The demux thread, at the end of a pass: both decoding threads drained it.
++bool MediaPlayerPrivateFFmpeg::playedToEnd()
++{
++    return (m_videoStream < 0 || m_videoDrainedSerial == queueSerial(m_videoQueue))
++        && (m_audioStream < 0 || m_audioDrainedSerial == queueSerial(m_audioQueue));
 +}
 +
 +/* --- video ---------------------------------------------------------------------------------- */
@@ -1594,9 +1639,10 @@ new file mode 100644
 +    bool drained = false, first = true;
 +    double lastPts = 0;
 +    MonotonicTime lastShown;
++    uint64_t heldFrames = 0;
 +
 +    while (!m_quit) {
-+        auto got = queueGet(m_videoQueue, packet, queueSerialNow, 20_ms);
++        auto got = queueGet(m_videoQueue, packet, serial, drained, queueSerialNow, 20_ms);
 +        if (got == Get::Aborted)
 +            break;
 +        if (queueSerialNow != serial) {
@@ -1605,17 +1651,23 @@ new file mode 100644
 +            drained = false;
 +            first = true;
 +        }
-+        if (got == Get::Empty) {
-+            if (!m_eof || drained)
-+                continue;
++        if (got == Get::Empty || (got == Get::End && drained))
++            continue;
++        if (got == Get::End) {
++            // the last packet is in: the decoder gives back the pictures it still holds
++            // (reordering, frame threads) and then AVERROR_EOF
 +            avcodec_send_packet(m_videoDecoder, nullptr);
 +            drained = true;
++            heldFrames = 0;
 +        } else {
 +            avcodec_send_packet(m_videoDecoder, packet);
 +            av_packet_unref(packet);
 +        }
-+        while (!m_quit && !avcodec_receive_frame(m_videoDecoder, frame)) {
++        int ret = 0;
++        while (!m_quit && !(ret = avcodec_receive_frame(m_videoDecoder, frame))) {
 +            m_decoded++;
++            if (drained)
++                heldFrames++;
 +            double pts = frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp * timeBase - startTime : lastPts;
 +            if (first) {
 +                // the first picture at the start or after a seek: pictures before the target
@@ -1666,7 +1718,8 @@ new file mode 100644
 +            lastPts = pts;
 +            av_frame_unref(frame);
 +        }
-+        if (drained && queueSerial(m_videoQueue) == serial && !m_videoDone) {
++        // drained: the decoder said AVERROR_EOF (not a break out of the loop for a seek or quit)
++        if (drained && ret && ret != AVERROR(EAGAIN) && !m_quit && queueSerial(m_videoQueue) == serial && m_videoDrainedSerial != serial) {
 +            if (first) {
 +                // a seek past the last picture: nothing to show, the seek still completes
 +                double target;
@@ -1681,24 +1734,14 @@ new file mode 100644
 +                });
 +                first = false;
 +            }
-+            m_videoDone = true;
-+            checkEnd();
++            log("drained video held=%llu decoded=%llu rc=%d", static_cast<unsigned long long>(heldFrames), static_cast<unsigned long long>(m_decoded.load()), ret);
++            m_videoDrainedSerial = serial;
 +        }
 +    }
 +    sws_freeContext(std::exchange(m_converter.context, nullptr));
 +    av_frame_free(&m_converter.frame);
 +    av_frame_free(&frame);
 +    av_packet_free(&packet);
-+}
-+
-+void MediaPlayerPrivateFFmpeg::checkEnd()
-+{
-+    if (!m_videoDone || !m_audioDone || m_endPosted.exchange(true))
-+        return;
-+    callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }] {
-+        if (RefPtr protectedThis = weakThis.get())
-+            protectedThis->didEnd();
-+    });
 +}
 +
 +/* --- audio ---------------------------------------------------------------------------------- */
@@ -1806,11 +1849,12 @@ new file mode 100644
 +        if (!have) {
 +            int ret = avcodec_receive_frame(m_audioDecoder, frame);
 +            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-+                if (ret == AVERROR_EOF && queueSerial(m_audioQueue) == serial && !m_audioDone) {
-+                    m_audioDone = true;
-+                    checkEnd();
++                // AVERROR_EOF: drained, and every sound decoded was written (or dropped late)
++                if (ret == AVERROR_EOF && drained && m_audioDrainedSerial != serial && queueSerial(m_audioQueue) == serial) {
++                    log("drained audio");
++                    m_audioDrainedSerial = serial;
 +                }
-+                auto got = queueGet(m_audioQueue, packet, queueSerialNow, m_audioFd >= 0 ? 5_ms : 20_ms);
++                auto got = queueGet(m_audioQueue, packet, serial, drained, queueSerialNow, m_audioFd >= 0 ? 5_ms : 20_ms);
 +                if (got == Get::Aborted)
 +                    break;
 +                if (queueSerialNow != serial) {
@@ -1821,7 +1865,7 @@ new file mode 100644
 +                if (got == Get::Packet) {
 +                    avcodec_send_packet(m_audioDecoder, packet);
 +                    av_packet_unref(packet);
-+                } else if (m_eof && !drained) {
++                } else if (got == Get::End && !drained) {
 +                    avcodec_send_packet(m_audioDecoder, nullptr);
 +                    drained = true;
 +                }
@@ -1970,13 +2014,20 @@ new file mode 100644
 +    }
 +}
 +
-+void MediaPlayerPrivateFFmpeg::didEnd()
++void MediaPlayerPrivateFFmpeg::didEnd(unsigned seekGeneration)
 +{
++    {
++        // a seek requested since the demuxer saw this end: that pass is gone
++        Locker locker { m_seekLock };
++        if (seekGeneration != m_seekGeneration)
++            return;
++    }
 +    log("end clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu", clockNow(), static_cast<unsigned long long>(m_decoded.load()),
 +        static_cast<unsigned long long>(m_presented.load()), static_cast<unsigned long long>(m_frameCounters->painted.load()),
 +        static_cast<unsigned long long>(m_dropped.load()));
-+    // the clock stops at the end; paused() stays as the element set it: it pauses us, or seeks
-+    // back to the start when it loops
++    // the clock stops at the end and currentTime() is the duration; paused() stays as the element
++    // set it. timeChanged() lets HTMLMediaElement see the end: it fires 'timeupdate', then
++    // 'pause' + 'ended' and pauses us, or, with 'loop', seeks to the start (seekToTarget(0))
 +    m_ended = true;
 +    clockSetPaused(true);
 +    if (RefPtr player = m_player.get())
@@ -2047,6 +2098,7 @@ new file mode 100644
 +        Locker locker { m_seekLock };
 +        m_seekTarget = time;
 +        m_seekRequested = true;
++        m_seekGeneration++;
 +    }
 +    clockSet(time, true);
 +    return promise;
@@ -2124,7 +2176,7 @@ diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h 
 new file mode 100644
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
-@@ -0,0 +1,250 @@
+@@ -0,0 +1,261 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -2157,6 +2209,7 @@ new file mode 100644
 +#include "MediaPlayerPrivate.h"
 +#include "PlatformLayer.h"
 +#include <atomic>
++#include <limits>
 +#include <wtf/Condition.h>
 +#include <wtf/Deque.h>
 +#include <wtf/Lock.h>
@@ -2186,6 +2239,10 @@ new file mode 100644
 +// (libavcodec -> libswresample -> 44.1 kHz S16 stereo -> /dev/audio0, the BCM2711 PWM audio).
 +// The master clock is a pausable wall clock: audio follows it (a late sound frame is dropped,
 +// an early one waits behind silence), video pictures wait for it or are dropped when late.
++// The end: after the last packet the demuxer marks both queues' end; each decoding thread then
++// drains its decoder (a null packet), plays out the frames the decoder still held, and records
++// the queue serial it drained; the demux thread, which alone starts new serials (seeks), reports
++// the end once both have. HTMLMediaElement then fires 'ended', or seeks to 0 for 'loop'.
 +// HEVC goes to the decoder that avcodec_find_decoder() returns, which on Phoenix is
 +// hevc_rpivid (FFmpeg's HEVC decoder on the Pi 4's rpivid block, with its own CPU fallback).
 +//
@@ -2257,12 +2314,16 @@ new file mode 100644
 +        Deque<AVPacket*> packets WTF_GUARDED_BY_LOCK(lock);
 +        size_t bytes WTF_GUARDED_BY_LOCK(lock) { 0 };
 +        unsigned serial WTF_GUARDED_BY_LOCK(lock) { 0 };
++        // the demuxer put the last packet of this serial (cleared by a flush)
++        bool end WTF_GUARDED_BY_LOCK(lock) { false };
 +        bool aborted WTF_GUARDED_BY_LOCK(lock) { false };
 +    };
-+    enum class Get : uint8_t { Packet, Empty, Aborted };
++    // End: no packet left and none will come for this serial (the decoder is to be drained)
++    enum class Get : uint8_t { Packet, Empty, End, Aborted };
 +    static void queuePut(PacketQueue&, AVPacket*);
-+    static Get queueGet(PacketQueue&, AVPacket*, unsigned& serial, Seconds timeout);
++    static Get queueGet(PacketQueue&, AVPacket*, unsigned knownSerial, bool drained, unsigned& serial, Seconds timeout);
 +    static void queueFlush(PacketQueue&);
++    static void queueSetEnd(PacketQueue&);
 +    static void queueAbort(PacketQueue&);
 +    static unsigned queueSerial(PacketQueue&);
 +    static size_t queueLength(PacketQueue&);
@@ -2281,7 +2342,7 @@ new file mode 100644
 +    void videoThread();
 +    void audioThread();
 +    bool presentFrame(AVFrame&);
-+    void checkEnd();
++    bool playedToEnd();
 +    void openAudioDevice();
 +    void audioWrite(const uint8_t*, size_t);
 +    void audioSilence(double seconds);
@@ -2291,7 +2352,7 @@ new file mode 100644
 +    void didLoadMetadata(MediaTime duration, FloatSize, bool hasVideo, bool hasAudio);
 +    void didFail(MediaPlayer::NetworkState);
 +    void didShowFirstFrame(double pts);
-+    void didEnd();
++    void didEnd(unsigned seekGeneration);
 +    void setReadyState(MediaPlayer::ReadyState);
 +    void setNetworkState(MediaPlayer::NetworkState);
 +    void statTimerFired();
@@ -2332,14 +2393,16 @@ new file mode 100644
 +    double m_containerDuration { 0 };
 +    PacketQueue m_videoQueue;
 +    PacketQueue m_audioQueue;
-+    std::atomic<bool> m_eof { false };
-+    std::atomic<bool> m_videoDone { false };
-+    std::atomic<bool> m_audioDone { false };
-+    std::atomic<bool> m_endPosted { false };
++    // the queue serial whose last frame the decoding thread has decoded and played (drained)
++    static constexpr unsigned kNotDrained = std::numeric_limits<unsigned>::max();
++    std::atomic<unsigned> m_videoDrainedSerial { kNotDrained };
++    std::atomic<unsigned> m_audioDrainedSerial { kNotDrained };
 +
 +    Lock m_seekLock;
 +    bool m_seekRequested WTF_GUARDED_BY_LOCK(m_seekLock) { false };
 +    double m_seekTarget WTF_GUARDED_BY_LOCK(m_seekLock) { 0 };
++    // seeks requested so far: an end reached before the latest one is not reported
++    unsigned m_seekGeneration WTF_GUARDED_BY_LOCK(m_seekLock) { 0 };
 +
 +    mutable Lock m_clockLock;
 +    double m_clockPts WTF_GUARDED_BY_LOCK(m_clockLock) { 0 };

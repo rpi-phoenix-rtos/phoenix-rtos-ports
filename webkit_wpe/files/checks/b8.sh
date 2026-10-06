@@ -14,10 +14,19 @@
 #   hevc      the 1080p30 HEVC + AAC clip on the rpivid block (B8_HEVC_CLIP)
 #   hevc-cpu  the same clip on FFmpeg's CPU decoder (FFMPEG_RPIVID=0): the control
 #   seek      the H.264 clip with a seek from 10 s to 30 s (b8.html&seek=10:30)
+#   loop      the HEVC clip on the block with the loop attribute: one wrap, then to the end
+#   again     the HEVC clip on the block, played to the end, then a seek to 12 s and to the end again
 #
-# (default h264,hevc,hevc-cpu,seek). Lines of ours start with "B8 ", the page's with "B8PAGE ",
-# the browser's with "WPEB ", the media player's with "WPEB-MEDIA ". The coordination repo's
-# docs/browser/B8-video.md lists what each must show.
+# (default h264,hevc,hevc-cpu,seek; loop and again only when named). Lines of ours start with
+# "B8 ", the page's with "B8PAGE ", the browser's with "WPEB ", the media player's with
+# "WPEB-MEDIA ". After each arm (transport arms too):
+#
+#   B8 arm=<a> ended=<n> ended_at=<s> clip=<s>
+#
+# n = the page's 'ended' events (1 for a clip played to its end, 2 for "again", 0 = the end was
+# never signalled), ended_at = the element's currentTime at the first one, clip = the duration
+# at loadedmetadata (- when not seen). The coordination repo's docs/browser/B8-video.md lists
+# what each must show.
 #
 # "transport": the frame path's A/B, every arm the H.264 clip in the same window, one knob set
 # each (raster, frame transport, frame pacing):
@@ -63,36 +72,81 @@ PRESENT_SECS=5
 ARM_SECS=${B8_ARM_SECS:-55}   # transport arms: the 45 s clip after a ~5 s start, then the end
 
 pid=""
+EVENTS=/tmp/b8-arm.events
+PIDFILE=/tmp/b8-arm.pid
+RCFILE=/tmp/b8-arm.rc
 pause() {  # pause <seconds>, interruptible by the session's SIGTERM
 	sleep "$1" &
 	wait $!
 }
 stop_all() {
+	[ -z "${pid}" ] && [ -s "${PIDFILE}" ] && pid=$(cat "${PIDFILE}")
 	[ -z "${pid}" ] || kill -TERM "${pid}" 2>/dev/null
 	wait
 	echo "B8 stopped by the session t=${SECONDS}"
 	exit 0
 }
 
+summary() {  # summary <arm> [log]: the grading line from the page's lines (default ${EVENTS})
+	local line n=0 at=- clip=- file=${2:-${EVENTS}}
+	[ -f "${file}" ] || : > "${file}"
+	while IFS= read -r line; do
+		case "${line}" in
+			*"B8PAGE "*" loadedmetadata "*"duration="*)
+				clip=${line##*duration=}
+				clip=${clip%%[!0-9.]*} ;;
+			*"B8PAGE "*" ended current="*)
+				n=$((n + 1))
+				if [ "${at}" = - ]; then
+					at=${line##*ended current=}
+					at=${at%%[!0-9.]*}
+				fi ;;
+		esac
+	done < "${file}"
+	echo "B8 arm=$1 ended=${n} ended_at=${at:--} clip=${clip:--}"
+}
+
 arm() {  # arm <name> <clip> <seconds> [page query suffix] [env...]
-	local name=$1 clip=$2 secs=$3 extra=$4 rc
+	local name=$1 clip=$2 secs=$3 extra=$4 rc tee i
 	shift 4
 	if [ ! -f "${clip}" ]; then
 		echo "B8 arm=${name} SKIP clip ${clip} missing"
 		return
 	fi
 	echo "B8 arm=${name} start clip=${clip} secs=${secs} env=${*:-none} t=${SECONDS}"
+	rm -f "${EVENTS}" "${PIDFILE}" "${RCFILE}"
+	# The browser's lines go to the console as before and, through tee, to ${EVENTS} for the
+	# grading line (stderr is line-buffered in every browser process). The subshell keeps the
+	# browser's pid and exit status: in a pipeline only the last command's status reaches us.
 	(
 		[ "$#" = 0 ] || export "$@"
-		exec "${BROWSER}" --cpu-rendering --autoplay=allow --size=1000x620 "${PAGE}?src=file://${clip}${extra}"
-	) &
-	pid=$!
+		"${BROWSER}" --cpu-rendering --autoplay=allow --size=1000x620 "${PAGE}?src=file://${clip}${extra}" 2>&1 &
+		echo "$!" > "${PIDFILE}"
+		wait "$!"
+		echo "$?" > "${RCFILE}"
+	) | tee "${EVENTS}" &
+	tee=$!
 	pause "${secs}"
-	kill -TERM "${pid}" 2>/dev/null
-	wait "${pid}"
-	rc=$?
+	pid=$(cat "${PIDFILE}" 2>/dev/null)
+	[ -z "${pid}" ] || kill -TERM "${pid}" 2>/dev/null
+	# the browser's exit, then the web process may print a little longer: tee ends when the last
+	# writer closes the pipe
+	i=0
+	while [ ! -s "${RCFILE}" ] && [ "${i}" -lt 60 ]; do
+		pause 1
+		i=$((i + 1))
+	done
+	i=0
+	while kill -0 "${tee}" 2>/dev/null && [ "${i}" -lt 10 ]; do
+		pause 1
+		i=$((i + 1))
+	done
+	kill -TERM "${tee}" 2>/dev/null
+	wait "${tee}" 2>/dev/null
 	pid=""
-	echo "B8 arm=${name} end rc=${rc} t=${SECONDS}"
+	rc=$(cat "${RCFILE}" 2>/dev/null)
+	echo "B8 arm=${name} end rc=${rc:-?} t=${SECONDS}"
+	summary "${name}"
 	# the device and the decoder block are free again before the next arm
 	pause 5
 }
@@ -204,6 +258,7 @@ transport_arm() {  # transport_arm <name>
 	cat "${log}"
 	echo "B8 arm=${name} end rc=${rc} t=${SECONDS}"
 	grade "${name}" "${raster}" "${transport}" "${ahead}" "${log}"
+	summary "${name}" "${log}"
 	pause 5
 }
 
@@ -227,6 +282,8 @@ inner() {
 			hevc) arm hevc "${HEVC}" 50 "" FFMPEG_RPIVID=1 ;;
 			hevc-cpu) arm hevc-cpu "${HEVC}" 50 "" FFMPEG_RPIVID=0 ;;
 			seek) arm seek "${H264}" 55 "&seek=10:30" ;;
+			loop) arm loop "${HEVC}" 55 "&loop=1" FFMPEG_RPIVID=1 ;;
+			again) arm again "${HEVC}" 45 "&again=12" FFMPEG_RPIVID=1 ;;
 			*) echo "B8 bad arm ${a}" ;;
 		esac
 	done
