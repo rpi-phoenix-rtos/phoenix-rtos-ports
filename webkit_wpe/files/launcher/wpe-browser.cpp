@@ -527,8 +527,10 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
  *       (a rendering update waits for tiles still painting), frame-done (the UI never answered
  *       the frame), no-frame (a composition sent no frame, so none can complete), scheduled (a
  *       composition due that the compositing thread never ran), renderer (the main thread
- *       waits for a composition that never reports back); UI: ui-pending (a received frame
- *       not handed to the view), ui-callback (the compositor never sent the frame callback)
+ *       waits for a composition that never reports back), no-refresh (requestAnimationFrame
+ *       asked the UI's display link for a refresh and none came: patch 0022); UI: ui-pending (a
+ *       received frame not handed to the view), ui-callback (the compositor never sent the
+ *       frame callback)
  *
  * Report 0 comes with the thread list (stall-thread), report 1, 20 s later if the stall lasts,
  * with every thread's registers and stack (stall-sample, stall-stack), and then asks the peer

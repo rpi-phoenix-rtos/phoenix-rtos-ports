@@ -44,6 +44,10 @@
 	#   patches/webkit/0021       WTF: ThreadCondition::timedWait waits on the monotonic clock
 	#                             (libphoenix condvars default to CLOCK_MONOTONIC: every WTF
 	#                             timed wait lasted until a signal)
+	#   patches/webkit/0022       diagnostic: the wait trace (WPE_PHOENIX_WAIT_TRACE: every WTF wait
+	#                             of 500 ms or more, its thread and return addresses) and the web
+	#                             process's display refreshes in the frame watch (kind no-refresh),
+	#                             to name the ~4 s requestAnimationFrame pauses of build 36's B7
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
 	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).
@@ -208,7 +212,8 @@ p_build() {
 	for s in 'WPEB t=%.0f ' 'chrome action=go source=%s' 'session persistent data=%s' 'wpeBrowserChrome' \
 		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model' 'chrome mode=%s' \
 		'gpu raster=%s transport=%s webgl=%s frame-ahead=%d' 'WPEB-WEBKIT swap-chain' 'WPEB-WEBKIT dmabuf-export' \
-		'WPEB-WEBKIT frame-pacing' 'frame-watch kind=%s compositor state=%s' 'frame-watch kind=%s backing-store' '%s n=%u report=%u %s'; do
+		'WPEB-WEBKIT frame-pacing' 'frame-watch kind=%s compositor state=%s' 'frame-watch kind=%s backing-store' '%s n=%u report=%u %s' \
+		'WPEB-WEBKIT wait-trace pid=%d' ' display-link on=%d link_ms=%lld'; do
 		grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser lacks '${s}'"; bad=1; }
 	done
 	if [ "${video}" = 1 ]; then
