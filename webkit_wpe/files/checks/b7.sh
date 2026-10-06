@@ -19,6 +19,8 @@
 #               W1  GPU raster, --webgl                  (the control)
 #               W1n the same with JSC_useJIT=false      (the JIT's part: interpreter only)
 #               W1c --cpu-rendering, --webgl            (the Skia GPU painting threads' part)
+#               W1e the control with --ephemeral        (build 35's session: no console lines, but
+#                                                         the page's title still names a stall)
 #   headless  no session: the B4 checksum with this binary (crc32=c3e96bf3), once as is and once
 #             with --dmabuf, which a headless view must refuse (same checksum)
 #
@@ -114,6 +116,7 @@ inner() {
 			run W1 "${page}" --webgl
 			run W1n "${page}" JSC_useJIT=false --webgl
 			run W1c "${page}" --webgl --cpu-rendering
+			run W1e "${page}" --webgl --ephemeral
 			;;
 	esac
 	echo "B7 ${B7_INNER} done t=${SECONDS}"
@@ -128,7 +131,8 @@ fi
 mode=${1:-}
 case "${mode}" in
 	anim) export B7_INNER=anim XFCE_AUTOSTART="/bin/bash=${SELF}" HOLD=${B7_HOLD:-480} ;;
-	webgl | webgl-ab) export B7_INNER=${mode} XFCE_AUTOSTART="/bin/bash=${SELF}" HOLD=${B7_HOLD:-400} ;;
+	webgl) export B7_INNER=webgl XFCE_AUTOSTART="/bin/bash=${SELF}" HOLD=${B7_HOLD:-400} ;;
+	webgl-ab) export B7_INNER=webgl-ab XFCE_AUTOSTART="/bin/bash=${SELF}" HOLD=${B7_HOLD:-500} ;;
 	headless)
 		for id in H0 H1; do
 			args=(--headless --cpu-rendering --snapshot=/tmp/b7-${id}.png --timeout=600)
