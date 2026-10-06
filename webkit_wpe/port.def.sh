@@ -38,6 +38,9 @@
 	#   patches/webkit/0019       frame pacing one frame ahead, opt-in (WPE_PHOENIX_FRAME_AHEAD=1,
 	#                             wpe-browser --frame-ahead): the UI process answers a frame when it
 	#                             is committed, not at the compositor's frame callback
+	#   patches/webkit/0020       the frame watch: where each process's frame pipeline stands, for
+	#                             the launcher's frame-stall reports (a page that stops drawing
+	#                             while every main loop runs)
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
 	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).
@@ -202,7 +205,7 @@ p_build() {
 	for s in 'WPEB t=%.0f ' 'chrome action=go source=%s' 'session persistent data=%s' 'wpeBrowserChrome' \
 		'hang-recovery terminate-web-process' 'stall-sample tid=%d' 'WPEB-WEBKIT process-model' 'chrome mode=%s' \
 		'gpu raster=%s transport=%s webgl=%s frame-ahead=%d' 'WPEB-WEBKIT swap-chain' 'WPEB-WEBKIT dmabuf-export' \
-		'WPEB-WEBKIT frame-pacing'; do
+		'WPEB-WEBKIT frame-pacing' 'frame-watch kind=%s compositor state=%s' 'frame-watch kind=%s backing-store' '%s n=%u report=%u %s'; do
 		grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser lacks '${s}'"; bad=1; }
 	done
 	if [ "${video}" = 1 ]; then

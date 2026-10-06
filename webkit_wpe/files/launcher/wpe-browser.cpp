@@ -27,7 +27,8 @@
  *                           (WPE_BROWSER_PRESENT_SECS)
  *     --web-extensions=DIR  the WebProcess loads the web process extensions (*.so) in DIR,
  *                           with the user data string "wpe-browser"
- *     --ephemeral           keep nothing on disk (the default with --headless)
+ *     --ephemeral           keep nothing on disk (the default with --headless). WebKit prints no
+ *                           console messages of an ephemeral session's pages (FrameConsoleClient)
  *     --data-dir=DIR        cookies, local storage, HSTS (default $HOME/.local/share/wpe-browser)
  *     --cache-dir=DIR       the HTTP disk cache (default $HOME/.cache/wpe-browser)
  *     --toolbar=MODE        always (default): the toolbar stays at the top and the page is laid
@@ -49,8 +50,12 @@
  *                           terminate it and load the page again (WPE_BROWSER_HANG_SECS;
  *                           default 30, 0 off)
  *     --stall-secs=S        every process, the UI included, reports a main thread that has not
- *                           run its event loop for S s, or stays in one start-up phase as long
- *                           (WPE_BROWSER_STALL_SECS; default 10, 0 off); see stallReport()
+ *                           run its event loop for S s, or stays in one start-up phase as long,
+ *                           and a frame pipeline stuck as long (WPE_BROWSER_STALL_SECS; default
+ *                           10, 0 off); see stallReport() and frameStallStep()
+ *     --frame-stall-secs=S  the UI also reports a view that presented frames and then none for
+ *                           S s: for a page that is expected to animate (WPE_BROWSER_FRAME_STALL_SECS;
+ *                           default 0, off); see frameStallStep()
  *   Test knobs (also from the environment, for runs started where only one argument fits):
  *     --cycle=LIST          load the next page of LIST every --cycle-secs (WPE_BROWSER_CYCLE):
  *                           comma-separated entries, or the path of a file with one per line
@@ -236,8 +241,10 @@ static void recordExecutablePath(const char* argv0)
  *       60 s on: a long task on a slow page must not get its system calls interrupted);
  *       "none" = no answer in 500 ms (the signal blocked, e.g. a thread JSC holds suspended)
  *   stall-stack tid=T ret=0x.. 0x.. ...
- *       the main thread's return addresses from its stack: words in the program's code just
- *       after a BL/BLR (WebKit is built without frame pointers, so no fp chain). Symbolise with
+ *       the thread's return addresses from its stack: words in the program's code just after a
+ *       BL/BLR (WebKit is built without frame pointers, so no fp chain), the nearest first. The
+ *       main thread's up to main()'s frame; another thread's up to 64 KiB above its sp, within the
+ *       map entry holding its sp (its stack). Symbolise with
  *       addr2line -f -C -e <port install>/bin/wpe-browser <pc> <lr> <ret...>
  *   stall-end n=K main_ms=M   the loop ran again
  *
@@ -262,6 +269,10 @@ static constexpr unsigned maxStackReturns = 32;
 static constexpr size_t maxStackScan = 512 * 1024;
 static constexpr int defaultStallSecs = 10;
 static constexpr int ipcStallFactor = 3; /* unread connection input for 3x the stall limit */
+static constexpr size_t maxThreadStackScan = 64 * 1024; /* another thread's stack, above its sp */
+static constexpr unsigned frameStallSampleMs = 20000; /* a frame stall's sampled report, after its first */
+static constexpr unsigned reportRequestMinMs = 10000; /* a peer's report requests, at most this often */
+static constexpr unsigned presentStallMinFrames = 10; /* --frame-stall-secs: frames before it watches */
 
 static char processRole[16]; /* "ui", "web" or "network" */
 static int mainTid;
@@ -272,6 +283,17 @@ static std::atomic<const char*> startPhase { "start" }; /* until the first beat:
 static std::atomic<int64_t> startPhaseMs;
 static std::atomic<int64_t> exitStartMs; /* a child: nowMs() when its main returned (exit() runs) */
 static std::atomic<int> childExitStatus;
+static std::atomic<bool> reportRequested; /* SIGINFO: a peer process asks for this one's report */
+/* the UI: the frames the view presented (WPEView::buffer-rendered), for --frame-stall-secs */
+static std::atomic<unsigned> presentedTotal;
+static std::atomic<int64_t> presentedLastMs;
+static std::atomic<int> presentStallMs; /* --frame-stall-secs in ms; 0: off */
+
+/* WebKit patch 0020 (PhoenixFrameWatch.h): this process's frame pipeline as one line, and the
+ * kind of stall it is in (0: none) when a wait in it has lasted longer than limitMs. ui selects
+ * the UI process's half (the backing store, the display link) or the web process's (the
+ * compositor, the rendering updates). */
+extern "C" int wpe_phoenix_frame_watch(int ui, int64_t limitMs, char* line, size_t size);
 
 /* the start-up step the main thread enters (a start-up stall report names it) */
 static void startupPhase(const char* name)
@@ -302,6 +324,15 @@ static bool isReturnAddress(uint64_t value)
     return (insn & 0xfc000000U) == 0x94000000U /* BL */ || (insn & 0xfffffc1fU) == 0xd63f0000U /* BLR */;
 }
 
+/* the return addresses on a stack between sp and top, the nearest first */
+static void scanStack(ThreadSample& s, uintptr_t top)
+{
+    for (auto* p = reinterpret_cast<const uint64_t*>(s.sp & ~uint64_t(7)); reinterpret_cast<uintptr_t>(p) < top && s.returns < maxStackReturns; ++p) {
+        if (isReturnAddress(*p))
+            s.ret[s.returns++] = *p;
+    }
+}
+
 static void sampleHandler(int, siginfo_t*, void* context)
 {
     const unsigned slot = sampleSlots.fetch_add(1);
@@ -315,13 +346,40 @@ static void sampleHandler(int, siginfo_t*, void* context)
     s.sp = mc.sp;
     s.returns = 0;
     const int tid = gettid();
-    if (tid == mainTid && mainStackTop > s.sp && mainStackTop - s.sp <= maxStackScan) {
-        for (auto* p = reinterpret_cast<const uint64_t*>(s.sp & ~uint64_t(7)); reinterpret_cast<uintptr_t>(p) < mainStackTop && s.returns < maxStackReturns; ++p) {
-            if (isReturnAddress(*p))
-                s.ret[s.returns++] = *p;
-        }
-    }
+    if (tid == mainTid && mainStackTop > s.sp && mainStackTop - s.sp <= maxStackScan)
+        scanStack(s, mainStackTop);
     s.tid.store(tid, std::memory_order_release);
+}
+
+/* SIGINFO: another process of this browser asks for this one's report (frameStallStep()) */
+static void reportRequestHandler(int)
+{
+    reportRequested.store(true);
+}
+
+/* this process's map entries (meminfo()), to bound the stack scan of a thread other than main */
+static std::vector<entryinfo_t> mapEntries()
+{
+    std::vector<entryinfo_t> map(256);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        meminfo_t info;
+        memset(&info, 0, sizeof(info));
+        info.page.mapsz = -1;
+        info.maps.mapsz = -1;
+        info.entry.kmapsz = -1;
+        info.entry.pid = static_cast<unsigned>(getpid());
+        info.entry.mapsz = static_cast<int>(map.size());
+        info.entry.map = map.data();
+        meminfo(&info);
+        if (info.entry.mapsz < 0)
+            break;
+        if (static_cast<size_t>(info.entry.mapsz) <= map.size()) {
+            map.resize(static_cast<size_t>(info.entry.mapsz));
+            return map;
+        }
+        map.resize(static_cast<size_t>(info.entry.mapsz) + 64);
+    }
+    return { };
 }
 
 static gboolean heartbeat(gpointer)
@@ -349,6 +407,7 @@ static void initStallReport(int ipc)
     action.sa_flags = SA_SIGINFO;
     sigemptyset(&action.sa_mask);
     sigaction(SIGUSR2, &action, nullptr);
+    signal(SIGINFO, reportRequestHandler);
 }
 
 struct ThreadCPU {
@@ -417,11 +476,23 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
     for (unsigned waited = 0; waited < 500 && std::min(sampleSlots.load(), maxSamples) < sent; waited += 10)
         usleep(10 * 1000);
     usleep(10 * 1000); /* the last handler's stores */
+    const auto map = mapEntries();
     for (int tid : tids) {
-        const ThreadSample* found = nullptr;
-        for (const auto& s : samples) {
+        ThreadSample* found = nullptr;
+        for (auto& s : samples) {
             if (s.tid.load(std::memory_order_acquire) == tid)
                 found = &s;
+        }
+        if (found && tid != mainTid) {
+            /* its stack is the map entry holding its sp: scanned from here, the thread has
+             * answered the signal and is back where it was */
+            for (const auto& entry : map) {
+                const uintptr_t start = reinterpret_cast<uintptr_t>(entry.vaddr), end = start + entry.size;
+                if (found->sp >= start && found->sp < end) {
+                    scanStack(*found, std::min<uintptr_t>(end, found->sp + maxThreadStackScan));
+                    break;
+                }
+            }
         }
         const char* mark = tid == mainTid ? " main" : "";
         if (!found) {
@@ -441,6 +512,96 @@ static void stallReport(unsigned report, std::vector<ThreadCPU>& previous)
             LOG("role=%s pid=%d stall-stack tid=%d ret=%s", processRole, pid, tid, line.c_str() + 1);
         }
     }
+}
+
+/*
+ * The frame watch (WebKit patch 0020; every web process and the UI, once a second, with the stall
+ * limit of --stall-secs). A page can stop drawing while every main loop runs: the compositing
+ * thread stuck inside a frame, a rendering update waiting for tiles or for the UI's frame-done,
+ * the UI waiting for the compositor's frame callback. The patch records where each frame is; a
+ * wait older than the limit is a frame stall:
+ *
+ *   frame-stall n=K report=R frame-watch kind=KIND compositor state=.. phase=.. ...   (web)
+ *   frame-stall n=K report=R frame-watch kind=KIND backing-store received=.. ...     (UI)
+ *       KIND, web: render (the compositing thread inside one step of a frame: phase=), tiles
+ *       (a rendering update waits for tiles still painting), frame-done (the UI never answered
+ *       the frame), no-frame (a composition sent no frame, so none can complete), scheduled (a
+ *       composition due that the compositing thread never ran), renderer (the main thread
+ *       waits for a composition that never reports back); UI: ui-pending (a received frame
+ *       not handed to the view), ui-callback (the compositor never sent the frame callback)
+ *
+ * Report 0 comes with the thread list (stall-thread), report 1, 20 s later if the stall lasts,
+ * with every thread's registers and stack (stall-sample, stall-stack), and then asks the peer
+ * processes for theirs (SIGINFO: the UI asks its children, a web process its UI), which answer
+ *
+ *   report-request frame-watch kind=.. ...   then their stall-thread/-sample/-stack lines
+ *
+ * and frame-stall-end n=K ms=M when the frames move again. Nothing is stuck when a page stops
+ * because no requestAnimationFrame callback runs any more (a script that threw, a display link
+ * that stopped): for a page that is expected to animate, --frame-stall-secs=S makes the UI watch
+ * the frames its view presents as well, with the same two reports:
+ *
+ *   present-stall n=K report=R presented=N idle_ms=M frame-watch kind=.. backing-store ...
+ *
+ * The UI's line also counts the display link's ticks and the ticks it sent (fired=) to a web
+ * process's requestAnimationFrame.
+ */
+struct FrameStall {
+    explicit FrameStall(const char* name)
+        : what(name)
+    {
+    }
+    const char* what; /* "frame-stall" or "present-stall" */
+    unsigned count = 0;
+    double since = 0; /* when the current one began; 0: none */
+    unsigned reports = 0;
+    std::vector<ThreadCPU> cpu;
+};
+
+/* the UI's children (the web and network processes) or a child's UI: report too */
+static void askPeersForReports()
+{
+    const pid_t self = getpid();
+    if (strcmp(processRole, "ui")) {
+        kill(getppid(), SIGINFO);
+        return;
+    }
+    std::vector<threadinfo_t> info(static_cast<size_t>(std::max(threadcount(), 64) + 64));
+    int count = threadsinfo(static_cast<int>(info.size()), PH_THREADINFO_ALL, info.data());
+    count = std::min(count, static_cast<int>(info.size()));
+    std::vector<pid_t> children;
+    for (int i = 0; i < count; i++) {
+        const pid_t pid = static_cast<pid_t>(info[i].pid);
+        if (static_cast<pid_t>(info[i].ppid) == self && std::find(children.begin(), children.end(), pid) == children.end())
+            children.push_back(pid);
+    }
+    for (pid_t child : children)
+        kill(child, SIGINFO);
+}
+
+/* one detector's step: stalled or not now, and the line describing the pipeline */
+static void frameStallStep(FrameStall& stall, bool stalled, const char* line)
+{
+    const double now = nowMs();
+    const int pid = static_cast<int>(getpid());
+    if (!stalled) {
+        if (stall.since)
+            LOG("role=%s pid=%d %s-end n=%u ms=%.0f", processRole, pid, stall.what, stall.count, now - stall.since);
+        stall.since = 0;
+        return;
+    }
+    if (!stall.since) {
+        stall.since = now;
+        stall.count++;
+        stall.reports = 0;
+        stall.cpu.clear();
+    }
+    if (stall.reports > 1 || now < stall.since + stall.reports * frameStallSampleMs)
+        return;
+    LOG("role=%s pid=%d %s n=%u report=%u %s", processRole, pid, stall.what, stall.count, stall.reports, line);
+    stallReport(stall.reports ? stallFirstSampledReport : 0, stall.cpu);
+    if (stall.reports++)
+        askPeersForReports();
 }
 
 /*
@@ -467,6 +628,11 @@ static void* watchdog(void* arg)
     const char* stalledPhase = nullptr; /* the start-up phase reported as stalled */
     double stalledPhaseSince = 0;
     std::vector<ThreadCPU> cpu;
+    /* the frame watch: the web process's compositor, the UI's backing store and its view */
+    const int frameRole = !strcmp(processRole, "ui") ? 1 : !strcmp(processRole, "web") ? 0 : -1;
+    FrameStall frameStall("frame-stall"), presentStall("present-stall");
+    double lastRequestReport = -static_cast<double>(reportRequestMinMs);
+    char frameLine[768];
     while (!parent || getppid() == parent) {
         usleep(orphanPollMs * 1000);
         ++polls;
@@ -474,6 +640,29 @@ static void* watchdog(void* arg)
             break; /* exit() hangs: reported and ended below */
         if (rssPolls && polls % rssPolls == 0)
             logFootprint(processRole);
+        if (reportRequested.exchange(false) && nowMs() - lastRequestReport >= reportRequestMinMs) {
+            /* a peer's frame stall: where this process is */
+            lastRequestReport = nowMs();
+            frameLine[0] = '\0';
+            if (frameRole >= 0)
+                wpe_phoenix_frame_watch(frameRole, 0, frameLine, sizeof(frameLine));
+            LOG("role=%s pid=%d report-request %s", processRole, static_cast<int>(getpid()), frameLine);
+            std::vector<ThreadCPU> none;
+            stallReport(stallFirstSampledReport, none);
+        }
+        if (stallMs > 0 && frameRole >= 0 && polls % (1000 / orphanPollMs) == 0) {
+            const int kind = wpe_phoenix_frame_watch(frameRole, static_cast<int64_t>(stallMs), frameLine, sizeof(frameLine));
+            frameStallStep(frameStall, kind, frameLine);
+            const int presentLimit = presentStallMs.load();
+            if (frameRole == 1 && presentLimit > 0) {
+                /* --frame-stall-secs: the view had frames, and has had none for the limit */
+                const unsigned presented = presentedTotal.load();
+                const double idle = nowMs() - static_cast<double>(presentedLastMs.load());
+                char line[sizeof(frameLine) + 64];
+                snprintf(line, sizeof(line), "presented=%u idle_ms=%.0f %s", presented, idle, frameLine);
+                frameStallStep(presentStall, presented >= presentStallMinFrames && idle > presentLimit, line);
+            }
+        }
         if (stallMs <= 0)
             continue;
         const double now = nowMs(), beat = static_cast<double>(lastBeatMs.load());
@@ -605,6 +794,7 @@ static gboolean optPrewarm;
 static gboolean optNoProcessSwap;
 static int optHangSecs = -1;
 static int optStallSecs = -1;
+static int optFrameStallSecs = -1;
 #if ENABLE_VIDEO
 static char* optAutoplay;
 #endif
@@ -638,6 +828,7 @@ static const GOptionEntry optionEntries[] = {
     { "no-process-swap", 0, 0, G_OPTION_ARG_NONE, &optNoProcessSwap, "One web process for every site", nullptr },
     { "hang-recovery", 0, 0, G_OPTION_ARG_INT, &optHangSecs, "Restart a web process unresponsive for S s during a navigation (default 30, 0 off)", "S" },
     { "stall-secs", 0, 0, G_OPTION_ARG_INT, &optStallSecs, "Every process reports a main loop (or start-up) stalled for S s (default 10, 0 off)", "S" },
+    { "frame-stall-secs", 0, 0, G_OPTION_ARG_INT, &optFrameStallSecs, "Report a view that presented frames, then none for S s (default 0, off)", "S" },
 #if ENABLE_VIDEO
     { "autoplay", 0, 0, G_OPTION_ARG_STRING, &optAutoplay, "Media autoplay: muted (default), allow, deny", "POLICY" },
 #endif
@@ -686,6 +877,8 @@ static void optionsFromEnvironment()
         optHangSecs = std::max(number("WPE_BROWSER_HANG_SECS", defaultHangSecs), 0);
     if (optStallSecs < 0)
         optStallSecs = std::max(number("WPE_BROWSER_STALL_SECS", defaultStallSecs), 0);
+    if (optFrameStallSecs < 0)
+        optFrameStallSecs = std::max(number("WPE_BROWSER_FRAME_STALL_SECS", 0), 0);
 }
 
 /*
@@ -1727,6 +1920,13 @@ static void presentBufferRendered(WPEView*, WPEBuffer* buffer, gpointer)
     present.height = wpe_buffer_get_height(buffer);
 }
 
+/* every presented frame, for the watchdog's --frame-stall-secs */
+static void viewBufferRendered(WPEView*, WPEBuffer*, gpointer)
+{
+    presentedTotal.fetch_add(1);
+    presentedLastMs.store(static_cast<int64_t>(nowMs()));
+}
+
 static gboolean presentReport(gpointer)
 {
     double now = nowMs();
@@ -1757,7 +1957,10 @@ static char* storageDirectory(const char* option, const char* first, const char*
 static WebKitNetworkSession* createNetworkSession()
 {
     if (optEphemeral || optHeadless) {
-        LOG("session ephemeral");
+        /* WebKit's FrameConsoleClient prints no console message of a page in an ephemeral session,
+         * whatever enable-write-console-messages-to-stdout says: a check that reads the page's
+         * console.log lines needs a persistent session (--data-dir/--cache-dir in /tmp) */
+        LOG("session ephemeral console=off");
         return webkit_network_session_new_ephemeral();
     }
     g_autofree char* dataDir = storageDirectory(optDataDir, ".local", "share");
@@ -1865,6 +2068,9 @@ static int uiMain(int argc, char** argv)
     applyProcessModel(); /* also WPE_BROWSER_STALL_SECS, which the watchdog reads */
     snprintf(processRole, sizeof(processRole), "ui");
     initStallReport(-1);
+    presentStallMs.store(optFrameStallSecs * 1000);
+    if (optFrameStallSecs > 0)
+        LOG("frame-watch present-stall-secs=%d stall-secs=%d", optFrameStallSecs, optStallSecs);
     startWatchdog(0);
 
     int width = 1024, height = 768;
@@ -2033,6 +2239,7 @@ static int uiMain(int argc, char** argv)
             wpe_toplevel_set_title(toplevel, "wpe-browser");
         }
         LOG("view %s %dx%d", G_OBJECT_TYPE_NAME(view), width, height);
+        g_signal_connect(view, "buffer-rendered", G_CALLBACK(viewBufferRendered), nullptr);
         if (optPresentSecs > 0) {
             present.since = nowMs();
             g_signal_connect(view, "buffer-rendered", G_CALLBACK(presentBufferRendered), nullptr);

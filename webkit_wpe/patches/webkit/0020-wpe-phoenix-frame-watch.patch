@@ -1,0 +1,672 @@
+Subject: WPE on Phoenix: the frame watch, where each process's frame pipeline stands
+
+A page can stop drawing while every main loop of the browser still runs, so neither a crash nor
+the launcher's main-thread stall report says anything: the compositing thread stuck inside one
+step of a frame, a rendering update waiting for tiles still being painted, a frame the UI process
+never answered with a frame-done, the UI waiting for the compositor's frame callback, or no display
+refresh reaching requestAnimationFrame (b35-gate2: a WebGL page froze ~15 s in, silently).
+
+Each of those places records its progress in PhoenixFrameWatch.h (a header-only set of
+relaxed atomics, OS(PHOENIX) only): the ThreadedCompositor's scheduling state and the step of the
+frame it is in, the frames sent and done, the swap chain's targets, the tiles pending, the
+LayerTreeHost's rendering updates and its wait for the renderer; in the UI process the backing
+store's frames (received, handed to the view, called back) and the DisplayLink's ticks and
+observers. wpe_phoenix_frame_watch() describes one process's half as a line and says which wait,
+if any, has lasted longer than a limit. It reads atomics only: the caller is the launcher's
+watchdog thread, and a stuck thread may hold any lock.
+
+  frame-watch kind=render|tiles|frame-done|no-frame|scheduled|renderer|none compositor state=..
+  frame-watch kind=ui-pending|ui-callback|none backing-store received=.. display-link ticks=..
+
+diff --git a/Source/WebKit/Shared/PhoenixFrameWatch.h b/Source/WebKit/Shared/PhoenixFrameWatch.h
+new file mode 100644
+--- /dev/null
++++ b/Source/WebKit/Shared/PhoenixFrameWatch.h
+@@ -0,0 +1,133 @@
++/*
++ * Copyright (C) 2026 Phoenix-RTOS Raspberry Pi port contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHORS ``AS IS'' AND ANY EXPRESS OR IMPLIED
++ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
++ * EVENT SHALL THE AUTHORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++ * OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++ * OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#if OS(PHOENIX)
++
++#include <atomic>
++#include <stdint.h>
++#include <time.h>
++
++// Phoenix-RTOS: where the frame pipeline of this process stands, for the program's own watchdog
++// (the wpe-browser launcher). A page that stops drawing can be stuck in many places that leave
++// every main loop running: the compositing thread inside a frame, a rendering update waiting
++// for tiles or for the UI's frame-done, the UI waiting for the compositor's frame callback, or
++// no display refresh reaching requestAnimationFrame at all. Each place records its progress
++// here with relaxed atomic stores; wpe_phoenix_frame_watch() (ThreadedCompositor.cpp) reads
++// them without a lock, from another thread, as a stuck thread may hold any lock. The state is
++// per process, not per page: the browser runs one page per web process (wpe-browser, patch 0015).
++namespace WebKit::PhoenixFrameWatch {
++
++inline int64_t nowMs()
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
++}
++
++// ThreadedCompositor::renderLayerTree(), in order
++enum class Phase : uint8_t { None, WillRender, Flush, Paint, Swap, Sync, Send };
++
++struct WebProcessState {
++    // ThreadedCompositor (compositing thread, and the main thread when it schedules)
++    std::atomic<uint8_t> state { 0 }; // ThreadedCompositor::State: Idle, Scheduled, InProgress, ScheduledWhileInProgress, Invalidated
++    std::atomic<int64_t> stateMs { 0 };
++    std::atomic<uint8_t> phase { 0 };
++    std::atomic<int64_t> phaseMs { 0 };
++    std::atomic<bool> waitingForTiles { false };
++    std::atomic<int64_t> waitingForTilesMs { 0 };
++    std::atomic<unsigned> suspended { 0 };
++    std::atomic<uint64_t> compositions { 0 };
++    std::atomic<uint64_t> framesDone { 0 };
++    std::atomic<int64_t> frameDoneMs { 0 };
++    // AcceleratedSurface
++    std::atomic<uint64_t> framesSent { 0 };
++    std::atomic<int64_t> frameSentMs { 0 };
++    std::atomic<uint64_t> buffersReleased { 0 };
++    std::atomic<uint64_t> noTarget { 0 };
++    std::atomic<unsigned> targetsLocked { 0 };
++    std::atomic<unsigned> targetsFree { 0 };
++    // CoordinatedSceneState: tiles painted asynchronously (Skia painting threads)
++    std::atomic<int> tilesPending { 0 };
++    // LayerTreeHost (main thread): rendering updates, rAF callbacks included
++    std::atomic<uint64_t> renderingUpdates { 0 };
++    std::atomic<int64_t> renderingUpdateMs { 0 };
++    std::atomic<bool> waitingForRenderer { false };
++    std::atomic<int64_t> waitingForRendererMs { 0 };
++};
++
++struct UIProcessState {
++    // AcceleratedBackingStore: frames from the web process to the WPEView
++    std::atomic<uint64_t> framesReceived { 0 };
++    std::atomic<int64_t> frameReceivedMs { 0 };
++    std::atomic<uint64_t> framesRendered { 0 };
++    std::atomic<uint64_t> renderFailed { 0 };
++    std::atomic<int64_t> pendingMs { 0 }; // a received frame not yet handed to the view (rendering fence, no toplevel); 0: none
++    std::atomic<int64_t> committedMs { 0 }; // handed to the view, its frame callback outstanding; 0: none
++    std::atomic<uint64_t> buffersRendered { 0 };
++    std::atomic<uint64_t> buffersReleased { 0 };
++    std::atomic<uint64_t> framesDoneSent { 0 };
++    // DisplayLink: the display refresh that drives requestAnimationFrame in web processes
++    std::atomic<uint64_t> displayLinkTicks { 0 };
++    std::atomic<int64_t> displayLinkTickMs { 0 };
++    std::atomic<uint64_t> displayLinkFired { 0 }; // ticks sent to a web process
++    std::atomic<unsigned> displayLinkObservers { 0 };
++    std::atomic<uint64_t> displayLinkStops { 0 };
++};
++
++inline WebProcessState webProcess;
++inline UIProcessState uiProcess;
++
++inline void mark(std::atomic<int64_t>& at)
++{
++    at.store(nowMs(), std::memory_order_relaxed);
++}
++
++inline void count(std::atomic<uint64_t>& counter, std::atomic<int64_t>* at = nullptr)
++{
++    counter.fetch_add(1, std::memory_order_relaxed);
++    if (at)
++        mark(*at);
++}
++
++inline void setPhase(Phase phase)
++{
++    webProcess.phase.store(static_cast<uint8_t>(phase), std::memory_order_relaxed);
++    mark(webProcess.phaseMs);
++}
++
++// Phase::None again when renderLayerTree() returns, by any path
++struct PhaseScope {
++    ~PhaseScope() { setPhase(Phase::None); }
++};
++
++} // namespace WebKit::PhoenixFrameWatch
++
++// The watchdog's view (wpe-browser): one line describing this process's frame pipeline into
++// `line`, and the kind of stall it is in when one of its waits has lasted longer than limitMs
++// (0: none). Every web and UI process has both halves; `ui` selects which one is described.
++extern "C" int wpe_phoenix_frame_watch(int ui, int64_t limitMs, char* line, size_t size);
++
++#endif // OS(PHOENIX)
+diff --git a/Source/WebKit/UIProcess/DisplayLink.cpp b/Source/WebKit/UIProcess/DisplayLink.cpp
+--- a/Source/WebKit/UIProcess/DisplayLink.cpp
++++ b/Source/WebKit/UIProcess/DisplayLink.cpp
+@@ -35,6 +35,10 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/text/TextStream.h>
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#endif
++
+ namespace WebKit {
+ 
+ using namespace WebCore;
+@@ -216,9 +220,25 @@
+ 
+     m_currentUpdate = m_currentUpdate.nextUpdate();
+ 
++#if OS(PHOENIX)
++    {
++        auto& watch = PhoenixFrameWatch::uiProcess;
++        unsigned observers = 0;
++        for (auto& [client, clientInfo] : m_clients)
++            observers += clientInfo.observers.size();
++        watch.displayLinkObservers.store(observers, std::memory_order_relaxed);
++        PhoenixFrameWatch::count(watch.displayLinkTicks, &watch.displayLinkTickMs);
++        if (anyConnectionHadObservers)
++            PhoenixFrameWatch::count(watch.displayLinkFired);
++    }
++#endif
++
+     if (!anyConnectionHadObservers) {
+         if (++m_fireCountWithoutObservers >= maxFireCountWithoutObservers) {
+             LOG_WITH_STREAM(DisplayLink, stream << "[UI ] DisplayLink for display " << m_displayID << " fired " << m_fireCountWithoutObservers << " times with no observers; stopping DisplayLink");
++#if OS(PHOENIX)
++            PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.displayLinkStops);
++#endif
+             platformStop();
+         }
+         return;
+diff --git a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+--- a/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
++++ b/Source/WebKit/UIProcess/wpe/AcceleratedBackingStore.cpp
+@@ -37,6 +37,10 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/glib/GUniquePtr.h>
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#endif
++
+ #if OS(ANDROID)
+ #include <drm/drm_fourcc.h>
+ #elif USE(LIBDRM)
+@@ -106,6 +110,9 @@
+             frameDone();
+             m_pendingBuffer = nullptr;
+             m_pendingDamageRects = { };
++#if OS(PHOENIX)
++            PhoenixFrameWatch::uiProcess.pendingMs.store(0, std::memory_order_relaxed);
++#endif
+         }
+         m_buffers.clear();
+         m_bufferIDs.clear();
+@@ -199,6 +206,9 @@
+ void AcceleratedBackingStore::frame(uint64_t bufferID, Rects&& damageRects, WTF::UnixFileDescriptor&& renderingFenceFD)
+ {
+     ASSERT(!m_pendingBuffer);
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.framesReceived, &PhoenixFrameWatch::uiProcess.frameReceivedMs);
++#endif
+     auto* buffer = m_buffers.get(bufferID);
+     if (!buffer) {
+         frameDone();
+@@ -206,6 +216,9 @@
+     }
+ 
+     m_pendingBuffer = buffer;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::mark(PhoenixFrameWatch::uiProcess.pendingMs);
++#endif
+     m_pendingDamageRects = WTF::move(damageRects);
+     if (wpe_display_use_explicit_sync(wpe_view_get_display(m_wpeView.get()))) {
+         wpe_buffer_set_rendering_fence(m_pendingBuffer.get(), renderingFenceFD.release());
+@@ -294,28 +307,51 @@
+     const auto* rects = !m_pendingDamageRects.isEmpty() ? reinterpret_cast<const WPERectangle*>(m_pendingDamageRects.span().data()) : nullptr;
+ 
+     GUniqueOutPtr<GError> error;
++#if OS(PHOENIX)
++    // committed before the call: a compositor may answer with the frame callback within it
++    PhoenixFrameWatch::uiProcess.pendingMs.store(0, std::memory_order_relaxed);
++    PhoenixFrameWatch::mark(PhoenixFrameWatch::uiProcess.committedMs);
++#endif
+     if (!wpe_view_render_buffer(m_wpeView.get(), m_pendingBuffer.get(), rects, m_pendingDamageRects.size(), &error.outPtr())) {
+         g_warning("Failed to render frame: %s", error->message);
++#if OS(PHOENIX)
++        PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.renderFailed);
++        PhoenixFrameWatch::uiProcess.committedMs.store(0, std::memory_order_relaxed);
++#endif
+         frameDone();
+         m_pendingBuffer = nullptr;
+-    } else
++    } else {
++#if OS(PHOENIX)
++        PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.framesRendered);
++#endif
+         m_committedBuffer = WTF::move(m_pendingBuffer);
++    }
+     m_pendingDamageRects = { };
+ }
+ 
+ void AcceleratedBackingStore::frameDone()
+ {
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.framesDoneSent);
++#endif
+     if (RefPtr legacyMainFrameProcess = m_legacyMainFrameProcess.get())
+         legacyMainFrameProcess->send(Messages::AcceleratedSurface::FrameDone(), m_surfaceID);
+ }
+ 
+ void AcceleratedBackingStore::bufferRendered()
+ {
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.buffersRendered);
++    PhoenixFrameWatch::uiProcess.committedMs.store(0, std::memory_order_relaxed);
++#endif
+     frameDone();
+ }
+ 
+ void AcceleratedBackingStore::bufferReleased(WPEBuffer* buffer)
+ {
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.buffersReleased);
++#endif
+     if (auto id = m_bufferIDs.get(buffer)) {
+         auto releaseFence = UnixFileDescriptor { wpe_buffer_take_release_fence(buffer), UnixFileDescriptor::Adopt };
+ 
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/AcceleratedSurface.cpp
+@@ -45,6 +45,10 @@
+ #include <wtf/SystemTracing.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#endif
++
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ #include <skia/core/SkCanvas.h>
+ #include <skia/core/SkColorSpace.h>
+@@ -848,6 +852,15 @@
+ #endif
+     }
+ 
++#if OS(PHOENIX)
++    // what the compositing thread found: no target means no frame, and no frame-done to end it
++    auto& watch = PhoenixFrameWatch::webProcess;
++    watch.targetsLocked.store(m_lockedTargets.size() + !m_freeTargets.isEmpty(), std::memory_order_relaxed);
++    watch.targetsFree.store(m_freeTargets.isEmpty() ? 0 : m_freeTargets.size() - 1, std::memory_order_relaxed);
++    if (m_freeTargets.isEmpty())
++        PhoenixFrameWatch::count(watch.noTarget);
++#endif
++
+     if (m_freeTargets.isEmpty())
+         return nullptr;
+ 
+@@ -1207,6 +1220,9 @@
+ 
+     auto [target, damageRects] = m_pendingFrameNotifyTargets.takeLast();
+     target->sendFrame(WTF::move(damageRects));
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.framesSent, &PhoenixFrameWatch::webProcess.frameSentMs);
++#endif
+ }
+ 
+ #if ENABLE(DAMAGE_TRACKING)
+@@ -1224,6 +1240,9 @@
+     ASSERT(m_swapChain.type() != SwapChain::Type::WPEBackend);
+ #endif
+     m_swapChain.releaseTarget(targetID, WTF::move(releaseFence));
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.buffersReleased);
++#endif
+ }
+ #endif
+ 
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/CoordinatedSceneState.cpp
+@@ -31,6 +31,10 @@
+ #include <wtf/MainThread.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#endif
++
+ namespace WebKit {
+ using namespace WebCore;
+ 
+@@ -187,12 +191,18 @@
+ void CoordinatedSceneState::willPaintTile()
+ {
+     m_pendingTiles++;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::webProcess.tilesPending.fetch_add(1, std::memory_order_relaxed);
++#endif
+ }
+ 
+ void CoordinatedSceneState::didPaintTile()
+ {
+     ASSERT(m_pendingTiles.load() > 0);
+     m_pendingTiles--;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::webProcess.tilesPending.fetch_sub(1, std::memory_order_relaxed);
++#endif
+ }
+ 
+ } // namespace WebKit
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/LayerTreeHost.cpp
+@@ -59,6 +59,10 @@
+ #include <wtf/glib/RunLoopSourcePriority.h>
+ #include <wtf/text/StringToIntegerConversion.h>
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#endif
++
+ namespace WebKit {
+ using namespace WebCore;
+ 
+@@ -177,6 +181,9 @@
+     SetForScope<bool> reentrancyProtector(m_isUpdatingRendering, true);
+ 
+     TraceScope traceScope(LayerTreeHostRenderingUpdateStart, LayerTreeHostRenderingUpdateEnd);
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.renderingUpdates, &PhoenixFrameWatch::webProcess.renderingUpdateMs);
++#endif
+ 
+     Ref page = m_webPage;
+     page->updateRendering();
+@@ -438,6 +445,10 @@
+ void LayerTreeHost::requestCompositionForRenderingUpdate()
+ {
+     m_isWaitingForRenderer = true;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::webProcess.waitingForRenderer.store(true, std::memory_order_relaxed);
++    PhoenixFrameWatch::mark(PhoenixFrameWatch::webProcess.waitingForRendererMs);
++#endif
+     m_compositor->requestCompositionForRenderingUpdate([this] {
+         WTFBeginSignpost(this, DidComposite);
+ 
+@@ -445,6 +456,9 @@
+             m_forcedRepaintAsyncCallback();
+ 
+         m_isWaitingForRenderer = false;
++#if OS(PHOENIX)
++        PhoenixFrameWatch::webProcess.waitingForRenderer.store(false, std::memory_order_relaxed);
++#endif
+         bool scheduledWhileWaitingForRenderer = std::exchange(m_scheduledWhileWaitingForRenderer, false);
+         if (m_pendingForceRepaint) {
+             if (!m_layerTreeStateIsFrozen)
+diff --git a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
+--- a/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
++++ b/Source/WebKit/WebProcess/WebPage/CoordinatedGraphics/ThreadedCompositor.cpp
+@@ -54,6 +54,11 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/text/StringToIntegerConversion.h>
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#include <stdio.h>
++#endif
++
+ #if USE(GLIB_EVENT_LOOP)
+ #include <wtf/glib/RunLoopSourcePriority.h>
+ #endif
+@@ -70,6 +75,18 @@
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(ThreadedCompositor);
+ 
++#if OS(PHOENIX)
++// PhoenixFrameWatch.h: the scheduling state, after each change of m_state (under its lock)
++static void watchCompositorState(uint8_t state, bool isWaitingForTiles)
++{
++    auto& watch = PhoenixFrameWatch::webProcess;
++    if (watch.state.exchange(state, std::memory_order_relaxed) != state)
++        PhoenixFrameWatch::mark(watch.stateMs);
++    if (watch.waitingForTiles.exchange(isWaitingForTiles, std::memory_order_relaxed) != isWaitingForTiles && isWaitingForTiles)
++        PhoenixFrameWatch::mark(watch.waitingForTilesMs);
++}
++#endif
++
+ Ref<ThreadedCompositor> ThreadedCompositor::create(WebPage& webPage, LayerTreeHost& layerTreeHost, CoordinatedSceneState& sceneState)
+ {
+     return adoptRef(*new ThreadedCompositor(webPage, layerTreeHost, sceneState));
+@@ -150,6 +167,9 @@
+         stopRenderTimer();
+         m_state.didCompositeRenderingUpdateFunction = nullptr;
+         m_state.state = State::Invalidated;
++#if OS(PHOENIX)
++        watchCompositorState(static_cast<uint8_t>(m_state.state), m_state.isWaitingForTiles);
++#endif
+     }
+ 
+     m_didCompositeRunLoopObserver->invalidate();
+@@ -222,7 +242,11 @@
+     ASSERT(RunLoop::isMain());
+     m_surface->visibilityDidChange(false);
+ 
+-    if (++m_suspendedCount > 1)
++    auto suspendedCount = ++m_suspendedCount;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::webProcess.suspended.store(suspendedCount, std::memory_order_relaxed);
++#endif
++    if (suspendedCount > 1)
+         return;
+ 
+     Locker locker { m_state.lock };
+@@ -235,7 +259,11 @@
+     m_surface->visibilityDidChange(true);
+ 
+     ASSERT(m_suspendedCount > 0);
+-    if (--m_suspendedCount > 0)
++    auto suspendedCount = --m_suspendedCount;
++#if OS(PHOENIX)
++    PhoenixFrameWatch::webProcess.suspended.store(suspendedCount, std::memory_order_relaxed);
++#endif
++    if (suspendedCount > 0)
+         return;
+ 
+     Locker locker { m_state.lock };
+@@ -557,8 +585,17 @@
+ 
+         ASSERT(m_state.state == State::Scheduled);
+         m_state.state = State::InProgress;
++#if OS(PHOENIX)
++        watchCompositorState(static_cast<uint8_t>(m_state.state), m_state.isWaitingForTiles);
++#endif
+     }
+ 
++#if OS(PHOENIX)
++    // until this function returns, which step of the frame the compositing thread is in
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.compositions);
++    PhoenixFrameWatch::PhaseScope phaseScope;
++#endif
++
+     if (!m_useSkia && (!m_context || !m_context->makeContextCurrent()))
+         return;
+ 
+@@ -577,6 +614,9 @@
+     TransformationMatrix viewportTransform;
+     viewportTransform.scale(deviceScaleFactor);
+ 
++#if OS(PHOENIX)
++    PhoenixFrameWatch::setPhase(PhoenixFrameWatch::Phase::WillRender);
++#endif
+     m_surface->willRenderFrame(viewportSize);
+ 
+     RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
+@@ -584,10 +624,16 @@
+             m_layerTreeHost->willRenderFrame();
+     });
+ 
++#if OS(PHOENIX)
++    PhoenixFrameWatch::setPhase(PhoenixFrameWatch::Phase::Flush);
++#endif
+     WTFBeginSignpost(this, FlushCompositingState);
+     flushCompositingState(reasons);
+     WTFEndSignpost(this, FlushCompositingState);
+ 
++#if OS(PHOENIX)
++    PhoenixFrameWatch::setPhase(PhoenixFrameWatch::Phase::Paint);
++#endif
+     WTFBeginSignpost(this, PaintToGLContext);
+     const auto targetContents = paintToCurrentGLContext(viewportTransform, viewportSize, reasons);
+     WTFEndSignpost(this, PaintToGLContext);
+@@ -599,12 +645,21 @@
+ 
+     WTFEmitSignpost(this, DidRenderFrame, "reasons: %s", reasonsToString(reasons).ascii().data());
+ 
++#if OS(PHOENIX)
++    PhoenixFrameWatch::setPhase(PhoenixFrameWatch::Phase::Swap);
++#endif
+     if (m_context)
+         m_context->swapBuffers();
+     else
+         PlatformDisplay::sharedDisplay().skiaGLContext()->swapBuffers();
+ 
++#if OS(PHOENIX)
++    PhoenixFrameWatch::setPhase(PhoenixFrameWatch::Phase::Sync);
++#endif
+     m_surface->didRenderFrame(targetContents);
++#if OS(PHOENIX)
++    PhoenixFrameWatch::setPhase(PhoenixFrameWatch::Phase::Send);
++#endif
+     m_surface->sendFrame();
+ 
+     RunLoop::mainSingleton().dispatch([this, protectedThis = Ref { *this }] {
+@@ -671,6 +726,9 @@
+     case State::Invalidated:
+         break;
+     }
++#if OS(PHOENIX)
++    watchCompositorState(static_cast<uint8_t>(m_state.state), m_state.isWaitingForTiles);
++#endif
+ }
+ 
+ void ThreadedCompositor::frameComplete()
+@@ -697,6 +755,10 @@
+             startRenderTimer();
+         break;
+     }
++#if OS(PHOENIX)
++    PhoenixFrameWatch::count(PhoenixFrameWatch::webProcess.framesDone, &PhoenixFrameWatch::webProcess.frameDoneMs);
++    watchCompositorState(static_cast<uint8_t>(m_state.state), m_state.isWaitingForTiles);
++#endif
+ }
+ 
+ RunLoop* ThreadedCompositor::runLoop()
+@@ -880,4 +942,90 @@
+ 
+ } // namespace WebKit
+ 
++#if OS(PHOENIX)
++// PhoenixFrameWatch.h. Reads only atomics: the caller is the program's watchdog thread, and the
++// threads that would hold any lock here may be the stuck ones.
++int wpe_phoenix_frame_watch(int ui, int64_t limitMs, char* line, size_t size)
++{
++    using namespace WebKit::PhoenixFrameWatch;
++    static constexpr const char* stateNames[] = { "idle", "scheduled", "in-progress", "scheduled-while-in-progress", "invalidated" };
++    static constexpr const char* phaseNames[] = { "none", "will-render", "flush", "paint", "swap", "sync", "send" };
++    const int64_t now = nowMs();
++    // the age of a timestamp in ms, -1 when it was never set
++    auto age = [now](const std::atomic<int64_t>& at) -> long long {
++        const int64_t value = at.load(std::memory_order_relaxed);
++        return value ? static_cast<long long>(now - value) : -1;
++    };
++    auto load = [](const auto& value) {
++        return value.load(std::memory_order_relaxed);
++    };
++    auto exceeds = [limitMs](long long ms) {
++        return limitMs > 0 && ms > limitMs;
++    };
++
++    int kind = 0;
++    const char* kindName = "none";
++    if (ui) {
++        const auto& s = uiProcess;
++        if (exceeds(age(s.pendingMs))) {
++            kind = 7;
++            kindName = "ui-pending"; // a frame the UI received but has not handed to the view
++        } else if (exceeds(age(s.committedMs))) {
++            kind = 8;
++            kindName = "ui-callback"; // the view's buffer is with the compositor, no frame callback
++        }
++        snprintf(line, size, "frame-watch kind=%s backing-store received=%llu received_ms=%lld rendered=%llu render_failed=%llu"
++            " pending_ms=%lld committed_ms=%lld buffer_rendered=%llu released=%llu frame_done_sent=%llu"
++            " display-link ticks=%llu tick_ms=%lld fired=%llu observers=%u stops=%llu", kindName,
++            static_cast<unsigned long long>(load(s.framesReceived)), age(s.frameReceivedMs),
++            static_cast<unsigned long long>(load(s.framesRendered)), static_cast<unsigned long long>(load(s.renderFailed)),
++            age(s.pendingMs), age(s.committedMs), static_cast<unsigned long long>(load(s.buffersRendered)),
++            static_cast<unsigned long long>(load(s.buffersReleased)), static_cast<unsigned long long>(load(s.framesDoneSent)),
++            static_cast<unsigned long long>(load(s.displayLinkTicks)), age(s.displayLinkTickMs),
++            static_cast<unsigned long long>(load(s.displayLinkFired)), load(s.displayLinkObservers),
++            static_cast<unsigned long long>(load(s.displayLinkStops)));
++        return kind;
++    }
++
++    const auto& s = webProcess;
++    const unsigned state = load(s.state), phase = load(s.phase);
++    const bool inProgress = state == 2 || state == 3;
++    const bool suspended = load(s.suspended);
++    if (phase && exceeds(age(s.phaseMs))) {
++        kind = 1;
++        kindName = "render"; // the compositing thread has been inside one step of a frame
++    } else if (!suspended && load(s.waitingForTiles) && exceeds(age(s.waitingForTilesMs))) {
++        kind = 2;
++        kindName = "tiles"; // a rendering update waits for tiles still being painted
++    } else if (!suspended && inProgress && load(s.frameSentMs) > load(s.frameDoneMs) && exceeds(age(s.frameSentMs))) {
++        kind = 3;
++        kindName = "frame-done"; // the frame went to the UI process, which has not said it is done
++    } else if (!suspended && inProgress && exceeds(age(s.stateMs))) {
++        kind = 4;
++        kindName = "no-frame"; // a composition ended without sending a frame, so none can complete
++    } else if (!suspended && state == 1 && exceeds(age(s.stateMs))) {
++        kind = 5;
++        kindName = "scheduled"; // a composition is due, the compositing thread never ran it
++    } else if (!suspended && load(s.waitingForRenderer) && exceeds(age(s.waitingForRendererMs))) {
++        kind = 6;
++        kindName = "renderer"; // the main thread waits for a composition that never reports back
++    }
++    snprintf(line, size, "frame-watch kind=%s compositor state=%s state_ms=%lld phase=%s phase_ms=%lld compositions=%llu"
++        " suspended=%u tiles_waiting=%d tiles_wait_ms=%lld tiles_pending=%d frames_sent=%llu frame_sent_ms=%lld"
++        " frames_done=%llu frame_done_ms=%lld released=%llu targets_locked=%u targets_free=%u no_target=%llu"
++        " updates=%llu update_ms=%lld waiting_for_renderer=%d renderer_wait_ms=%lld", kindName,
++        state < std::size(stateNames) ? stateNames[state] : "?", age(s.stateMs),
++        phase < std::size(phaseNames) ? phaseNames[phase] : "?", age(s.phaseMs),
++        static_cast<unsigned long long>(load(s.compositions)), load(s.suspended), load(s.waitingForTiles) ? 1 : 0,
++        load(s.waitingForTiles) ? age(s.waitingForTilesMs) : -1LL, load(s.tilesPending),
++        static_cast<unsigned long long>(load(s.framesSent)), age(s.frameSentMs),
++        static_cast<unsigned long long>(load(s.framesDone)), age(s.frameDoneMs),
++        static_cast<unsigned long long>(load(s.buffersReleased)), load(s.targetsLocked), load(s.targetsFree),
++        static_cast<unsigned long long>(load(s.noTarget)), static_cast<unsigned long long>(load(s.renderingUpdates)),
++        age(s.renderingUpdateMs), load(s.waitingForRenderer) ? 1 : 0,
++        load(s.waitingForRenderer) ? age(s.waitingForRendererMs) : -1LL);
++    return kind;
++}
++#endif // OS(PHOENIX)
++
+ #endif // USE(COORDINATED_GRAPHICS)

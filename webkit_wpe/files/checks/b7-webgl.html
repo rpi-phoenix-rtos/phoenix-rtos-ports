@@ -7,6 +7,14 @@
        B7-WEBGL pixel=<r>,<g>,<b>,<a> expect=255,128,0,255 ok=1|0     (a known first frame)
        B7-WEBGL fps=<f> frames=<n> secs=<s> t=<s>                     (every 5 s)
        B7-WEBGL done frames=<n> secs=<s> fps=<f> min5=<f> max5=<f> triangles=<t>
+     and, when the frame loop goes wrong (also in the title, which the launcher prints as
+     "WPEB ... title ..." even where console lines are lost):
+       B7-WEBGL error frames=<n> msg=<message>      (an exception in the frame callback: printed
+                                                     for the first 3, the loop goes on)
+       B7-WEBGL raf-stall frames=<n> idle_ms=<ms> secs=<s>   (no requestAnimationFrame callback for
+                                                     3 s while timers still run: the frames stopped
+                                                     outside the script)
+       B7-WEBGL raf-resume frames=<n> idle_ms=<ms>
      Query: ?secs=60 (measurement length), ?tris=20000 (mesh size), ?ctx=webgl (force WebGL 1). -->
 <html lang="en">
 <head>
@@ -30,6 +38,10 @@ const status = document.getElementById("s");
 function out(line) {
   console.log("B7-WEBGL " + line);
   status.textContent = "B7 WebGL: " + line;
+}
+function note(line) {
+  out(line);
+  document.title = "B7 WebGL " + line;
 }
 
 const canvas = document.getElementById("c");
@@ -111,26 +123,46 @@ if (!gl) {
   gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 0, 0);
 
   let start = 0, last = 0, frames = 0, winFrames = 0, min5 = Infinity, max5 = 0;
+  let lastCallback = performance.now(), rafStalled = false, errors = 0;
+  // A frame loop that stops is silent: a timer (main thread, no rendering involved) says when
+  // no frame callback has come for 3 s, and an exception in one is printed instead of ending it.
+  const rafWatch = setInterval(function () {
+    const idle = performance.now() - lastCallback;
+    if (!rafStalled && idle > 3000) {
+      rafStalled = true;
+      note("raf-stall frames=" + frames + " idle_ms=" + idle.toFixed(0) + " secs=" + (start ? (performance.now() - start) / 1000 : 0).toFixed(1));
+    } else if (rafStalled && idle < 1000) {
+      rafStalled = false;
+      note("raf-resume frames=" + frames + " idle_ms=" + idle.toFixed(0));
+    }
+  }, 1000);
   function frame(now) {
+    lastCallback = performance.now();
     if (!start) start = last = now;
-    gl.clearColor(0.1, 0.1, 0.15, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    gl.uniform1f(uA, (now - start) / 1000);
-    gl.drawArrays(gl.TRIANGLES, 0, TRIS * 3);
-    frames++;
-    winFrames++;
-    if (now - last >= 5000) {
-      const fps = winFrames * 1000 / (now - last);
-      min5 = Math.min(min5, fps);
-      max5 = Math.max(max5, fps);
-      out("fps=" + fps.toFixed(1) + " frames=" + frames + " secs=" + ((now - start) / 1000).toFixed(1) + " t=" + (now / 1000).toFixed(1));
-      last = now;
-      winFrames = 0;
+    try {
+      gl.clearColor(0.1, 0.1, 0.15, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+      gl.uniform1f(uA, (now - start) / 1000);
+      gl.drawArrays(gl.TRIANGLES, 0, TRIS * 3);
+      frames++;
+      winFrames++;
+      if (now - last >= 5000) {
+        const fps = winFrames * 1000 / (now - last);
+        min5 = Math.min(min5, fps);
+        max5 = Math.max(max5, fps);
+        out("fps=" + fps.toFixed(1) + " frames=" + frames + " secs=" + ((now - start) / 1000).toFixed(1) + " t=" + (now / 1000).toFixed(1));
+        last = now;
+        winFrames = 0;
+      }
+    } catch (e) {
+      if (errors++ < 3)
+        note("error frames=" + frames + " msg=" + String(e && e.message ? e.message : e).replace(/\s+/g, " "));
     }
     if (now - start < SECS * 1000) {
       requestAnimationFrame(frame);
       return;
     }
+    clearInterval(rafWatch);
     const secs = (now - start) / 1000;
     out("done frames=" + frames + " secs=" + secs.toFixed(1) + " fps=" + (frames / secs).toFixed(1) +
       " min5=" + (min5 === Infinity ? 0 : min5).toFixed(1) + " max5=" + max5.toFixed(1) + " triangles=" + TRIS);
