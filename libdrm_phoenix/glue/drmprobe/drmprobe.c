@@ -1013,6 +1013,67 @@ static void t_render_clear(void)
 		if (s6 != 0u) (void)drmSyncobjDestroy(P.render, s6);
 	}
 
+	/* A sync file the program duplicates itself is still that sync file. Mesa's EGL
+	 * native-fence path, exactly: eglCreateSyncKHR(fd) -> create_fence_fd
+	 * fcntl(F_DUPFD_CLOEXEC, 3), the caller closes its fd, eglWaitSyncKHR ->
+	 * sync_accumulate os_dupfd_cloexec (F_DUPFD_CLOEXEC again), and the next submit
+	 * imports that copy into its in-syncobj (v3d_job.c "Failed to import native
+	 * fence." when it cannot). Plus dup() and dup2() of it, and a stale entry: the
+	 * exported descriptor's number, closed and reused by dup2() of the render node,
+	 * must no longer be a sync file. Needs -Wl,--wrap=fcntl,--wrap=dup,--wrap=dup2. */
+	if (rc == 0) {
+		struct probe_sync_file_info fi;
+		uint32_t s7 = 0, s8 = 0, s9 = 0;
+		int fa = -1, d1 = -1, d2 = -1, d3 = -1, d4 = -1, r = -1, rc_j, rc_im = -1, e_im = 0, rc_w = -1, rc_im2 = -1,
+			rc_w2 = -1, rc_st = -2, e_st = 0, px4 = 0, num = -1;
+		rc_j = drmSyncobjCreate(P.render, 0, &s7);
+		if (rc_j == 0) rc_j = cl_clear(&rt, &bcl, &rcl, &ta, &ts, 0xff654321u, 0u, &s7, &px4, 0);   /* pending, not waited */
+		if (rc_j == 0) rc_j = drmSyncobjExportSyncFile(P.render, s7, &fa);
+		if (rc_j == 0) {
+			/* The graded copies land on numbers no earlier test used (Mesa passes a
+			 * minimum of 3): a number an earlier sync file had keeps its stale table
+			 * entry in a library without the interposers, and an import of it then
+			 * "succeeds" with that old fence - which would hide the failure. */
+			d1 = fcntl(fa, F_DUPFD_CLOEXEC, 150);   /* v3d_fence_create_fd */
+			d2 = (d1 >= 0) ? fcntl(d1, F_DUPFD_CLOEXEC, 150) : -1;   /* sync_accumulate -> os_dupfd_cloexec */
+			d3 = (d2 >= 0) ? dup(d2) : -1;
+			d4 = (d3 >= 0) ? dup2(d3, 160) : -1;
+			num = fa;
+			close(fa);   /* the application closes its own descriptor (EGL owns the copy) */
+			fa = -1;
+		}
+		if ((d2 >= 0) && (drmSyncobjCreate(P.render, 0, &s8) == 0)) {
+			rc_im = drmSyncobjImportSyncFile(P.render, s8, d2);
+			e_im = (rc_im != 0) ? errno : 0;
+			rc_w = drmSyncobjWait(P.render, &s8, 1, INT64_MAX, 0, NULL);
+		}
+		if ((d4 >= 0) && (drmSyncobjCreate(P.render, 0, &s9) == 0)) {
+			rc_im2 = drmSyncobjImportSyncFile(P.render, s9, d4);   /* the job is done by now: a signalled snapshot */
+			rc_w2 = drmSyncobjWait(P.render, &s9, 1, INT64_MAX, 0, NULL);
+		}
+		if (num >= 0) {
+			r = dup2(P.render, num);   /* the closed export's number, now a plain render descriptor */
+			if (r == num) {
+				memset(&fi, 0, sizeof(fi));
+				rc_st = ioctl(r, PROBE_SYNC_IOC_FILE_INFO, &fi);
+				e_st = (rc_st != 0) ? errno : 0;
+			}
+		}
+		ok = (rc_j == 0) && (d1 >= 0) && (d2 >= 0) && (d3 >= 0) && (d4 == 160) && (rc_im == 0) && (rc_w == 0) &&
+			(rc_im2 == 0) && (rc_w2 == 0) && (r == num) && (rc_st == -1) && (e_st == ENOTTY);
+		printf(TAG "sync_dup setup=%d dups=%d,%d,%d,%d import=%d errno=%d wait=%d import_dup2=%d wait_dup2=%d "
+			"stale_info=%d stale_errno=%d ok=%d\n", rc_j, d1, d2, d3, d4, rc_im, e_im, rc_w, rc_im2, rc_w2, rc_st, e_st, ok);
+		verdict("sync_dup", ok);
+		if (r >= 0) close(r);
+		if (d1 >= 0) close(d1);
+		if (d2 >= 0) close(d2);
+		if (d3 >= 0) close(d3);
+		if (d4 >= 0) close(d4);
+		if (s7 != 0u) (void)drmSyncobjDestroy(P.render, s7);
+		if (s8 != 0u) (void)drmSyncobjDestroy(P.render, s8);
+		if (s9 != 0u) (void)drmSyncobjDestroy(P.render, s9);
+	}
+
 	/* cross-server fence: flip to a buffer only after a GPU job, IN_FENCE_FD = the sync file */
 	if ((rc == 0) && (sfd >= 0) && (P.primary != 0u) && (P.buf[0].fb != 0u)) {
 		drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(P.card, P.primary, DRM_MODE_OBJECT_PLANE);

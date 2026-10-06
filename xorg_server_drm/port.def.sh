@@ -332,9 +332,10 @@ _xorg_server_drm_eglx11_demo() {
 	done < "${lt}"
 	[ -n "${whole}" ] || b_die "no --whole-archive entry in ${lt}"
 	# -Wl,--wrap=mmap: libdrm-phoenix resolves Mesa's BO tokens (M3 section 2.6);
-	# -Wl,--wrap=ioctl: the in-process sync-file ioctls (M5 section 9.3).
+	# -Wl,--wrap=ioctl: the in-process sync-file ioctls (M5 section 9.3);
+	# -Wl,--wrap=fcntl/dup/dup2: a duplicated sync file stays one (EGL native fences).
 	"${NL_PHXCXX}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 \
-		-Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,-Map,"${e}.map" -o "${e}" "${o}/eglx11_demo.o" \
+		-Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 -Wl,-Map,"${e}.map" -o "${e}" "${o}/eglx11_demo.o" \
 		-Wl,--whole-archive "${whole}" -Wl,--no-whole-archive -Wl,--start-group "${link[@]}" -Wl,--end-group -lm \
 		> "${o}/link.log" 2>&1 || { grep -v ': warning: ' "${o}/link.log" | head -60; b_die "eglx11-demo link failed"; }
 	"${NL_STRIP}" -o "${P}/bin/eglx11-demo" "${e}"

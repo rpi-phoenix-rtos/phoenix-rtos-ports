@@ -46,7 +46,7 @@
 extern int sys_fdpath(int fd, char *buf, size_t size);
 
 #define DRMPHX_MAX_FD      1024
-#define DRMPHX_MAX_SYNCFD  64u
+#define DRMPHX_MAX_SYNCFD  256u   /* live emulated sync files (and dups of them) per process */
 #define DRMPHX_MAX_PRIMEFD 64u
 
 typedef struct {
@@ -61,11 +61,12 @@ static struct {
 
 	struct {
 		int used;
-		int fd;
+		int fd;                                  /* at most one entry per descriptor number */
+		uint32_t seq;                            /* registration order: a full table evicts the oldest */
 		uint32_t nfence;                         /* 0 = an already-signalled snapshot */
 		v3da_fence_t fence[DRMPHX_SYNCFILE_FENCES];   /* a merged sync file holds several (M5) */
-	} sf[DRMPHX_MAX_SYNCFD];       /* sync-file emulation (newest wins) */
-	uint32_t sf_next;
+	} sf[DRMPHX_MAX_SYNCFD];       /* sync-file emulation */
+	uint32_t sf_seq;
 
 	struct {
 		int fd;
@@ -1219,19 +1220,57 @@ static uint32_t fence_set_add(v3da_fence_t *set, uint32_t n, uint32_t max, const
 }
 
 
-static int syncfile_add(int nfd, const v3da_fence_t *set, uint32_t n)
+/* The table entry of descriptor fd, or -1 (G.lock held). */
+static int sf_find_locked(int fd)
 {
-	uint32_t k;
+	uint32_t i;
 
-	(void)pthread_mutex_lock(&G.lock);
-	k = G.sf_next;
+	for (i = 0u; i < DRMPHX_MAX_SYNCFD; i++) {
+		if ((G.sf[i].used != 0) && (G.sf[i].fd == fd)) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+
+/* Make descriptor fd a sync file holding set[0..n) (G.lock held). An entry of the
+ * same number is replaced: that descriptor was closed and the number handed out
+ * again. A full table evicts the oldest entry (a later import of that descriptor
+ * fails visibly: SYNCOBJ_FD_TO_HANDLE answers EINVAL). */
+static void sf_put_locked(int fd, const v3da_fence_t *set, uint32_t n)
+{
+	uint32_t i, k, oldest = 0u;
+	int e = sf_find_locked(fd);
+
+	if (e >= 0) {
+		k = (uint32_t)e;
+	}
+	else {
+		for (i = 0u; i < DRMPHX_MAX_SYNCFD; i++) {
+			if (G.sf[i].used == 0) {
+				break;
+			}
+			if ((int32_t)(G.sf[i].seq - G.sf[oldest].seq) < 0) {
+				oldest = i;
+			}
+		}
+		k = (i < DRMPHX_MAX_SYNCFD) ? i : oldest;
+	}
 	G.sf[k].used = 1;
-	G.sf[k].fd = nfd;
+	G.sf[k].fd = fd;
+	G.sf[k].seq = ++G.sf_seq;
 	G.sf[k].nfence = n;
 	if (n != 0u) {
 		memcpy(G.sf[k].fence, set, n * sizeof(set[0]));
 	}
-	G.sf_next = (k + 1u) % DRMPHX_MAX_SYNCFD;
+}
+
+
+static int syncfile_add(int nfd, const v3da_fence_t *set, uint32_t n)
+{
+	(void)pthread_mutex_lock(&G.lock);
+	sf_put_locked(nfd, set, n);
 	(void)pthread_mutex_unlock(&G.lock);
 	return nfd;
 }
@@ -1248,27 +1287,63 @@ int drmphx_syncfile_new(int dev_fd, const v3da_fence_t *f)
 }
 
 
-/* The fence set of an emulated sync file (newest table entry for a recycled fd). */
+/* The fence set of an emulated sync file. */
 static int syncfile_set(int fd, v3da_fence_t *set, uint32_t *n)
 {
-	uint32_t i, k;
-	int rc = -EINVAL;
+	int e, rc = -EINVAL;
 
 	if (fd < 0) {
 		return -EINVAL;
 	}
 	(void)pthread_mutex_lock(&G.lock);
-	for (i = 0u; i < DRMPHX_MAX_SYNCFD; i++) {   /* newest first: a recycled fd number resolves to its latest export */
-		k = (G.sf_next + DRMPHX_MAX_SYNCFD - 1u - i) % DRMPHX_MAX_SYNCFD;
-		if ((G.sf[k].used != 0) && (G.sf[k].fd == fd)) {
-			*n = G.sf[k].nfence;
-			memcpy(set, G.sf[k].fence, G.sf[k].nfence * sizeof(set[0]));
-			rc = 0;
-			break;
-		}
+	e = sf_find_locked(fd);
+	if (e >= 0) {
+		*n = G.sf[e].nfence;
+		memcpy(set, G.sf[e].fence, G.sf[e].nfence * sizeof(set[0]));
+		rc = 0;
 	}
 	(void)pthread_mutex_unlock(&G.lock);
 	return rc;
+}
+
+
+int drmphx_syncfile_dup(int oldfd, int newfd)
+{
+	v3da_fence_t set[DRMPHX_SYNCFILE_FENCES];
+	uint32_t n = 0u;
+	int e, rc = -1;
+
+	if ((oldfd < 0) || (newfd < 0) || (oldfd == newfd)) {
+		return -1;
+	}
+	(void)pthread_mutex_lock(&G.lock);
+	e = sf_find_locked(newfd);
+	if (e >= 0) {
+		G.sf[e].used = 0;   /* the number was free for the kernel to hand out: that sync file is gone */
+	}
+	e = sf_find_locked(oldfd);
+	if (e >= 0) {
+		n = G.sf[e].nfence;
+		memcpy(set, G.sf[e].fence, n * sizeof(set[0]));
+		sf_put_locked(newfd, set, n);
+		rc = (int)n;
+	}
+	(void)pthread_mutex_unlock(&G.lock);
+	return rc;
+}
+
+
+void drmphx_note_dup(int oldfd, int newfd, const char *via)
+{
+	int n = drmphx_syncfile_dup(oldfd, newfd);
+
+	if ((n >= 0) && (drmphx_trace_enabled() != 0)) {
+		char line[96];
+		int len = snprintf(line, sizeof(line), "DRMPHX sync  dup fd=%d nfd=%d via=%s fences=%d\n", oldfd, newfd, via, n);
+		if (len > 0) {
+			(void)write(2, line, ((size_t)len < sizeof(line)) ? (size_t)len : sizeof(line) - 1u);
+		}
+	}
 }
 
 

@@ -65,14 +65,15 @@ p_build() {
 	# would silently resolve to NULL. --gc-sections then drops what the tables do not reach.
 	# -Wl,--wrap=mmap: v3dv maps BOs with mmap(render_fd, MMAP_BO token); -Wl,--wrap=ioctl: v3dv
 	# merges its per-queue fences with libsync's raw ioctl(SYNC_IOC_MERGE) on every signalling
-	# vkQueueSubmit, which libdrm-phoenix's __wrap_ioctl answers in-process (M5 section 9).
+	# vkQueueSubmit, which libdrm-phoenix's __wrap_ioctl answers in-process (M5 section 9);
+	# -Wl,--wrap=fcntl/dup/dup2: a sync file the driver duplicates stays one.
 	local out="${PREFIX_PORT_BUILD}/out" whole="" L=() l
 	while IFS= read -r l; do
 		case "${l}" in "--whole-archive "*) whole="${l#--whole-archive }" ;; *) L+=("${l}") ;; esac
 	done < "${V}/link.txt"
 	[ "${whole}" -ef "${ICD}" ] || b_die "${V}/link.txt does not start with the ICD"
 	mkdir -p "${out}"
-	"${NL_PHXCXX}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=mmap -Wl,--wrap=ioctl \
+	"${NL_PHXCXX}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 \
 		-Wl,-Map,"${out}/vkcube-drm.map" -o "${out}/vkcube-drm" "${obj}/cube.o" "${obj}/phxvk_loader.o" \
 		-Wl,--whole-archive "${ICD}" -Wl,--no-whole-archive \
 		-Wl,--start-group "${L[@]}" -Wl,--end-group -lm

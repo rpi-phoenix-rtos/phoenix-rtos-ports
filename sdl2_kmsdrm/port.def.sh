@@ -78,7 +78,7 @@
 #   "sdl <libSDL2.a>", "mesa-gl <a>" (the desktop-GL archives, libglapi_bridge.a first),
 #   "mesa-es <a>" (the GLES archives, with libGLESv2.a), "tail <a>" (libwayland-client/-egl/
 #   -cursor, libxkbcommon, wlphx-compat, libffi, libdrm, the Mesa compat shim, zlib) and
-#   "flag <ld flag>" (--wrap=mmap/ioctl for libdrm-phoenix, --wrap=close/write + -u for the
+#   "flag <ld flag>" (--wrap=mmap/ioctl/fcntl/dup/dup2 for libdrm-phoenix, --wrap=close/write + -u for the
 #   compat layer's emulated descriptors).
 # libwayland-cursor's os_create_anonymous_file() clashes with Mesa's (util/anon_file.c, another
 # signature; hidden from each other as shared libraries): the group links a private copy of
@@ -282,9 +282,10 @@ _sdl2_kmsdrm_link_inputs() {
 				"${WO}/lib/libwlphx-compat.a" "${WO}/deps/libffi/lib/libffi.a" "${tail_mesa[@]}"; do
 			echo "tail ${t}"
 		done
-		# libdrm-phoenix's --wrap=mmap (BO-token maps) and --wrap=ioctl (sync-file ioctls), the
+		# libdrm-phoenix's --wrap=mmap (BO-token maps), --wrap=ioctl (sync-file ioctls) and
+		# --wrap=fcntl/dup/dup2 (a duplicated sync file stays one: Mesa's EGL native fences), the
 		# compat layer's --wrap=close/write (epoll/eventfd emulation), pulled with -u
-		for t in -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=close -Wl,--wrap=write -Wl,-u,__wrap_close -Wl,-u,__wrap_write; do
+		for t in -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 -Wl,--wrap=close -Wl,--wrap=write -Wl,-u,__wrap_close -Wl,-u,__wrap_write; do
 			echo "flag ${t}"
 		done
 	} > "${li}"

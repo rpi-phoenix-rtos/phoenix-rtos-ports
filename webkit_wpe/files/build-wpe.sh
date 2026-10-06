@@ -591,7 +591,10 @@ stage_configure() {
 	# All of it goes at the END of every C++ link (CMAKE_CXX_STANDARD_LIBRARIES): CMake places a
 	# target's own libraries BEFORE the link interface of WebCore & co., so a group given as
 	# target libraries would be scanned before the archives that need it (libwebp -> sharpyuv).
-	extra="$(tr '\n' ' ' < "${V}/link-extra.txt")-Wl,-u,__wrap_close -Wl,-u,__wrap_write ${V}/lib/libwlphx-compat.a -Wl,--wrap=close -Wl,--wrap=write -Wl,--wrap=mmap -Wl,--wrap=ioctl"
+	# fcntl/dup/dup2: libdrm-phoenix's sync files are per-process table entries keyed by fd;
+	# Mesa duplicates every EGL native fence (F_DUPFD_CLOEXEC) before importing it, and the
+	# wrappers register the copy (without them: "Failed to import native fence" per V3D job).
+	extra="$(tr '\n' ' ' < "${V}/link-extra.txt")-Wl,-u,__wrap_close -Wl,-u,__wrap_write -Wl,-u,__wrap_fcntl -Wl,-u,__wrap_dup -Wl,-u,__wrap_dup2 ${V}/lib/libwlphx-compat.a -Wl,--wrap=close -Wl,--wrap=write -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2"
 	if [ -f "${wb}/build.ninja" ] && ! cmp -s "${tcf}" "${wb}.toolchain"; then
 		log "WebKit: toolchain changed, rebuilding from scratch"
 		rm -rf "${wb}"
