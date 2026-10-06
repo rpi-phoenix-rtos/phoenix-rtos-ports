@@ -41,6 +41,9 @@
 	#   patches/webkit/0020       the frame watch: where each process's frame pipeline stands, for
 	#                             the launcher's frame-stall reports (a page that stops drawing
 	#                             while every main loop runs)
+	#   patches/webkit/0021       WTF: ThreadCondition::timedWait waits on the monotonic clock
+	#                             (libphoenix condvars default to CLOCK_MONOTONIC: every WTF
+	#                             timed wait lasted until a signal)
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
 	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).
