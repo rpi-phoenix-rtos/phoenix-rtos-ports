@@ -44,8 +44,10 @@
 #   ${PREFIX_PORT_INSTALL}/share/phoenix-newlane/   the build helpers every new-lane port uses
 #   ${PREFIX_PORT_INSTALL}/bin/drmprobe          the probe (stripped; unstripped in prog/)
 #
-# Every program linking libdrm.a must be linked -Wl,--wrap=mmap -Wl,--wrap=ioctl: the
-# backend resolves BO-token mmap()s and emulates the sync_file ioctls in-process.
+# Every program linking libdrm.a must be linked -Wl,--wrap=mmap -Wl,--wrap=ioctl
+# -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2: the backend resolves BO-token mmap()s,
+# emulates the sync_file ioctls in-process, and keeps a duplicated sync file a sync file
+# (Mesa duplicates every EGL native fence with fcntl(F_DUPFD_CLOEXEC) before importing it).
 #
 # The backend (glue/phoenix/) and the two server wire headers it speaks (v3da_proto.h of
 # rpi4-v3d-async, kms_proto.h of rpi4-kms) are vendored copies of the coordination repo's
@@ -56,7 +58,8 @@
 p_prepare() {
 	# 0001 drm.h/drm_mode.h: Phoenix ioctl layout; 0002 xf86drm.c: backend hooks;
 	# 0003 meson: build phoenix/ when host_machine.system() == 'phoenix';
-	# 0004 meson: the ioctl interposer (__wrap_ioctl, sync_file emulation).
+	# 0004 meson: the ioctl interposer (__wrap_ioctl, sync_file emulation);
+	# 0005 meson: the fcntl/dup interposers (__wrap_fcntl/dup/dup2: duplicated sync files).
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 	mkdir -p "${PREFIX_PORT_WORKDIR}/phoenix"
 	cp -a "${PREFIX_PORT}/glue/phoenix/." "${PREFIX_PORT_WORKDIR}/phoenix/"
@@ -89,7 +92,7 @@ p_build() {
 	install -m 644 "${PREFIX_PORT}/glue/newlane.subr" "${PREFIX_PORT_INSTALL}/share/phoenix-newlane/"
 
 	local a="${PREFIX_PORT_INSTALL}/lib/libdrm.a" s
-	for s in drmIoctl drm_phoenix_ioctl drmPhoenixMmap __wrap_mmap __wrap_ioctl; do
+	for s in drmIoctl drm_phoenix_ioctl drmPhoenixMmap __wrap_mmap __wrap_ioctl __wrap_fcntl __wrap_dup __wrap_dup2; do
 		nl_has_sym "${a}" "${s}" || b_die "libdrm.a has no ${s} (backend not built in?)"
 	done
 
@@ -101,7 +104,7 @@ p_build() {
 	"${NL_CC}" "${cf[@]}" -c "${PREFIX_PORT}/glue/drmprobe/drmprobe.c" -o "${o}/drmprobe.o"
 	"${NL_CC}" "${cf[@]}" -c "${PREFIX_PORT}/glue/drmprobe/v3da_clgen.c" -o "${o}/v3da_clgen.o"
 	"${NL_CC}" --sysroot="${NL_SYSROOT}/" -B"${NL_SYSROOT}/lib/" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 \
-		-Wl,--wrap=mmap -Wl,--wrap=ioctl -o "${p}/prog/drmprobe" "${o}/drmprobe.o" "${o}/v3da_clgen.o" "${a}"
+		-Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 -o "${p}/prog/drmprobe" "${o}/drmprobe.o" "${o}/v3da_clgen.o" "${a}"
 	"${NL_STRIP}" -o "${p}/bin/drmprobe" "${p}/prog/drmprobe"
 	nl_no_undefined "${p}/prog/drmprobe"
 

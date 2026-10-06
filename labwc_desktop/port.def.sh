@@ -468,7 +468,7 @@ libdir=\${prefix}/lib
 Name: libdrm
 Description: libdrm-phoenix snapshot (upstream libdrm + Phoenix backend)
 Version: 2.4.134
-Libs: -L\${libdir} -ldrm -Wl,--wrap=mmap -Wl,--wrap=ioctl
+Libs: -L\${libdir} -ldrm -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2
 Cflags: -I\${includedir} -I\${includedir}/libdrm
 EOF
 	{ echo "source: ${libdrm_src_prefix}"; sha256sum "${LD_PREFIX}/lib/libdrm.a"; echo "mesa: ${mesa_out}"; } >"${I}/libdrm-snapshot.txt"
@@ -599,7 +599,7 @@ PY
 
 	# --- link ---
 	# Hand links (as weston-drm): Gallium whole-archive (the first line of the Mesa link
-	# list), then one group of every other archive; --wrap=mmap/ioctl for libdrm-phoenix,
+	# list), then one group of every other archive; --wrap=mmap/ioctl/fcntl/dup/dup2 for libdrm-phoenix,
 	# --wrap=close/write for the compat event loop descriptors.
 	local OBJ="${out}/obj" gallium="" l
 	mkdir -p "${OBJ}"
@@ -619,7 +619,7 @@ PY
 	local LINK_BASE=("${TC}-g++" "${TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000
 		-Wl,--wrap=close -Wl,--wrap=write -Wl,--wrap=read -Wl,-u,__wrap_close -Wl,-u,__wrap_write -Wl,-u,__wrap_read)
 	# shellcheck disable=SC2054
-	local LINK_DRM=("${LINK_BASE[@]}" -Wl,--wrap=mmap -Wl,--wrap=ioctl)
+	local LINK_DRM=("${LINK_BASE[@]}" -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2)
 	local COMPAT_LIBS=("${P}/lib/liblwphx-compat.a" "${P}/lib/libwlphx-compat.a")
 	local WLR_LIBS=("${P}/lib/libwlroots-0.20.a" "${WLV}/lib/libwayland-server.a" "${WLV}/lib/libwayland-client.a"
 		"${WXK}/lib/libxkbcommon.a" "${P}/lib/libdisplay-info.a" "${P}/lib/libseat.a" "${P}/lib/libinput.a"

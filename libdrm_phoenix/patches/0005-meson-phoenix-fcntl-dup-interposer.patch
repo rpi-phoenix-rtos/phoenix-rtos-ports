@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Tue, 6 Oct 2026 22:00:00 +0200
+Subject: [PATCH 5/5] meson: phoenix backend -- the optional fcntl()/dup()
+ interposers
+
+phoenix/drm_phoenix_wrap_fcntl.c and phoenix/drm_phoenix_wrap_dup.c keep
+a duplicated in-process sync file a sync file for programs linked with
+-Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 (Mesa duplicates every
+EGL native fence with fcntl(F_DUPFD_CLOEXEC) before importing it). Their
+own archive members, like drm_phoenix_wrap_ioctl.c: a program linked
+without those flags never pulls them.
+---
+ meson.build | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -258,6 +258,7 @@ if host_machine.system() == 'phoenix'
+     'phoenix/drm_phoenix_v3d.c', 'phoenix/drm_phoenix_logic.c',
+     'phoenix/drm_phoenix_wrap.c',
+     'phoenix/drm_phoenix_wrap_ioctl.c',
++    'phoenix/drm_phoenix_wrap_fcntl.c', 'phoenix/drm_phoenix_wrap_dup.c',
+   )
+   inc_phoenix = [include_directories('phoenix')]
+ endif
+-- 
+2.43.0

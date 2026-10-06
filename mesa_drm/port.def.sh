@@ -67,7 +67,8 @@
 #   compat/libmesadrm-compat.a, compat/include (Mesa + apps), compat/app-include (apps only)
 #   src-include/         the Mesa source tree's include/ (GL/, GLES*/, EGL/, KHR/, vulkan/)
 #   zlib-prefix/, x11-prefix/ (x11)   the private dependency views Mesa was configured with
-# Every program links -Wl,--wrap=mmap -Wl,--wrap=ioctl (libdrm-phoenix, see libdrm_phoenix).
+# Every program links -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup
+# -Wl,--wrap=dup2 (libdrm-phoenix, see libdrm_phoenix).
 
 p_prepare() {
 	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"

@@ -165,13 +165,13 @@ EOF
 	local extra=("${OB}/vkqdrm_hooks.o" "${OB}/vkqdrm_vk_trampolines.o" "${OB}/vkqdrm_nogl.o" "${OB}/phxvk_loader.o")
 
 	# --- link: vkcube-drm's shape (C++ driver, -static, --gc-sections, 4 KiB pages, the ICD
-	# whole-archive, --wrap=mmap/ioctl) + SDL's loadso wrapped for the Vulkan "library" + the
+	# whole-archive, --wrap=mmap/ioctl/fcntl/dup/dup2) + SDL's loadso wrapped for the Vulkan "library" + the
 	# port's 32 MiB main stack (vkQuake runs Host_Frame on the main thread) ------------------------
 	local out="${PREFIX_PORT_BUILD}/out" elf
 	mkdir -p "${out}"
 	elf="${out}/vkquake-drm"
 	rm -f "${elf}"
-	"${NL_PHXCXX}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=mmap -Wl,--wrap=ioctl \
+	"${NL_PHXCXX}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 \
 		-Wl,--wrap=SDL_LoadObject -Wl,--wrap=SDL_LoadFunction -Wl,--wrap=SDL_UnloadObject \
 		-Wl,-z,stack-size=33554432 -Wl,-Map,"${elf}.map" -o "${elf}" "${objs[@]}" "${extra[@]}" \
 		-Wl,--whole-archive "${ICD}" -Wl,--no-whole-archive \

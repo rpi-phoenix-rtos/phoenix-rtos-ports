@@ -155,7 +155,10 @@ void drmphx_prime_fd_note(int fd, const kms_memref_t *m, int srv, uint32_t handl
 
 /* Sync-file emulation: an exported "sync file" is a dup() of the render node
  * descriptor plus a fence snapshot (process-local; cross-process sync files are
- * a server gap). */
+ * a server gap). The table is keyed by descriptor number, so a copy the program
+ * makes itself (Mesa: fcntl F_DUPFD_CLOEXEC on every EGL native fence) is a sync
+ * file only when the program is linked -Wl,--wrap=fcntl -Wl,--wrap=dup
+ * -Wl,--wrap=dup2 (drm_phoenix_wrap_fcntl.c, drm_phoenix_wrap_dup.c). */
 #define DRMPHX_SYNCFILE_FENCES 8u   /* distinct {slot, queue} timelines one merged sync file keeps */
 int drmphx_syncfile_new(int dev_fd, const v3da_fence_t *f);
 /* One fence for a consumer that holds one (syncobj import, kms IN_FENCE_FD): a
@@ -169,6 +172,14 @@ int drmphx_syncfile_get(int fd, v3da_fence_t *f);
 int drmphx_syncfile_is(int fd);
 int drmphx_syncfile_merge(int fd1, int fd2);
 int drmphx_syncfile_status(int fd, uint32_t *nfences);
+/* newfd was just made a duplicate of oldfd (dup, dup2, fcntl F_DUPFD*): when oldfd
+ * is an emulated sync file, newfd becomes the same sync file (it holds the same
+ * fences). Any entry left on newfd's number is dropped. Returns the fence count
+ * of the copied set, or -1 when oldfd is not a sync file. For __wrap_fcntl/dup. */
+int drmphx_syncfile_dup(int oldfd, int newfd);
+/* drmphx_syncfile_dup + a "DRMPHX sync  dup ..." trace line (DRMPHX_TRACE) when
+ * oldfd was a sync file; via names the call. errno is the caller's to keep. */
+void drmphx_note_dup(int oldfd, int newfd, const char *via);
 
 /* Map a memref (PHYS: MAP_PHYSMEM; OID: open(<ns>/<id>) + mmap). */
 void *drmphx_map_memref(uint16_t kind, uint16_t cache, uint32_t port, uint64_t size, uint64_t addr, size_t len,
