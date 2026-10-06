@@ -4,6 +4,7 @@
 # one psh command:
 #
 #     /bin/bash /usr/share/wpe-browser/b8.sh [arms]
+#     /bin/bash /usr/share/wpe-browser/b8.sh transport [arms]
 #
 # One XFCE session (/bin/xfce-session) whose autostart plays the arms in turn, each a fresh
 # wpe-browser window on b8.html?src=<clip> with --autoplay=allow, killed after the clip's length
@@ -17,6 +18,29 @@
 # (default h264,hevc,hevc-cpu,seek). Lines of ours start with "B8 ", the page's with "B8PAGE ",
 # the browser's with "WPEB ", the media player's with "WPEB-MEDIA ". The coordination repo's
 # docs/browser/B8-video.md lists what each must show.
+#
+# "transport": the frame path's A/B, every arm the H.264 clip in the same window, one knob set
+# each (raster, frame transport, frame pacing):
+#
+#   shm           --cpu-rendering                          (the default before dma-bufs)
+#   gpu           Skia's GPU raster, shared memory
+#   dmabuf        --cpu-rendering --dmabuf                 (/bin/browser's default)
+#   both          GPU raster, --dmabuf
+#   shm-ahead     --cpu-rendering --frame-ahead
+#   dmabuf-ahead  --cpu-rendering --dmabuf --frame-ahead
+#   both-ahead    GPU raster, --dmabuf --frame-ahead
+#
+# (default shm,gpu,dmabuf,both,shm-ahead,dmabuf-ahead). Each arm's output goes to
+# /tmp/b8-<arm>.log and is printed after the arm, then one grading line:
+#
+#   B8 arm=<a> raster=<cpu|gpu> transport=<shm|dmabuf> ahead=<0|1> painted_fps=<f> presented_fps=<f>
+#      shown_fps=<f> painted_pct=<n> window_s=<s> took=<raster>/<transport>/<swap chain>/<pacing>
+#
+# presented: pictures the player handed to the compositor; painted: those the web process's
+# compositor drew (WPEB-MEDIA stat, from 4 s after the start until the clip ends); shown: the
+# frames the UI process put on screen (--present-stats=5, the first and the last report left out).
+# took= is what the browser says it did (WPEB gpu ..., WPEB-WEBKIT swap-chain / frame-pacing):
+# an arm whose took= differs from its knobs measured something else.
 #
 # Copyright 2026 Phoenix Systems
 #
@@ -35,6 +59,8 @@ export PHX_TRACE_ABORT=1
 export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1
 export THUNAR_START=${THUNAR_START:-0}   # no file manager window over the browser
 export WPE_PHOENIX_MEDIA_STAT_MS=${WPE_PHOENIX_MEDIA_STAT_MS:-2000}
+PRESENT_SECS=5
+ARM_SECS=${B8_ARM_SECS:-55}   # transport arms: the 45 s clip after a ~5 s start, then the end
 
 pid=""
 pause() {  # pause <seconds>, interruptible by the session's SIGTERM
@@ -71,9 +97,128 @@ arm() {  # arm <name> <clip> <seconds> [page query suffix] [env...]
 	pause 5
 }
 
+# F=<the value of "name=" in a log line> (no fork: bash runs this per line)
+field() {  # field <line> <name>
+	local s=" ${1}"
+	F=-
+	case "${s}" in
+		*" $2="*) s=${s#* $2=}; F=${s%% *} ;;
+	esac
+}
+
+fps10() {  # fps10 <frames> <ms>: frames per second x10, rounded
+	[ "$2" -gt 0 ] && F=$((($1 * 10000 + $2 / 2) / $2)) || F=0
+}
+
+grade() {  # grade <arm> <raster> <transport> <ahead> <log>
+	local line clock mono pres paint m0=-1 p0 d0 m1 p1 d1 prev=-1 raster=- transport=- chain=- pacing=-
+	local reports=() i first=-1 lastnz=-1 shown=0
+	while IFS= read -r line; do
+		case "${line}" in
+			*"WPEB-MEDIA "*" stat clock="*)
+				field "${line}" clock; clock=${F%%.*}
+				field "${line}" mono; mono=${F}
+				field "${line}" presented; pres=${F}
+				field "${line}" painted; paint=${F}
+				case "${clock}${mono}${pres}${paint}" in *[!0-9]*) continue ;; esac
+				if [ "${m0}" -lt 0 ]; then
+					[ "${clock}" -ge 4 ] && m0=${mono} p0=${pres} d0=${paint} m1=${mono} p1=${pres} d1=${paint}
+				elif [ "${pres}" -gt "${prev}" ]; then
+					m1=${mono} p1=${pres} d1=${paint}
+				fi
+				prev=${pres}
+				;;
+			*"WPEB t="*" present frames="*)
+				field "${line}" frames
+				case "${F}" in *[!0-9]*) continue ;; esac
+				reports+=("${F}")
+				;;
+			*"WPEB t="*" gpu raster="*)
+				field "${line}" raster; raster=${F}
+				field "${line}" transport; transport=${F}
+				;;
+			*"WPEB-WEBKIT swap-chain "*)
+				field "${line}" type; chain=${F}
+				;;
+			*"WPEB-WEBKIT frame-pacing "*)
+				field "${line}" ahead; pacing=ahead${F}
+				;;
+		esac
+	done < "$5"
+	if [ "${m0}" -lt 0 ] || [ "${m1}" -le "${m0}" ]; then
+		echo "B8 arm=$1 raster=$2 transport=$3 ahead=$4 NO-STATS (no WPEB-MEDIA stat lines while playing) took=${raster}/${transport}/${chain}/${pacing}"
+		return
+	fi
+	local ms=$((m1 - m0)) painted presented shownf pct
+	fps10 $((d1 - d0)) "${ms}"; painted=$((F / 10)).$((F % 10))
+	fps10 $((p1 - p0)) "${ms}"; presented=$((F / 10)).$((F % 10))
+	# the reports between the first and the last with frames (start-up and end: partial), PRESENT_SECS each
+	for i in "${!reports[@]}"; do
+		[ "${reports[i]}" -gt 0 ] || continue
+		[ "${first}" -lt 0 ] && first=${i}
+		lastnz=${i}
+	done
+	for ((i = first + 1; i < lastnz; i++)); do
+		shown=$((shown + reports[i]))
+	done
+	[ $((lastnz - first)) -gt 1 ] && fps10 "${shown}" $(((lastnz - first - 1) * PRESENT_SECS * 1000)) || F=0
+	shownf=$((F / 10)).$((F % 10))
+	[ $((p1 - p0)) -gt 0 ] && pct=$(((d1 - d0) * 100 / (p1 - p0))) || pct=0
+	echo "B8 arm=$1 raster=$2 transport=$3 ahead=$4 painted_fps=${painted} presented_fps=${presented} shown_fps=${shownf}" \
+		"painted_pct=${pct} window_s=$((ms / 1000)).$((ms % 1000 / 100)) took=${raster}/${transport}/${chain}/${pacing}"
+}
+
+transport_arm() {  # transport_arm <name>
+	local name=$1 raster=cpu transport=shm ahead=0 log rc
+	local args=(--autoplay=allow --size=1000x620 --present-stats="${PRESENT_SECS}")
+	case "${name}" in
+		shm) ;;
+		gpu) raster=gpu ;;
+		dmabuf) transport=dmabuf ;;
+		both) raster=gpu transport=dmabuf ;;
+		shm-ahead) ahead=1 ;;
+		dmabuf-ahead) transport=dmabuf ahead=1 ;;
+		both-ahead) raster=gpu transport=dmabuf ahead=1 ;;
+		*) echo "B8 bad arm ${name}"; return ;;
+	esac
+	if [ ! -f "${H264}" ]; then
+		echo "B8 arm=${name} SKIP clip ${H264} missing"
+		return
+	fi
+	[ "${raster}" = cpu ] && args+=(--cpu-rendering)
+	[ "${transport}" = dmabuf ] && args+=(--dmabuf)
+	[ "${ahead}" = 1 ] && args+=(--frame-ahead)
+	log=/tmp/b8-${name}.log
+	echo "B8 arm=${name} start clip=${H264} secs=${ARM_SECS} args=${args[*]} t=${SECONDS}"
+	(
+		[ "${raster}" = gpu ] && unset WEBKIT_SKIA_ENABLE_CPU_RENDERING
+		unset WPE_PHOENIX_FRAME_AHEAD WPE_BROWSER_FRAME_AHEAD WPE_BROWSER_DMABUF
+		exec "${BROWSER}" "${args[@]}" "${PAGE}?src=file://${H264}" > "${log}" 2>&1
+	) &
+	pid=$!
+	pause "${ARM_SECS}"
+	kill -TERM "${pid}" 2>/dev/null
+	wait "${pid}"
+	rc=$?
+	pid=""
+	cat "${log}"
+	echo "B8 arm=${name} end rc=${rc} t=${SECONDS}"
+	grade "${name}" "${raster}" "${transport}" "${ahead}" "${log}"
+	pause 5
+}
+
 inner() {
 	trap stop_all TERM
 	echo "B8 start t=${SECONDS} arms=${B8_ARMS} display=${WAYLAND_DISPLAY:-unset}"
+	if [ "${B8_MODE}" = transport ]; then
+		local a IFS=,
+		for a in ${B8_ARMS}; do
+			unset IFS
+			transport_arm "${a}"
+		done
+		echo "B8 done t=${SECONDS}"
+		return
+	fi
 	local a IFS=,
 	for a in ${B8_ARMS}; do
 		unset IFS
@@ -94,9 +239,15 @@ if [ -n "${B8_INNER:-}" ]; then
 fi
 
 # --- at psh: the session with the check as its autostart ----------------------------------------
-export B8_INNER=1 B8_ARMS=${1:-h264,hevc,hevc-cpu,seek}
+if [ "${1:-}" = transport ]; then
+	# 6 arms of ARM_SECS + 5 s after the desktop's ~15 s: 375 s
+	export B8_INNER=1 B8_MODE=transport B8_ARMS=${2:-shm,gpu,dmabuf,both,shm-ahead,dmabuf-ahead}
+	export HOLD=${B8_HOLD:-420}
+else
+	export B8_INNER=1 B8_MODE=gate B8_ARMS=${1:-h264,hevc,hevc-cpu,seek}
+	export HOLD=${B8_HOLD:-400}
+fi
 export XFCE_AUTOSTART="/bin/bash=${SELF}"
-export HOLD=${B8_HOLD:-400}
-echo "B8 session hold=${HOLD}s arms=${B8_ARMS}"
+echo "B8 session hold=${HOLD}s mode=${B8_MODE} arms=${B8_ARMS}"
 /bin/bash /bin/xfce-session
 echo "B8 end rc=$?"

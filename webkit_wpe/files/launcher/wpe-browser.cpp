@@ -19,6 +19,9 @@
  *     --dmabuf              window mode: the web process hands its frames to the compositor as
  *                           dma-bufs instead of reading them back into shared memory (WebKit
  *                           patch 0016; WPE_BROWSER_DMABUF=1); needs linux-dmabuf from the compositor
+ *     --frame-ahead         the web process renders the next frame while the compositor shows
+ *                           this one, instead of after its frame callback (WebKit patch 0019;
+ *                           WPE_BROWSER_FRAME_AHEAD=1)
  *     --webgl               WebGL on (a build with the port's USE flag webgl; WPE_BROWSER_WEBGL=1)
  *     --present-stats=S     every S s, the frames the view presented and what they were made of
  *                           (WPE_BROWSER_PRESENT_SECS)
@@ -583,6 +586,7 @@ static gboolean optExitAfterLoad;
 static gboolean optIgnoreTLSErrors;
 static gboolean optCPURendering;
 static gboolean optDMABuf;
+static gboolean optFrameAhead;
 static gboolean optWebGL;
 static int optPresentSecs;
 static char* optWebExtensions;
@@ -615,6 +619,7 @@ static const GOptionEntry optionEntries[] = {
     { "ignore-tls-errors", 0, 0, G_OPTION_ARG_NONE, &optIgnoreTLSErrors, "Accept invalid TLS certificates", nullptr },
     { "cpu-rendering", 0, 0, G_OPTION_ARG_NONE, &optCPURendering, "Skia CPU raster in the WebProcess", nullptr },
     { "dmabuf", 0, 0, G_OPTION_ARG_NONE, &optDMABuf, "Frames to the compositor as dma-bufs, no readback (window mode)", nullptr },
+    { "frame-ahead", 0, 0, G_OPTION_ARG_NONE, &optFrameAhead, "Render the next frame while the compositor shows this one", nullptr },
     { "webgl", 0, 0, G_OPTION_ARG_NONE, &optWebGL, "Enable WebGL (a webgl build)", nullptr },
     { "present-stats", 0, 0, G_OPTION_ARG_INT, &optPresentSecs, "Log the frames the view presented every S s", "S" },
     { "web-extensions", 0, 0, G_OPTION_ARG_FILENAME, &optWebExtensions, "Web process extensions directory", "DIR" },
@@ -665,6 +670,8 @@ static void optionsFromEnvironment()
     };
     if (!optDMABuf)
         optDMABuf = number("WPE_BROWSER_DMABUF", 0) != 0;
+    if (!optFrameAhead)
+        optFrameAhead = number("WPE_BROWSER_FRAME_AHEAD", 0) != 0;
     if (!optWebGL)
         optWebGL = number("WPE_BROWSER_WEBGL", 0) != 0;
     if (optPresentSecs <= 0)
@@ -1916,8 +1923,15 @@ static int uiMain(int argc, char** argv)
     /* before the first web process starts: the UI process reads WPE_PHOENIX_DMABUF then */
     const char* transport = chooseFrameTransport(display);
     const char* cpuRaster = g_getenv("WEBKIT_SKIA_ENABLE_CPU_RENDERING"); /* WebKit's own test */
-    LOG("gpu raster=%s transport=%s webgl=%s", cpuRaster && strcmp(cpuRaster, "0") ? "cpu" : "gpu", transport,
-        !ENABLE_WEBGL ? (optWebGL ? "unbuilt" : "off") : optWebGL ? "on" : "off");
+    /* Frame pacing (WebKit patch 0019, read by the UI process's backing store of the view): by
+     * default the web process composites the next frame only once the compositor's frame callback
+     * for this one came back, so the whole path runs in series once per frame; ahead, the two
+     * sides overlap and the slower one sets the rate. */
+    if (optFrameAhead)
+        g_setenv("WPE_PHOENIX_FRAME_AHEAD", "1", TRUE);
+    const char* frameAhead = g_getenv("WPE_PHOENIX_FRAME_AHEAD"); /* also WebKit's own knob */
+    LOG("gpu raster=%s transport=%s webgl=%s frame-ahead=%d", cpuRaster && strcmp(cpuRaster, "0") ? "cpu" : "gpu", transport,
+        !ENABLE_WEBGL ? (optWebGL ? "unbuilt" : "off") : optWebGL ? "on" : "off", frameAhead && !strcmp(frameAhead, "1") ? 1 : 0);
 
     startupPhase("network-session");
     WebKitNetworkSession* session = createNetworkSession();
