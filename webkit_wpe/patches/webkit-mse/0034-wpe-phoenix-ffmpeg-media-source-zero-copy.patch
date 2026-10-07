@@ -3,7 +3,7 @@ Subject: WPE on Phoenix: zero-copy HEVC frames in the MSE engine too
 On top of 0032 and webkit-video/0033: FFmpegPlaybackEngine asks hevc_rpivid for its GPU
 buffers as frames (CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy) when it opens a video
 decoder, and MediaPlayerPrivateFFmpegMSE's stat line adds zc= and zc_painted= as 0033 does for
-the progressive/HLS player. WPE_PHOENIX_MEDIA_ZERO_COPY=0 turns it off.
+the progressive/HLS player. WPE_PHOENIX_MEDIA_ZERO_COPY=1 turns it on (opt-in).
 
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp
 index 2452c310..56644dc1 100644
@@ -14,7 +14,7 @@ index 2452c310..56644dc1 100644
      context->thread_count = envNumber("WPE_PHOENIX_MEDIA_THREADS", codec->id == AV_CODEC_ID_H264 ? 3 : 0);
      context->opaque = &m_hardwareState;
 -    if (avcodec_open2(context, codec, nullptr) < 0) {
-+    // hevc_rpivid: the block's GPU buffers as the frames (zero copy; WPE_PHOENIX_MEDIA_ZERO_COPY=0: off)
++    // hevc_rpivid: the block's GPU buffers as the frames (zero copy; WPE_PHOENIX_MEDIA_ZERO_COPY=1: on)
 +    AVDictionary* options = nullptr;
 +    bool zeroCopy = config.isVideo() && CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy(*context, &options);
 +    int opened = avcodec_open2(context, codec, &options);
