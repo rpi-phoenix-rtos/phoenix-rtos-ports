@@ -1,0 +1,50 @@
+Subject: GTK: USE_FFMPEG, the FFmpeg media player of webkit_wpe patch 0030 for PORT=GTK
+
+Patch 0030 adds the option and its pkg-config lookup to OptionsWPE.cmake and the FFmpeg.cmake
+include to WebCore's PlatformWPE.cmake; this is the same for OptionsGTK.cmake and
+PlatformGTK.cmake. The player, native HLS, MSE and the zero-copy path (0030-0034) are WebCore
+code and apply to the GTK tree unchanged. Applied only with USE video.
+
+diff --git a/Source/WebCore/PlatformGTK.cmake b/Source/WebCore/PlatformGTK.cmake
+index d6cb28bb..ab27bb71 100644
+--- a/Source/WebCore/PlatformGTK.cmake
++++ b/Source/WebCore/PlatformGTK.cmake
+@@ -14,6 +14,10 @@ include(platform/Skia.cmake)
+ include(platform/Soup.cmake)
+ include(platform/TextureMapper.cmake)
+ 
++if (USE_FFMPEG)
++    include(platform/FFmpeg.cmake)
++endif ()
++
+ list(APPEND WebCore_UNIFIED_SOURCE_LIST_FILES
+     "SourcesGTK.txt"
+ 
+diff --git a/Source/cmake/OptionsGTK.cmake b/Source/cmake/OptionsGTK.cmake
+index 19c7e689..29ff5f00 100644
+--- a/Source/cmake/OptionsGTK.cmake
++++ b/Source/cmake/OptionsGTK.cmake
+@@ -80,11 +80,14 @@ WEBKIT_OPTION_DEPEND(USE_GBM USE_LIBDRM)
+ 
+ # Private options specific to the GTK port. Changing these options is
+ # completely unsupported. They are intended for use only by WebKit developers.
++WEBKIT_OPTION_DEFINE(USE_FFMPEG "Whether to play media with FFmpeg's libraries instead of GStreamer" PRIVATE OFF)
+ WEBKIT_OPTION_DEFINE(USE_SPIEL "Whether to enable usage of LibSpiel for speech synthesis." PRIVATE OFF)
+ WEBKIT_OPTION_DEFINE(USE_SYSPROF_CAPTURE "Whether to use libsysprof-capture for tracing." PRIVATE ON)
+ WEBKIT_OPTION_DEFINE(USE_SYSTEM_UNIFDEF "Whether to use a system-provided unifdef" PRIVATE ON)
+ 
+ WEBKIT_OPTION_DEPEND(USE_SYSTEM_SYSPROF_CAPTURE USE_SYSPROF_CAPTURE)
++WEBKIT_OPTION_DEPEND(USE_FFMPEG ENABLE_VIDEO)
++WEBKIT_OPTION_CONFLICT(USE_FFMPEG USE_GSTREAMER)
+ 
+ SET_AND_EXPOSE_TO_BUILD(ENABLE_DEVELOPER_MODE ${DEVELOPER_MODE})
+ if (DEVELOPER_MODE)
+@@ -531,3 +534,8 @@ endmacro()
+ 
+ include(BubblewrapSandboxChecks)
+ include(GStreamerChecks)
++
++if (USE_FFMPEG)
++    find_package(PkgConfig REQUIRED)
++    pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libswresample libswscale libavutil)
++endif ()

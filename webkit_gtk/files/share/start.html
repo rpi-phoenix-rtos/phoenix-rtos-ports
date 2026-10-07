@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!-- The start page of webkit-browser (WebKitGTK on Phoenix-RTOS). No external resources: it
+     opens instantly, also without a network. SPDX-License-Identifier: BSD-3-Clause -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<title>Phoenix-RTOS WebKit Browser</title>
+<style>
+  body { margin: 0; font: 16px "DejaVu Sans", sans-serif; color: #241f31; background: #f6f5f4; }
+  main { max-width: 760px; margin: 48px auto; padding: 0 24px; }
+  h1 { font-size: 28px; font-weight: normal; margin: 0 0 24px; }
+  form { display: flex; gap: 8px; margin-bottom: 32px; }
+  input[type=search] { flex: 1; font: inherit; padding: 8px 12px; border: 1px solid #c0bfbc; border-radius: 6px; }
+  button { font: inherit; padding: 8px 16px; border: 1px solid #c0bfbc; border-radius: 6px; background: #fff; }
+  ul { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  li a { display: block; padding: 12px 16px; background: #fff; border: 1px solid #deddda; border-radius: 6px;
+         color: #1c71d8; text-decoration: none; }
+  li a:hover, li a:focus { border-color: #3584e4; }
+  .keys { margin-top: 32px; color: #5e5c64; font-size: 14px; line-height: 1.7; }
+  kbd { font: 13px "DejaVu Sans Mono", monospace; padding: 1px 5px; border: 1px solid #c0bfbc; border-radius: 3px; background: #fff; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Phoenix-RTOS WebKit Browser</h1>
+  <form action="https://html.duckduckgo.com/html/" method="get">
+    <input type="search" name="q" placeholder="Search with DuckDuckGo" aria-label="Search">
+    <button type="submit">Search</button>
+  </form>
+  <ul>
+    <li><a href="https://en.wikipedia.org/wiki/Phoenix-RTOS">Wikipedia: Phoenix-RTOS</a></li>
+    <li><a href="https://github.com/phoenix-rtos">GitHub: phoenix-rtos</a></li>
+    <li><a href="https://stackoverflow.com/questions/tagged/rtos">Stack Overflow: rtos</a></li>
+    <li><a href="https://www.bbc.com/news">BBC News</a></li>
+    <li><a href="https://lite.duckduckgo.com/lite/">DuckDuckGo Lite</a></li>
+    <li><a href="https://text.npr.org/">NPR (text)</a></li>
+  </ul>
+  <p class="keys">
+    <kbd>Ctrl</kbd>+<kbd>T</kbd> new tab &middot; <kbd>Ctrl</kbd>+<kbd>W</kbd> close tab &middot;
+    <kbd>Ctrl</kbd>+<kbd>L</kbd> address (an address, or words to search) &middot;
+    <kbd>Alt</kbd>+<kbd>&larr;</kbd> / <kbd>Alt</kbd>+<kbd>&rarr;</kbd> back / forward &middot;
+    <kbd>F5</kbd> reload &middot; <kbd>Esc</kbd> stop &middot; <kbd>Alt</kbd>+<kbd>Home</kbd> this page &middot;
+    <kbd>Ctrl</kbd>+<kbd>F</kbd> find &middot; <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> zoom &middot;
+    <kbd>F11</kbd> full screen &middot; <kbd>Ctrl</kbd>+<kbd>Q</kbd> quit.
+    Downloads go to <code>~/Downloads</code> and show in the bar at the top of the window.
+  </p>
+</main>
+</body>
+</html>

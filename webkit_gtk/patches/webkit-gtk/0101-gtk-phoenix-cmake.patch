@@ -1,0 +1,204 @@
+Subject: GTK: Phoenix build configuration: OpenSSL digests, static libwebkit2gtk, WTF sources, multi-call executable
+
+The PORT=GTK counterpart of the webkit_wpe patches 0006 and 0008, whose PlatformWPE.cmake /
+OptionsWPE.cmake hunks the GTK tarball does not have (build-gtk.sh applies the shared patches
+with those paths excluded). OptionsGTK.cmake requires libgcrypt and libtasn1: on Phoenix use
+OpenSSL, already linked for glib-networking (USE_OPENSSL, PAL's CryptoDigestOpenSSL.cpp,
+WebCore's platform/OpenSSL.cmake). libwebkit2gtk is STATIC and JavaScriptCore an OBJECT library
+(no shared libraries on Phoenix; GTK makes JSC a shared libjavascriptcoregtk). WTF uses
+phoenix/MemoryFootprintPhoenix.cpp (patch 0003) and MemoryPressureHandlerUnix.cpp (patch 0008)
+instead of the generic stubs. No translations (no message catalogs on Phoenix, and no
+gettext tools needed on the build host). WPE_PHOENIX_DEFAULT_EXECUTABLE (patch 0007's ProcessExecutablePath)
+is the GTK browser's install path, /usr/bin/webkit-browser.
+
+diff --git a/Source/WTF/wtf/PlatformGTK.cmake b/Source/WTF/wtf/PlatformGTK.cmake
+index 137aacb3..a2263dd0 100644
+--- a/Source/WTF/wtf/PlatformGTK.cmake
++++ b/Source/WTF/wtf/PlatformGTK.cmake
+@@ -68,6 +68,14 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
+         linux/MemoryFootprintLinux.cpp
+         linux/RealTimeThreads.cpp
+ 
++        unix/MemoryPressureHandlerUnix.cpp
++    )
++elseif (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    # Phoenix-RTOS: no /proc; the footprint comes from meminfo() (patch 0003), the pressure
++    # handler is the Unix one with an OS(PHOENIX) processMemoryUsage() (patch 0008)
++    list(APPEND WTF_SOURCES
++        phoenix/MemoryFootprintPhoenix.cpp
++
+         unix/MemoryPressureHandlerUnix.cpp
+     )
+ elseif (CMAKE_SYSTEM_NAME MATCHES "FreeBSD" OR CMAKE_SYSTEM_NAME MATCHES "QNX")
+diff --git a/Source/WebCore/PAL/pal/PlatformGTK.cmake b/Source/WebCore/PAL/pal/PlatformGTK.cmake
+index 230d45bf..d19ab2b8 100644
+--- a/Source/WebCore/PAL/pal/PlatformGTK.cmake
++++ b/Source/WebCore/PAL/pal/PlatformGTK.cmake
+@@ -1,18 +1,8 @@
+ list(APPEND PAL_PUBLIC_HEADERS
+-    crypto/gcrypt/Handle.h
+-    crypto/gcrypt/Initialization.h
+-    crypto/gcrypt/Utilities.h
+-
+-    crypto/tasn1/Utilities.h
+-
+     system/glib/SleepDisablerGLib.h
+ )
+ 
+ list(APPEND PAL_SOURCES
+-    crypto/gcrypt/CryptoDigestGCrypt.cpp
+-
+-    crypto/tasn1/Utilities.cpp
+-
+     system/ClockGeneric.cpp
+     system/Sound.cpp
+ 
+@@ -21,6 +11,24 @@ list(APPEND PAL_SOURCES
+     text/KillRing.cpp
+ )
+ 
++if (USE_OPENSSL)
++    list(APPEND PAL_SOURCES crypto/openssl/CryptoDigestOpenSSL.cpp)
++    list(APPEND PAL_LIBRARIES OpenSSL::Crypto)
++else ()
++    list(APPEND PAL_PUBLIC_HEADERS
++        crypto/gcrypt/Handle.h
++        crypto/gcrypt/Initialization.h
++        crypto/gcrypt/Utilities.h
++
++        crypto/tasn1/Utilities.h
++    )
++    list(APPEND PAL_SOURCES
++        crypto/gcrypt/CryptoDigestGCrypt.cpp
++
++        crypto/tasn1/Utilities.cpp
++    )
++endif ()
++
+ list(APPEND PAL_LIBRARIES
+     GLib::GLib
+ )
+diff --git a/Source/WebCore/PlatformGTK.cmake b/Source/WebCore/PlatformGTK.cmake
+index ac3075b6..d6cb28bb 100644
+--- a/Source/WebCore/PlatformGTK.cmake
++++ b/Source/WebCore/PlatformGTK.cmake
+@@ -1,5 +1,13 @@
+ include(platform/Adwaita.cmake)
+-include(platform/GCrypt.cmake)
++if (USE_OPENSSL)
++    # as GCrypt.cmake below: the key classes are referenced (SerializedScriptValue) even with
++    # ENABLE_WEB_CRYPTO=OFF
++    include(platform/OpenSSL.cmake)
++    list(APPEND WebCore_PRIVATE_LIBRARIES OpenSSL::Crypto)
++else ()
++    include(platform/GCrypt.cmake)
++    list(APPEND WebCore_PRIVATE_LIBRARIES Tasn1::Tasn1)
++endif ()
+ include(platform/GStreamer.cmake)
+ include(platform/ImageDecoders.cmake)
+ include(platform/Skia.cmake)
+@@ -62,10 +70,6 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
+     platform/text/enchant/TextCheckerEnchant.h
+ )
+ 
+-list(APPEND WebCore_PRIVATE_LIBRARIES
+-    Tasn1::Tasn1
+-)
+-
+ list(APPEND WebCore_LIBRARIES
+     ${UPOWERGLIB_LIBRARIES}
+     ${X11_X11_LIB}
+diff --git a/Source/WebKit/PlatformGTK.cmake b/Source/WebKit/PlatformGTK.cmake
+index 8bb1e4be..793b3805 100644
+--- a/Source/WebKit/PlatformGTK.cmake
++++ b/Source/WebKit/PlatformGTK.cmake
+@@ -37,6 +37,10 @@ add_definitions(-DLOCALEDIR="${CMAKE_INSTALL_FULL_LOCALEDIR}")
+ add_definitions(-DDATADIR="${CMAKE_INSTALL_FULL_DATADIR}")
+ add_definitions(-DLIBDIR="${LIB_INSTALL_DIR}")
+ add_definitions(-DPKGLIBDIR="${LIB_INSTALL_DIR}/webkit${WEBKITGTK_API_INFIX}gtk-${WEBKITGTK_API_VERSION}")
++if (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    set(WPE_PHOENIX_DEFAULT_EXECUTABLE "${CMAKE_INSTALL_FULL_BINDIR}/webkit-browser" CACHE STRING "The multi-call browser program, when WPE_PHOENIX_EXECUTABLE is unset")
++    add_definitions(-DWPE_PHOENIX_DEFAULT_EXECUTABLE="${WPE_PHOENIX_DEFAULT_EXECUTABLE}")
++endif ()
+ 
+ if (NOT DEVELOPER_MODE AND NOT CMAKE_SYSTEM_NAME MATCHES "Darwin")
+     WEBKIT_ADD_TARGET_PROPERTIES(WebKit LINK_FLAGS "-Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/webkitglib-symbols.map")
+diff --git a/Source/cmake/OptionsGTK.cmake b/Source/cmake/OptionsGTK.cmake
+index 8b33cd88..19c7e689 100644
+--- a/Source/cmake/OptionsGTK.cmake
++++ b/Source/cmake/OptionsGTK.cmake
+@@ -13,9 +13,15 @@ list(APPEND WEBKIT_UNSAFE_BUFFER_WARNING_FLAGS -Wno-unsafe-buffer-usage-in-forma
+ # Update Source/WTF/wtf/Platform.h to match required GLib versions.
+ find_package(GLib 2.70.0 REQUIRED COMPONENTS GioUnix Thread Module)
+ find_package(Cairo 1.16.0 REQUIRED)
+-find_package(LibGcrypt 1.7.0 REQUIRED)
++# Phoenix-RTOS: PAL's digests (and WebCrypto, when enabled) come from OpenSSL, which the
++# system already ships for glib-networking, instead of libgcrypt + libtasn1 (as OptionsWPE.cmake).
++if (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    find_package(OpenSSL 3.0 REQUIRED)
++else ()
++    find_package(LibGcrypt 1.7.0 REQUIRED)
++    find_package(Tasn1 REQUIRED)
++endif ()
+ find_package(Soup3 3.0.0 REQUIRED)
+-find_package(Tasn1 REQUIRED)
+ find_package(HarfBuzz 2.7.4 REQUIRED COMPONENTS ICU)
+ find_package(ICU 70.1 REQUIRED COMPONENTS data i18n uc)
+ find_package(JPEG REQUIRED)
+@@ -35,7 +41,11 @@ endif ()
+ include(GStreamerDefinitions)
+ include(FindGLibCompileResources)
+ 
+-SET_AND_EXPOSE_TO_BUILD(USE_GCRYPT TRUE)
++if (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    SET_AND_EXPOSE_TO_BUILD(USE_OPENSSL TRUE)
++else ()
++    SET_AND_EXPOSE_TO_BUILD(USE_GCRYPT TRUE)
++endif ()
+ SET_AND_EXPOSE_TO_BUILD(USE_LIBEPOXY TRUE)
+ SET_AND_EXPOSE_TO_BUILD(USE_THEME_ADWAITA TRUE)
+ SET_AND_EXPOSE_TO_BUILD(USE_XDGMIME TRUE)
+@@ -218,6 +228,11 @@ set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+ set(bmalloc_LIBRARY_TYPE OBJECT)
+ set(WTF_LIBRARY_TYPE OBJECT)
+ set(WebCore_LIBRARY_TYPE OBJECT)
++if (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    # Static userspace: libwebkit2gtk is an archive that one multi-call program links, and
++    # JavaScriptCore is one more framework of it (as OptionsWPE.cmake on Phoenix).
++    set(WebKit_LIBRARY_TYPE STATIC)
++endif ()
+ 
+ # These are shared variables, but we special case their definition so that we can use the
+ # CMAKE_INSTALL_* variables that are populated by the GNUInstallDirs macro.
+@@ -495,8 +510,13 @@ else ()
+     set(WebKitGTKWebProcessExtension_PKGCONFIG_FILE ${CMAKE_BINARY_DIR}/Source/WebKit/webkit2gtk-web-extension-${WEBKITGTK_API_VERSION}.pc)
+ endif ()
+ 
+-set(JavaScriptCore_LIBRARY_TYPE SHARED)
+-set(SHOULD_INSTALL_JS_SHELL ON)
++if (CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    set(JavaScriptCore_LIBRARY_TYPE OBJECT)
++    set(SHOULD_INSTALL_JS_SHELL OFF)
++else ()
++    set(JavaScriptCore_LIBRARY_TYPE SHARED)
++    set(SHOULD_INSTALL_JS_SHELL ON)
++endif ()
+ 
+ # Add a typelib file to the list of all typelib dependencies. This makes it easy to
+ # expose a 'gir' target with all gobject-introspection files.
+diff --git a/Source/PlatformGTK.cmake b/Source/PlatformGTK.cmake
+index f7ca106e..ec686c2e 100644
+--- a/Source/PlatformGTK.cmake
++++ b/Source/PlatformGTK.cmake
+@@ -1,6 +1,10 @@
+ include(WebKitDist)
+ 
+-add_subdirectory(${WEBCORE_DIR}/platform/gtk/po)
++# Phoenix-RTOS: no message catalogs (libintl is a stand-in, the UI is English), so no
++# translations to build (and no gettext tools needed on the build host)
++if (NOT CMAKE_SYSTEM_NAME MATCHES "Phoenix")
++    add_subdirectory(${WEBCORE_DIR}/platform/gtk/po)
++endif ()
+ 
+ add_custom_target(check
+     COMMAND ${TOOLS_DIR}/Scripts/run-gtk-tests
