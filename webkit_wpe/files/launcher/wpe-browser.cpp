@@ -41,6 +41,8 @@
  *                           (WPE_BROWSER_AUTOPLAY)
  *     --stock-features      keep WebKit 2.54's defaults for the CSS features this program turns
  *                           on (see enableCSSFeatures(); WPE_BROWSER_STOCK_FEATURES=1)
+ *   WPE_BROWSER_LIST_FEATURES=1 logs every WebKit feature once at start-up, one line each:
+ *   "features list <identifier> status=<status> default=0|1 enabled=0|1"
  *   The process model (WebKit patch 0015; also from the environment). WebKit's own defaults are a
  *   desktop's: on a 4 GB Pi ~15 cached web processes and a prewarmed spare one.
  *     --process-cache=N     keep the web processes of at most N recently left sites, for a quick
@@ -900,19 +902,40 @@ static void optionsFromEnvironment()
  * (coordination repo docs/browser/CSS3TEST-GAPS.md). Not the CSS Painting API, which WebKit still
  * keeps behind its experimental features. A feature this WebKit does not list is logged as
  * absent, so an upgrade that renames or drops one shows in the log rather than silently.
+ * The identifiers are the API's, not the preference keys: WebKitFeature.cpp drops the keys'
+ * "Enabled" suffix (CSSCornerShapeEnabled in UnifiedWebPreferences.yaml is "CSSCornerShape").
  */
+static void listFeatures(WebKitSettings* settings, WebKitFeatureList* features)
+{
+    static const char* const statuses[] = { "embedder", "unstable", "internal", "developer", "testable",
+        "preview", "stable", "mature" };
+    gsize count = webkit_feature_list_get_length(features);
+    for (gsize i = 0; i < count; i++) {
+        WebKitFeature* feature = webkit_feature_list_get(features, i);
+        unsigned status = webkit_feature_get_status(feature);
+        LOG("features list %s status=%s default=%d enabled=%d", webkit_feature_get_identifier(feature),
+            status < G_N_ELEMENTS(statuses) ? statuses[status] : "?", webkit_feature_get_default_value(feature) ? 1 : 0,
+            webkit_settings_get_feature_enabled(settings, feature) ? 1 : 0);
+    }
+    LOG("features listed=%zu", static_cast<size_t>(count));
+}
+
 static void enableCSSFeatures(WebKitSettings* settings)
 {
     static const char* const identifiers[] = {
-        "CSSCornerShapeEnabled",    /* corner-shape, corner-*-shape (Borders 4) */
-        "CSSObjectViewBoxEnabled",  /* object-view-box (Images 5) */
-        "CSSIdentFunctionEnabled",  /* ident() (Values 5) */
+        "CSSCornerShape",    /* corner-shape, corner-*-shape (Borders 4) */
+        "CSSObjectViewBox",  /* object-view-box (Images 5) */
+        "CSSIdentFunction",  /* ident() (Values 5) */
     };
+    WebKitFeatureList* features = webkit_settings_get_all_features();
+    const char* list = g_getenv("WPE_BROWSER_LIST_FEATURES");
     if (optStockFeatures) {
         LOG("features stock");
+        if (list && !strcmp(list, "1"))
+            listFeatures(settings, features);
+        webkit_feature_list_unref(features);
         return;
     }
-    WebKitFeatureList* features = webkit_settings_get_all_features();
     std::string enabled, absent;
     for (const char* identifier : identifiers) {
         WebKitFeature* feature = webkit_feature_list_find(features, identifier);
@@ -921,8 +944,10 @@ static void enableCSSFeatures(WebKitSettings* settings)
         if (feature)
             webkit_settings_set_feature_enabled(settings, feature, TRUE);
     }
-    webkit_feature_list_unref(features);
     LOG("features enabled=%s absent=%s", enabled.empty() ? "-" : enabled.c_str(), absent.empty() ? "-" : absent.c_str());
+    if (list && !strcmp(list, "1"))
+        listFeatures(settings, features);
+    webkit_feature_list_unref(features);
 }
 
 /*
