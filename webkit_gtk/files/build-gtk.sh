@@ -404,6 +404,12 @@ stage_deps() {
 	for n in wayland-client wayland-server wayland-cursor wayland-egl xkbcommon wlphx-compat; do
 		cp_into lib "${WL}/lib/lib${n}.a"
 	done
+	# GDK links libwayland-cursor, whose os-compatibility.c defines os_create_anonymous_file(), as
+	# Mesa's util/anon_file.c (in the whole-archive libgallium) does: rename libwayland-cursor's
+	# (both the definition and its callers live in that archive), as the sdl2_kmsdrm port does
+	"${TC}-objcopy" --redefine-sym os_create_anonymous_file=wlcursor_os_create_anonymous_file "${VN}/lib/libwayland-cursor.a"
+	! "${TC}-nm" "${VN}/lib/libwayland-cursor.a" 2>/dev/null | grep -q ' T os_create_anonymous_file$' \
+		|| { echo "build-gtk.sh: libwayland-cursor.a still defines os_create_anonymous_file" >&2; exit 1; }
 	for n in wayland-client wayland-server wayland-cursor wayland-egl wayland-egl-backend xkbcommon wlphx-compat; do
 		pc_into "${WL}/lib/pkgconfig/${n}.pc"
 	done
@@ -759,7 +765,7 @@ check_program() {
 	# the local compat, MiniBrowser's window and our main's persistent session
 	for s in _ZN6WebKit14WebProcessMainEiPPc _ZN6WebKit18NetworkProcessMainEiPPc g_io_openssl_load \
 			g_tls_backend_get_default memfd_create eglGetProcAddress dri2_initialize_surfaceless dri2_initialize_wayland \
-			epoxy_static_proc_address gdk_wayland_display_get_type gdk_wayland_display_get_egl_display gtk_application_new \
+			epoxy_static_proc_address gdk_wayland_display_get_type gdk_wayland_window_get_type gdk_window_create_gl_context gtk_application_new \
 			webkit_web_view_get_type browser_window_new browser_tab_new browser_downloads_bar_new phoenix_browser_entry_to_uri \
 			ubrk_open_78 hb_icu_script_to_script SHA256_Init soup_session_get_feature nextafterf mi_malloc \
 			webkit_cookie_manager_set_persistent_storage _ZN3WTF15memoryFootprintEv; do

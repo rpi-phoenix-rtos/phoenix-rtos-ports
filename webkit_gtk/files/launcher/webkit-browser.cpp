@@ -222,7 +222,7 @@ extern "C" char* phoenix_browser_entry_to_uri(const char* text)
     g_autofree char* trimmed = g_strchomp(g_strdup(text));
     if (!*trimmed)
         return g_strdup("about:blank");
-    g_autofree char* scheme = g_uri_peek_scheme(trimmed);
+    const char* scheme = g_uri_peek_scheme(trimmed); /* interned, not to be freed */
     if ((scheme && strstr(trimmed, "://")) || g_str_has_prefix(trimmed, "about:") || g_str_has_prefix(trimmed, "javascript:")
         || g_str_has_prefix(trimmed, "data:"))
         return g_strdup(trimmed);

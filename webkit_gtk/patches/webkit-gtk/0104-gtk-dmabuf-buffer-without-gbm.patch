@@ -1,0 +1,58 @@
+Subject: GTK without GBM: DMABufBuffer is compiled (the UI process imports dma-bufs as EGLImages)
+
+DMABufBuffer.cpp is compiled whole only with USE(GBM), but its header is USE(COORDINATED_GRAPHICS)
+and the GTK UI process's AcceleratedBackingStore::BufferEGLImage::create() calls
+DMABufBuffer::createEGLImage() whenever the web process sends dma-buf frames -- which it does
+without GBM too (EGL_MESA_image_dma_buf_export from a surfaceless display; on Phoenix the shared
+webkit_wpe patch 0016's path). So a GTK build with USE_GBM=OFF fails to link. Only
+DMABufBufferAttributes::fromGBMBufferObject() needs GBM; the rest needs EGL alone (and, without
+libdrm, the value of DRM_FORMAT_MOD_INVALID).
+
+diff --git a/Source/WebCore/platform/graphics/DMABufBuffer.cpp b/Source/WebCore/platform/graphics/DMABufBuffer.cpp
+index ba2bdf67..5f0ebbf6 100644
+--- a/Source/WebCore/platform/graphics/DMABufBuffer.cpp
++++ b/Source/WebCore/platform/graphics/DMABufBuffer.cpp
+@@ -26,12 +26,19 @@
+ #include "config.h"
+ #include "DMABufBuffer.h"
+ 
+-#if USE(GBM)
++#if USE(COORDINATED_GRAPHICS)
+ #include "CoordinatedPlatformLayerBuffer.h"
+-#include "GBMVersioning.h"
+ #include "GLDisplay.h"
+ #include <atomic>
++#if USE(GBM)
++#include "GBMVersioning.h"
++#endif
++#if USE(LIBDRM)
+ #include <drm_fourcc.h>
++#else
++// drm_fourcc.h: the one value this file needs without libdrm
++#define DRM_FORMAT_MOD_INVALID ((1ULL << 56) - 1)
++#endif
+ 
+ #if USE(LIBEPOXY)
+ #include <epoxy/egl.h>
+@@ -75,6 +82,7 @@ std::optional<DMABufBuffer::Attributes> DMABufBuffer::takeAttributes()
+     return DMABufBuffer::Attributes { WTF::move(m_attributes.size), std::exchange(m_attributes.fourcc, 0), WTF::move(m_attributes.fds), WTF::move(m_attributes.offsets), WTF::move(m_attributes.strides), std::exchange(m_attributes.modifier, 0) };
+ }
+ 
++#if USE(GBM)
+ std::optional<DMABufBufferAttributes> DMABufBufferAttributes::fromGBMBufferObject(struct gbm_bo* bo, EnableModifiers enableModifiers)
+ {
+     if (!bo)
+@@ -102,6 +110,7 @@ std::optional<DMABufBufferAttributes> DMABufBufferAttributes::fromGBMBufferObjec
+ 
+     return attributes;
+ }
++#endif // USE(GBM)
+ 
+ EGLImage DMABufBuffer::createEGLImage(GLDisplay& display) const
+ {
+@@ -179,4 +188,4 @@ std::optional<Vector<EGLint>> DMABufBuffer::buildEGLImageAttributes(const Attrib
+ 
+ } // namespace WebCore
+ 
+-#endif // USE(GBM)
++#endif // USE(COORDINATED_GRAPHICS)

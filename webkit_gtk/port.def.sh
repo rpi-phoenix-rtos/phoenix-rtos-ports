@@ -26,6 +26,10 @@
 	#                                 library, WTF's Phoenix sources, the multi-call executable path
 	#   patches/webkit-gtk/0102       MiniBrowser/gtk: build-time hooks for the start URL and the
 	#                                 location entry's text-to-URI rule
+	#   patches/webkit-gtk/0103       GTK 3 GLib API build fixes (a missing include, a libdrm-only
+	#                                 call in webkit://gpu); not Phoenix-specific
+	#   patches/webkit-gtk/0104       DMABufBuffer without GBM: the GTK UI process imports the web
+	#                                 process's dma-buf frames as EGLImages (USE_GBM=OFF)
 	#   patches/webkit-gtk-video/0130 USE video only: USE_FFMPEG for PORT=GTK (0030's CMake side)
 	#   files/build-gtk.sh            the build (build-wpe.sh's stages for PORT=GTK)
 	#   files/launcher/               the program: role dispatch, desktop defaults, downloads,
