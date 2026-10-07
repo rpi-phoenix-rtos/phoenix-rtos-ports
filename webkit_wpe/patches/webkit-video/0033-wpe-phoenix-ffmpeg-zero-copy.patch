@@ -37,7 +37,7 @@ WPE_PHOENIX_MEDIA_ZERO_COPY=0 turns it off (A/B). Without hevc_rpivid's zero-cop
 FFmpeg prefix (no libavcodec/rpivid_drm.h or rpivid_bo_drm.h) the code compiles to the old path.
 
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
-index 84a0ffb0..954358c5 100644
+index 84a0ffb0..90e4b4e5 100644
 --- a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
 +++ b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
 @@ -30,7 +30,9 @@
@@ -78,7 +78,7 @@ index 84a0ffb0..954358c5 100644
  namespace WebCore {
  
  bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
-@@ -57,15 +76,60 @@ bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
+@@ -57,15 +76,79 @@ bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
      case AV_PIX_FMT_YUVJ420P:
      case AV_PIX_FMT_NV12:
          return true;
@@ -95,6 +95,18 @@ index 84a0ffb0..954358c5 100644
 +{
 +    return frame.format == AV_PIX_FMT_DRM_PRIME;
 +}
++
++#if HAVE_RPIVID_ZERO_COPY
++// The one DRM_PRIME layout this buffer can show: hevc_rpivid's (rpivid_drm.h), one buffer
++// holding an NV12 layer of two planes
++static bool isRpividFrame(const AVFrame& frame)
++{
++    auto* descriptor = reinterpret_cast<const AVDRMFrameDescriptor*>(frame.data[0]);
++    static constexpr uint32_t nv12 = 'N' | ('V' << 8) | ('1' << 16) | ('2' << 24);
++    return descriptor && descriptor->nb_objects == 1 && descriptor->nb_layers == 1 && descriptor->layers[0].format == nv12
++        && descriptor->layers[0].nb_planes == 2;
++}
++#endif
 +
 +bool CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy(AVCodecContext& context, AVDictionary** options)
 +{
@@ -134,12 +146,19 @@ index 84a0ffb0..954358c5 100644
  {
      if (!supportsPixelFormat(frame.format) || frame.width < 2 || frame.height < 2)
          return nullptr;
-+    if (isZeroCopyFrame(frame) && !frame.data[0])
++#if HAVE_RPIVID_ZERO_COPY
++    if (isZeroCopyFrame(frame) && !isRpividFrame(frame)) {
++        static std::once_flag once;
++        std::call_once(once, [] {
++            fprintf(stderr, "WPEB-MEDIA zero-copy: a DRM_PRIME frame that is not hevc_rpivid's NV12: not shown\n");
++        });
 +        return nullptr;
++    }
++#endif
      AVFrame* reference = av_frame_clone(&frame);
      if (!reference)
          return nullptr;
-@@ -87,23 +151,225 @@ CoordinatedPlatformLayerBufferFFmpeg::~CoordinatedPlatformLayerBufferFFmpeg()
+@@ -87,23 +170,230 @@ CoordinatedPlatformLayerBufferFFmpeg::~CoordinatedPlatformLayerBufferFFmpeg()
      // ever drawn (on the player's thread) has none.
      if (m_textures[0])
          glDeleteTextures(m_textures.size(), m_textures.data());
@@ -156,8 +175,13 @@ index 84a0ffb0..954358c5 100644
 +#if HAVE_RPIVID_ZERO_COPY
 +    if (!m_readback) {
 +        m_readback = av_frame_alloc();
-+        if (m_readback && rpivid_drm_frame_to_planar(m_readback, m_frame) < 0)
++        if (m_readback && rpivid_drm_frame_to_planar(m_readback, m_frame) < 0) {
 +            av_frame_free(&m_readback);
++            static std::once_flag once;
++            std::call_once(once, [] {
++                fprintf(stderr, "WPEB-MEDIA zero-copy readback failed: a picture this build cannot show\n");
++            });
++        }
 +    }
 +    return m_readback;
 +#else
@@ -368,7 +392,7 @@ index 84a0ffb0..954358c5 100644
  // Limited-range ("TV") YCbCr to RGB, as CoordinatedPlatformLayerBufferYUV's matrices.
  static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
  {
-@@ -134,14 +400,22 @@ static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
+@@ -134,14 +424,22 @@ static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
  void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity)
  {
      auto start = MonotonicTime::now();
@@ -395,7 +419,7 @@ index 84a0ffb0..954358c5 100644
              int bytesPerPixel = interleaved ? 2 : 1;
              glBindTexture(GL_TEXTURE_2D, m_textures[i]);
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-@@ -149,8 +423,8 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
+@@ -149,8 +447,8 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
              glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -406,7 +430,7 @@ index 84a0ffb0..954358c5 100644
          }
          glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
          glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-@@ -159,10 +433,10 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
+@@ -159,10 +457,10 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
  
      auto flags = m_flags;
      if (planes == 2)
@@ -420,7 +444,7 @@ index 84a0ffb0..954358c5 100644
  }
  
  #if USE(SKIA)
-@@ -194,29 +468,33 @@ sk_sp<SkImage> CoordinatedPlatformLayerBufferFFmpeg::skiaImage()
+@@ -194,29 +492,33 @@ sk_sp<SkImage> CoordinatedPlatformLayerBufferFFmpeg::skiaImage()
      auto* grContext = PlatformDisplay::sharedDisplay().skiaGrContext();
      if (!grContext)
          return nullptr;
