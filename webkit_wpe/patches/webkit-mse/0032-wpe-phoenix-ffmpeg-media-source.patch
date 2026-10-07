@@ -1,0 +1,4277 @@
+Subject: WPE on Phoenix: Media Source Extensions over the FFmpeg media player's decoders
+
+MediaSource and SourceBuffer (hls.js, dash.js, Shaka, video.js-VHS) without GStreamer
+(coordination repo docs/browser/MSE-DESIGN.md, stage 1), on top of patches 0030/0031
+(platform/graphics/ffmpeg/, BSD-2-Clause), with ENABLE_MEDIA_SOURCE:
+
+  MediaPlayerPrivateFFmpegMSE   a second engine (FFmpegMSE), chosen only for MediaSource loads:
+                                readyState, duration, buffered and seekable are WebCore's
+                                MediaSource's; a seek waits for the target to be buffered
+                                (waitForTarget), then WebCore flushes and enqueues every track from
+                                the sync frame before it (MockMediaPlayerMediaSource's pattern); the
+                                clock runs from HaveFutureData on and holds below it ('waiting');
+                                the decoders open at the first play()
+  MediaSourcePrivateFFmpeg      creates the SourceBuffers; the first track of each kind feeds the
+                                engine's one video and one audio input
+  SourceBufferPrivateFFmpeg     appends parsed on the dispatcher (the main thread: the parser walks
+                                boxes, it decodes nothing), one MediaSampleFFmpeg per coded frame;
+                                WebCore's TrackBuffers do coded frame processing, eviction and the
+                                buffered ranges; enqueued frames go to the engine; buffer limit
+                                40 MB video / 8 MB audio, 8 / 2 MB before the first play
+  MediaSampleFFmpeg             a coded frame: an AVPacket (padded copy of the payload, shared by
+                                the sample's copies), MediaTimes in the track's timescale, its
+                                FFmpegCodecConfig; non-displaying frames go to the decoder with
+                                AV_PKT_FLAG_DISCARD (decoded for reference, never returned)
+  FFmpegFMP4Parser              plain C++ (host-tested against FFmpeg's mov demuxer): the ISO BMFF
+                                byte stream format, split anywhere across appends; moov (avc1/avc3,
+                                hvc1/hev1, mp4a, Opus, ac-3, ec-3, fLaC), moof/traf/tfhd/tfdt/trun,
+                                the edit list as the mov demuxer applies it; encrypted tracks and
+                                explicit base-data-offsets refused
+  FFmpegPlaybackEngine          the decode/present/sound threads for frames that arrive demuxed:
+                                0030's picture path (compositor upload, CPU conversion of other
+                                formats, late drop), its /dev/audio0 writer (the same lock file:
+                                one writer), a pausable clock held at start, seek and stall; a
+                                frame with a new configuration (quality or codec switch) drains and
+                                reopens the decoder; HEVC goes to hevc_rpivid. Written for MSE; the
+                                progressive/HLS player keeps its own threads for now.
+
+Type answers (MediaSource.isTypeSupported, addSourceBuffer, changeType; they steer adaptive
+players): video/mp4 and audio/mp4 only; HEVC Main/Main10 up to level 4.1
+(WPE_PHOENIX_MSE_HEVC_4K=1: any); H.264 up to level 3.1, 720p30 (WPE_PHOENIX_MSE_H264_1080=1: up
+to 4.2); AAC, MP3, Opus, AC-3, E-AC-3, FLAC; width/height/framerate parameters held to the same
+limits; no WebM, MPEG-TS, VP9, AV1 or encrypted media. MediaCapabilities media-source answers use
+the MSE engine's containers.
+
+Plumbing: MediaPlatformType::FFmpeg, MediaPlayerType::FFmpegMSE,
+MediaPlayerMediaEngineIdentifier::FFmpegMSE (+ its IPC serialization and the remote player's
+switch), MediaSample::Type::FFmpegSample and a const AVPacket* PlatformSample, the engine's
+registration under USE(FFMPEG) && ENABLE(MEDIA_SOURCE), the sources in platform/FFmpeg.cmake.
+
+Logs ("WPEB-MEDIA ... id=<n> ..."; MSE players count from 1001): canplaytype type= platform=media-source
+answer= engine=mse reason=, mse load/addsourcebuffer/init tracks= video= audio= generation=/track/
+append bytes= samples=/append-error/reset-parser/changetype/plays/track-ended/ready-state/seek/
+seek done pts=/end-of-stream/size/stall, decoder video|audio=<name> config=, decoder reopen,
+first-frame, first-sound, drained, end, and the stat line (decoded presented painted dropped fps
+av_ms hw ready stalls q_kb mse_sb mse_kb mse_samples played players).
+
+diff --git a/Source/WebCore/platform/FFmpeg.cmake b/Source/WebCore/platform/FFmpeg.cmake
+index 9c268b2c..610e4216 100644
+--- a/Source/WebCore/platform/FFmpeg.cmake
++++ b/Source/WebCore/platform/FFmpeg.cmake
+@@ -11,6 +11,19 @@ list(APPEND WebCore_SOURCES
+     platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp
+ )
+ 
++# Media Source Extensions (USE mse): the MSE engine, its MediaSource/SourceBuffer backends and
++# the fragmented MP4 parser
++if (ENABLE_MEDIA_SOURCE)
++    list(APPEND WebCore_SOURCES
++        platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp
++        platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp
++        platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp
++        platform/graphics/ffmpeg/MediaSampleFFmpeg.cpp
++        platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.cpp
++        platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.cpp
++    )
++endif ()
++
+ list(APPEND WebCore_LIBRARIES
+     PkgConfig::FFMPEG
+ )
+diff --git a/Source/WebCore/platform/MediaSample.h b/Source/WebCore/platform/MediaSample.h
+index b867e873..670150ec 100644
+--- a/Source/WebCore/platform/MediaSample.h
++++ b/Source/WebCore/platform/MediaSample.h
+@@ -40,6 +40,7 @@ typedef struct opaqueCMSampleBuffer *CMSampleBufferRef;
+ typedef struct CF_BRIDGED_TYPE(id) __CVBuffer *CVPixelBufferRef;
+ #endif
+ typedef struct _GstSample GstSample;
++struct AVPacket;
+ typedef const struct opaqueCMFormatDescription *CMFormatDescriptionRef;
+ 
+ namespace WebCore {
+@@ -56,6 +57,8 @@ public:
+         , RetainPtr<CMSampleBufferRef>
+ #elif USE(GSTREAMER)
+         , GstSample*
++#elif USE(FFMPEG)
++        , const AVPacket*
+ #endif
+     >;
+     PlatformSample(VariantType&& sample)
+@@ -68,6 +71,8 @@ public:
+     CMSampleBufferRef cmSampleBuffer() const { return std::get<RetainPtr<CMSampleBufferRef>>(m_sample).get(); }
+ #elif USE(GSTREAMER)
+     GstSample* gstSample() const { return std::get<GstSample*>(m_sample); }
++#elif USE(FFMPEG)
++    const AVPacket* avPacket() const { return std::get<const AVPacket*>(m_sample); }
+ #endif
+ 
+ private:
+@@ -129,6 +134,7 @@ public:
+         MockSampleBox,
+         CMSampleBuffer,
+         GStreamerSample,
++        FFmpegSample,
+     };
+     virtual Type type() const = 0;
+ 
+diff --git a/Source/WebCore/platform/graphics/MediaPlayer.cpp b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+index a007efd7..e499a7bb 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayer.cpp
++++ b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+@@ -115,6 +115,9 @@
+ 
+ #if USE(FFMPEG)
+ #include "MediaPlayerPrivateFFmpeg.h"
++#if ENABLE(MEDIA_SOURCE)
++#include "MediaPlayerPrivateFFmpegMSE.h"
++#endif
+ #endif
+ 
+ #if ENABLE(WIRELESS_PLAYBACK_MEDIA_PLAYER)
+@@ -362,6 +365,9 @@ static void buildMediaEnginesVector() WTF_REQUIRES_LOCK(mediaEngineVectorLock)
+ 
+ #if USE(FFMPEG)
+     MediaPlayerPrivateFFmpeg::registerMediaEngine(addMediaEngine);
++#if ENABLE(MEDIA_SOURCE)
++    MediaPlayerPrivateFFmpegMSE::registerMediaEngine(addMediaEngine);
++#endif
+ #endif
+ 
+ #if ENABLE(WIRELESS_PLAYBACK_MEDIA_PLAYER)
+diff --git a/Source/WebCore/platform/graphics/MediaPlayer.h b/Source/WebCore/platform/graphics/MediaPlayer.h
+index c1bff9ee..6c3571f8 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayer.h
++++ b/Source/WebCore/platform/graphics/MediaPlayer.h
+@@ -162,7 +162,8 @@ enum class MediaPlatformType {
+     Mock,
+     AVFObjC,
+     GStreamer,
+-    Remote
++    Remote,
++    FFmpeg
+ };
+ 
+ enum class MediaPlayerType {
+@@ -179,7 +180,8 @@ enum class MediaPlayerType {
+     HolePunch,
+     WirelessPlayback,
+     Remote,
+-    FFmpeg
++    FFmpeg,
++    FFmpegMSE
+ };
+ 
+ using TrackID = uint64_t;
+diff --git a/Source/WebCore/platform/graphics/MediaPlayerEnums.h b/Source/WebCore/platform/graphics/MediaPlayerEnums.h
+index 554fe496..6e43e654 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayerEnums.h
++++ b/Source/WebCore/platform/graphics/MediaPlayerEnums.h
+@@ -96,6 +96,7 @@ enum class MediaPlayerMediaEngineIdentifier : uint8_t {
+     CocoaWebM,
+     WirelessPlayback,
+     FFmpeg,
++    FFmpegMSE,
+ };
+ 
+ enum class MediaPlayerWirelessPlaybackTargetType : uint8_t {
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp
+new file mode 100644
+index 00000000..4aeb9493
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp
+@@ -0,0 +1,799 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#include "config.h"
++#include "FFmpegFMP4Parser.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
++
++namespace WebCore {
++
++// The largest top-level box held back for completion: a media segment's mdat is a few MB
++static constexpr uint64_t kMaxBoxSize = 256 * 1024 * 1024;
++// The most samples one media segment may describe (a 6 s segment holds a few hundred): a trun's
++// sample count is not otherwise bounded when its samples take their sizes from the defaults
++static constexpr size_t kMaxFragmentSamples = 1 << 20;
++
++// trun / tfhd flags (ISO/IEC 14496-12 §8.8.7, §8.8.8)
++static constexpr uint32_t kTfhdBaseDataOffset = 0x000001;
++static constexpr uint32_t kTfhdSampleDescriptionIndex = 0x000002;
++static constexpr uint32_t kTfhdDefaultDuration = 0x000008;
++static constexpr uint32_t kTfhdDefaultSize = 0x000010;
++static constexpr uint32_t kTfhdDefaultFlags = 0x000020;
++static constexpr uint32_t kTfhdDefaultBaseIsMoof = 0x020000;
++static constexpr uint32_t kTrunDataOffset = 0x000001;
++static constexpr uint32_t kTrunFirstSampleFlags = 0x000004;
++static constexpr uint32_t kTrunDuration = 0x000100;
++static constexpr uint32_t kTrunSize = 0x000200;
++static constexpr uint32_t kTrunFlags = 0x000400;
++static constexpr uint32_t kTrunCompositionOffset = 0x000800;
++// sample flags: sample_is_non_sync_sample, sample_depends_on == 1 (not an I picture); a sample
++// with either is not a random access point (as FFmpeg's mov demuxer reads them)
++static constexpr uint32_t kSampleNonSync = 0x00010000;
++static constexpr uint32_t kSampleDependsOnOthers = 0x01000000;
++
++namespace {
++
++// Big-endian reads over a box's bytes; a read past the end sets `failed` and returns zeros.
++class Reader {
++public:
++    Reader(const uint8_t* data, size_t size)
++        : m_data(data)
++        , m_size(size)
++    {
++    }
++
++    size_t position() const { return m_position; }
++    size_t remaining() const { return m_size - m_position; }
++    bool failed() const { return m_failed; }
++    const uint8_t* current() const { return m_data + m_position; }
++
++    bool skip(size_t count)
++    {
++        if (count > remaining()) {
++            m_failed = true;
++            m_position = m_size;
++            return false;
++        }
++        m_position += count;
++        return true;
++    }
++    uint64_t read(unsigned bytes)
++    {
++        if (bytes > remaining()) {
++            m_failed = true;
++            m_position = m_size;
++            return 0;
++        }
++        uint64_t value = 0;
++        for (unsigned i = 0; i < bytes; ++i)
++            value = value << 8 | m_data[m_position++];
++        return value;
++    }
++    uint8_t u8() { return static_cast<uint8_t>(read(1)); }
++    uint16_t u16() { return static_cast<uint16_t>(read(2)); }
++    uint32_t u32() { return static_cast<uint32_t>(read(4)); }
++    uint64_t u64() { return read(8); }
++
++private:
++    const uint8_t* m_data;
++    size_t m_size;
++    size_t m_position { 0 };
++    bool m_failed { false };
++};
++
++struct Box {
++    uint32_t type { 0 };
++    size_t headerSize { 0 };
++    uint64_t size { 0 };    // header included
++};
++
++constexpr uint32_t fourcc(const char (&name)[5])
++{
++    return static_cast<uint32_t>(static_cast<uint8_t>(name[0])) << 24 | static_cast<uint32_t>(static_cast<uint8_t>(name[1])) << 16
++        | static_cast<uint32_t>(static_cast<uint8_t>(name[2])) << 8 | static_cast<uint8_t>(name[3]);
++}
++
++std::string fourccString(uint32_t type)
++{
++    std::string name;
++    for (int shift = 24; shift >= 0; shift -= 8) {
++        char c = static_cast<char>(type >> shift);
++        name += c >= 0x20 && c < 0x7f ? c : '?';
++    }
++    return name;
++}
++
++// The header of the box at `data`: false when fewer bytes than the header are there; a size
++// of 0 (to the end of the file) is reported as such for the caller to refuse.
++bool readBoxHeader(const uint8_t* data, size_t available, Box& box)
++{
++    if (available < 8)
++        return false;
++    Reader reader(data, available);
++    box.size = reader.u32();
++    box.type = reader.u32();
++    box.headerSize = 8;
++    if (box.size == 1) {
++        if (available < 16)
++            return false;
++        box.size = reader.u64();
++        box.headerSize = 16;
++    }
++    return true;
++}
++
++// Calls `visit(type, payload, payloadSize)` for each child box of [data, data + size); false on
++// a malformed child.
++template<typename Visitor>
++bool forEachChild(const uint8_t* data, size_t size, Visitor&& visit)
++{
++    size_t position = 0;
++    while (position + 8 <= size) {
++        Box box;
++        if (!readBoxHeader(data + position, size - position, box) || box.size < box.headerSize || box.size > size - position)
++            return false;
++        if (!visit(box.type, data + position + box.headerSize, static_cast<size_t>(box.size - box.headerSize)))
++            return false;
++        position += box.size;
++    }
++    return true;
++}
++
++// An MPEG-4 descriptor header (ISO/IEC 14496-1 §8.3.3): tag and size, the size in 1-4 bytes of 7 bits
++bool readDescriptor(Reader& reader, uint8_t& tag, size_t& size)
++{
++    tag = reader.u8();
++    size = 0;
++    for (int i = 0; i < 4; ++i) {
++        uint8_t byte = reader.u8();
++        size = size << 7 | (byte & 0x7f);
++        if (!(byte & 0x80))
++            break;
++    }
++    return !reader.failed() && size <= reader.remaining();
++}
++
++// esds: ES_Descriptor > DecoderConfigDescriptor (object type) > DecoderSpecificInfo (the
++// AudioSpecificConfig for AAC)
++bool parseESDS(const uint8_t* data, size_t size, FFmpegFMP4Parser::Track& track)
++{
++    Reader reader(data, size);
++    reader.skip(4); // version, flags
++    uint8_t tag;
++    size_t length;
++    if (!readDescriptor(reader, tag, length) || tag != 3)
++        return false;
++    reader.skip(2); // ES_ID
++    uint8_t flags = reader.u8();
++    if (flags & 0x80)
++        reader.skip(2); // dependsOn_ES_ID
++    if (flags & 0x40)
++        reader.skip(reader.u8()); // URL
++    if (flags & 0x20)
++        reader.skip(2); // OCR_ES_Id
++    if (!readDescriptor(reader, tag, length) || tag != 4)
++        return false;
++    size_t end = reader.position() + length;
++    track.objectType = reader.u8();
++    reader.skip(12); // streamType, bufferSizeDB, maxBitrate, avgBitrate
++    if (reader.failed())
++        return false;
++    if (reader.position() < end && readDescriptor(reader, tag, length) && tag == 5)
++        track.extradata.assign(reader.current(), reader.current() + length);
++    return true;
++}
++
++// dOps (Opus in ISO BMFF, big-endian) -> the OpusHead identification header (RFC 7845 §5.1,
++// little-endian) FFmpeg's Opus decoder reads
++bool parseDOps(const uint8_t* data, size_t size, FFmpegFMP4Parser::Track& track)
++{
++    Reader reader(data, size);
++    if (reader.u8()) // Version
++        return false;
++    uint8_t channels = reader.u8();
++    uint16_t preSkip = reader.u16();
++    uint32_t inputRate = reader.u32();
++    uint16_t gain = reader.u16();
++    uint8_t family = reader.u8();
++    if (reader.failed())
++        return false;
++    std::vector<uint8_t> head = { 'O', 'p', 'u', 's', 'H', 'e', 'a', 'd', 1, channels,
++        static_cast<uint8_t>(preSkip), static_cast<uint8_t>(preSkip >> 8),
++        static_cast<uint8_t>(inputRate), static_cast<uint8_t>(inputRate >> 8), static_cast<uint8_t>(inputRate >> 16), static_cast<uint8_t>(inputRate >> 24),
++        static_cast<uint8_t>(gain), static_cast<uint8_t>(gain >> 8), family };
++    if (family) {
++        // StreamCount, CoupledCount, ChannelMapping[channels]
++        size_t tableSize = 2 + channels;
++        if (reader.remaining() < tableSize)
++            return false;
++        head.insert(head.end(), reader.current(), reader.current() + tableSize);
++    }
++    track.extradata = std::move(head);
++    track.channels = channels;
++    return true;
++}
++
++// dfLa: the FLAC metadata blocks; FFmpeg takes the STREAMINFO block (34 bytes) as extradata
++bool parseDfLa(const uint8_t* data, size_t size, FFmpegFMP4Parser::Track& track)
++{
++    Reader reader(data, size);
++    reader.skip(4); // version, flags
++    uint8_t blockType = reader.u8() & 0x7f;
++    uint32_t blockSize = static_cast<uint32_t>(reader.read(3));
++    if (reader.failed() || blockType || blockSize != 34 || reader.remaining() < 34)
++        return false;
++    track.extradata.assign(reader.current(), reader.current() + 34);
++    return true;
++}
++
++std::string hexByte(uint8_t value, bool upper)
++{
++    char text[3];
++    snprintf(text, sizeof(text), upper ? "%02X" : "%02x", value);
++    return text;
++}
++
++// RFC 6381 names: avc1.PPCCLL; hvc1.<space><profile>.<compatibility>.<tier><level>[.<constraints>]
++// (ISO/IEC 14496-15 Annex E); mp4a.40.<audio object type> / mp4a.<object type>
++std::string avcCodecString(const std::string& entry, const std::vector<uint8_t>& avcC)
++{
++    if (avcC.size() < 4)
++        return entry;
++    return entry + "." + hexByte(avcC[1], false) + hexByte(avcC[2], false) + hexByte(avcC[3], false);
++}
++
++std::string hevcCodecString(const std::string& entry, const std::vector<uint8_t>& hvcC)
++{
++    if (hvcC.size() < 13)
++        return entry;
++    unsigned space = hvcC[1] >> 6;
++    unsigned tier = (hvcC[1] >> 5) & 1;
++    unsigned profile = hvcC[1] & 0x1f;
++    uint32_t compatibility = static_cast<uint32_t>(hvcC[2]) << 24 | static_cast<uint32_t>(hvcC[3]) << 16 | static_cast<uint32_t>(hvcC[4]) << 8 | hvcC[5];
++    uint32_t reversed = 0;
++    for (int bit = 0; bit < 32; ++bit) {
++        if (compatibility & (1u << bit))
++            reversed |= 1u << (31 - bit);
++    }
++    char text[64];
++    snprintf(text, sizeof(text), ".%s%u.%X.%c%u", space ? std::string(1, static_cast<char>('A' + space - 1)).c_str() : "", profile, reversed, tier ? 'H' : 'L', hvcC[12]);
++    std::string codec = entry + text;
++    size_t constraints = 6;
++    while (constraints && !hvcC[5 + constraints])
++        --constraints;
++    for (size_t i = 0; i < constraints; ++i)
++        codec += "." + hexByte(hvcC[6 + i], true);
++    return codec;
++}
++
++std::string mp4aCodecString(const FFmpegFMP4Parser::Track& track)
++{
++    if (track.objectType == 0x40 && !track.extradata.empty()) {
++        unsigned objectType = track.extradata[0] >> 3;
++        if (objectType == 31 && track.extradata.size() > 1)
++            objectType = 32 + ((track.extradata[0] & 7) << 3 | track.extradata[1] >> 5);
++        return "mp4a.40." + std::to_string(objectType);
++    }
++    return "mp4a." + hexByte(track.objectType, false);
++}
++
++std::string languageString(uint16_t packed)
++{
++    // ISO 639-2/T, three letters of five bits each (+0x60)
++    std::string language;
++    for (int shift = 10; shift >= 0; shift -= 5)
++        language += static_cast<char>(((packed >> shift) & 0x1f) + 0x60);
++    return language == "und" || packed == 0 ? std::string() : language;
++}
++
++} // namespace
++
++bool FFmpegFMP4Parser::fail(std::string message)
++{
++    if (m_error.empty())
++        m_error = std::move(message);
++    return false;
++}
++
++int FFmpegFMP4Parser::trackIndex(uint32_t id) const
++{
++    for (size_t i = 0; i < m_init.tracks.size(); ++i) {
++        if (m_init.tracks[i].id == id)
++            return static_cast<int>(i);
++    }
++    return -1;
++}
++
++void FFmpegFMP4Parser::reset()
++{
++    m_pending.clear();
++    m_fragment.clear();
++    m_hasFragment = false;
++    m_error.clear();
++}
++
++bool FFmpegFMP4Parser::append(const uint8_t* data, size_t size, Client& client)
++{
++    if (!m_error.empty())
++        return false;
++    if (m_pending.empty()) {
++        // the common case, whole boxes: parsed where they are, only a tail is kept
++        int64_t used = parseBoxes(data, size, client);
++        if (used < 0)
++            return false;
++        m_pending.assign(data + used, data + size);
++        return true;
++    }
++    m_pending.insert(m_pending.end(), data, data + size);
++    int64_t used = parseBoxes(m_pending.data(), m_pending.size(), client);
++    if (used < 0)
++        return false;
++    m_pending.erase(m_pending.begin(), m_pending.begin() + used);
++    return true;
++}
++
++int64_t FFmpegFMP4Parser::parseBoxes(const uint8_t* data, size_t size, Client& client)
++{
++    size_t position = 0;
++    while (true) {
++        Box box;
++        if (!readBoxHeader(data + position, size - position, box))
++            break;
++        std::string name = fourccString(box.type);
++        if (!box.size)
++            return fail("box " + name + " extends to the end of the stream"), -1;
++        if (box.size < box.headerSize || box.size > kMaxBoxSize)
++            return fail("box " + name + " has an invalid size " + std::to_string(box.size)), -1;
++        if (box.size > size - position)
++            break; // incomplete: wait for the rest
++        const uint8_t* payload = data + position + box.headerSize;
++        size_t payloadSize = static_cast<size_t>(box.size - box.headerSize);
++        uint64_t boxOffset = m_offset;
++        switch (box.type) {
++        case fourcc("moov"):
++            if (m_hasFragment)
++                return fail("moov inside a media segment"), -1;
++            if (!parseMovie(payload, payloadSize))
++                return -1;
++            client.didParseInitSegment(m_init);
++            break;
++        case fourcc("moof"):
++            if (!m_hasInitSegment)
++                return fail("moof before the initialization segment"), -1;
++            if (m_hasFragment)
++                return fail("moof without an mdat"), -1;
++            if (!parseFragment(payload, payloadSize, boxOffset))
++                return -1;
++            break;
++        case fourcc("mdat"):
++            if (!m_hasFragment)
++                return fail("mdat without a moof"), -1;
++            if (!emitSamples(boxOffset + box.headerSize, boxOffset + box.size, payload, client))
++                return -1;
++            break;
++        default:
++            // ftyp, styp, sidx, ssix, prft, emsg, free, skip, uuid, meta, ...: nothing to play
++            break;
++        }
++        position += box.size;
++        m_offset += box.size;
++    }
++    return static_cast<int64_t>(position);
++}
++
++bool FFmpegFMP4Parser::parseMovie(const uint8_t* data, size_t size)
++{
++    InitSegment init;
++    std::vector<Track> tracks;
++    bool encrypted = false;
++    uint64_t mvhdDuration = 0, fragmentDuration = 0;
++    struct Defaults {
++        uint32_t trackID, duration, size, flags;
++    };
++    std::vector<Defaults> defaults;
++    bool ok = forEachChild(data, size, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++        Reader reader(payload, payloadSize);
++        switch (type) {
++        case fourcc("mvhd"): {
++            uint8_t version = reader.u8();
++            reader.skip(3 + (version ? 16 : 8));
++            init.movieTimescale = reader.u32();
++            mvhdDuration = version ? reader.u64() : reader.u32();
++            if (version == 0 && mvhdDuration == 0xffffffff)
++                mvhdDuration = 0;
++            return !reader.failed();
++        }
++        case fourcc("trak"): {
++            Track track;
++            bool keep = false;
++            if (!parseTrack(payload, payloadSize, track, keep))
++                return false;
++            if (track.sampleEntry == "encv" || track.sampleEntry == "enca")
++                encrypted = true;
++            if (keep)
++                tracks.push_back(std::move(track));
++            return true;
++        }
++        case fourcc("mvex"):
++            return forEachChild(payload, payloadSize, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++                Reader reader(payload, payloadSize);
++                if (type == fourcc("mehd")) {
++                    uint8_t version = reader.u8();
++                    reader.skip(3);
++                    fragmentDuration = version ? reader.u64() : reader.u32();
++                } else if (type == fourcc("trex")) {
++                    reader.skip(4);
++                    Defaults trex;
++                    trex.trackID = reader.u32();
++                    reader.skip(4); // default_sample_description_index
++                    trex.duration = reader.u32();
++                    trex.size = reader.u32();
++                    trex.flags = reader.u32();
++                    defaults.push_back(trex);
++                }
++                return !reader.failed();
++            });
++        default:
++            return true;
++        }
++    });
++    if (!ok)
++        return fail("malformed moov");
++    if (encrypted)
++        return fail("encrypted track (encv/enca): no encrypted media");
++    if (tracks.empty())
++        return fail("moov has no audio or video track");
++    for (auto& track : tracks) {
++        if (track.editMediaTime >= 0) {
++            // the delay in the track's timescale, rounded to the nearest unit (as av_rescale())
++            uint64_t delay = init.movieTimescale ? (track.editDelay * track.timescale + init.movieTimescale / 2) / init.movieTimescale : 0;
++            track.editOffset = static_cast<int64_t>(delay) - track.editMediaTime;
++        }
++        for (auto& trex : defaults) {
++            if (trex.trackID == track.id) {
++                track.defaultDuration = trex.duration;
++                track.defaultSize = trex.size;
++                track.defaultFlags = trex.flags;
++            }
++        }
++    }
++    init.duration = fragmentDuration ? fragmentDuration : mvhdDuration;
++    init.tracks = std::move(tracks);
++    init.generation = ++m_generation;
++    m_init = std::move(init);
++    m_hasInitSegment = true;
++    m_nextDecodeTime.assign(m_init.tracks.size(), 0);
++    return true;
++}
++
++// One trak: `keep` is false for a track that is neither audio nor video (subtitles, timed
++// metadata, hint tracks): its fragments are skipped.
++bool FFmpegFMP4Parser::parseTrack(const uint8_t* data, size_t size, Track& track, bool& keep)
++{
++    uint32_t handler = 0;
++    const uint8_t* sampleTable = nullptr;
++    size_t sampleTableSize = 0;
++    std::vector<std::pair<uint64_t, int64_t>> edits;
++    auto parseMedia = [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++        Reader reader(payload, payloadSize);
++        switch (type) {
++        case fourcc("mdhd"): {
++            uint8_t version = reader.u8();
++            reader.skip(3 + (version ? 16 : 8));
++            track.timescale = reader.u32();
++            reader.skip(version ? 8 : 4);
++            track.language = languageString(reader.u16());
++            return !reader.failed();
++        }
++        case fourcc("hdlr"):
++            reader.skip(8);
++            handler = reader.u32();
++            return !reader.failed();
++        case fourcc("minf"):
++            return forEachChild(payload, payloadSize, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++                if (type == fourcc("stbl")) {
++                    return forEachChild(payload, payloadSize, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++                        if (type == fourcc("stsd")) {
++                            sampleTable = payload;
++                            sampleTableSize = payloadSize;
++                        }
++                        return true;
++                    });
++                }
++                return true;
++            });
++        default:
++            return true;
++        }
++    };
++    bool ok = forEachChild(data, size, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++        Reader reader(payload, payloadSize);
++        switch (type) {
++        case fourcc("tkhd"): {
++            uint8_t version = reader.u8();
++            reader.skip(3 + (version ? 16 : 8));
++            track.id = reader.u32();
++            return !reader.failed();
++        }
++        case fourcc("edts"):
++            return forEachChild(payload, payloadSize, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++                if (type != fourcc("elst"))
++                    return true;
++                Reader reader(payload, payloadSize);
++                uint8_t version = reader.u8();
++                reader.skip(3);
++                uint32_t count = reader.u32();
++                for (uint32_t i = 0; i < count && !reader.failed(); ++i) {
++                    uint64_t duration = version ? reader.u64() : reader.u32();
++                    int64_t mediaTime = version ? static_cast<int64_t>(reader.u64()) : static_cast<int32_t>(reader.u32());
++                    reader.skip(4); // media_rate
++                    edits.emplace_back(duration, mediaTime);
++                }
++                return !reader.failed();
++            });
++        case fourcc("mdia"):
++            return forEachChild(payload, payloadSize, parseMedia);
++        default:
++            return true;
++        }
++    });
++    if (!ok)
++        return fail("malformed trak");
++    if (handler != fourcc("vide") && handler != fourcc("soun")) {
++        keep = false;
++        return true;
++    }
++    keep = true;
++    track.kind = handler == fourcc("vide") ? TrackKind::Video : TrackKind::Audio;
++    if (!track.id || !track.timescale)
++        return fail("trak without a track ID or a timescale");
++    // empty edits (media_time -1: a presentation delay) and then one edit that starts the
++    // presentation at media_time; parseMovie() turns it into an offset
++    size_t empty = 0;
++    while (empty < edits.size() && edits[empty].second == -1)
++        track.editDelay += edits[empty++].first;
++    if (empty + 1 == edits.size() && edits[empty].second >= 0)
++        track.editMediaTime = edits[empty].second;
++    else if (!edits.empty())
++        track.editListIgnored = true;
++    if (!sampleTable)
++        return fail("trak " + std::to_string(track.id) + " has no stsd");
++    Reader reader(sampleTable, sampleTableSize);
++    reader.skip(4);
++    if (!reader.u32())
++        return fail("stsd of track " + std::to_string(track.id) + " is empty");
++    // the first sample entry: fragments refer to description 1
++    Box entry;
++    if (!readBoxHeader(reader.current(), reader.remaining(), entry) || entry.size < entry.headerSize || entry.size > reader.remaining())
++        return fail("malformed stsd");
++    track.sampleEntry = fourccString(entry.type);
++    return parseSampleEntry(reader.current() + entry.headerSize, static_cast<size_t>(entry.size - entry.headerSize), track);
++}
++
++bool FFmpegFMP4Parser::parseSampleEntry(const uint8_t* data, size_t size, Track& track)
++{
++    const std::string& entry = track.sampleEntry;
++    if (entry == "encv" || entry == "enca")
++        return true; // refused by the caller
++    Reader reader(data, size);
++    size_t childrenAt;
++    if (track.kind == TrackKind::Video) {
++        // VisualSampleEntry: reserved, data_reference_index, pre_defined/reserved, width, height,
++        // resolutions, reserved, frame_count, compressorname, depth, pre_defined
++        reader.skip(24);
++        track.width = reader.u16();
++        track.height = reader.u16();
++        childrenAt = 78;
++    } else {
++        // AudioSampleEntry (and QuickTime sound description versions 1 and 2)
++        reader.skip(8);
++        uint16_t version = reader.u16();
++        reader.skip(6);
++        track.channels = reader.u16();
++        reader.skip(6);
++        track.sampleRate = reader.u32() >> 16;
++        childrenAt = 28 + (version == 1 ? 16 : version == 2 ? 36 : 0);
++    }
++    if (reader.failed() || childrenAt > size)
++        return fail("short " + entry + " sample entry");
++
++    bool configured = false;
++    bool ok = forEachChild(data + childrenAt, size - childrenAt, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++        if ((type == fourcc("avcC") && (entry == "avc1" || entry == "avc3")) || (type == fourcc("hvcC") && (entry == "hvc1" || entry == "hev1"))
++            || (type == fourcc("vpcC") && entry == "vp09")) {
++            track.extradata.assign(payload, payload + payloadSize);
++            configured = true;
++        } else if (type == fourcc("esds") && entry == "mp4a")
++            configured = parseESDS(payload, payloadSize, track);
++        else if (type == fourcc("dOps") && entry == "Opus")
++            configured = parseDOps(payload, payloadSize, track);
++        else if (type == fourcc("dfLa") && entry == "fLaC")
++            configured = parseDfLa(payload, payloadSize, track);
++        else if ((type == fourcc("dac3") && entry == "ac-3") || (type == fourcc("dec3") && entry == "ec-3"))
++            configured = true; // the decoder reads everything from the bitstream
++        return true;
++    });
++    if (!ok)
++        return fail("malformed " + entry + " sample entry");
++    if (entry == "avc1" || entry == "avc3")
++        track.codec = avcCodecString(entry, track.extradata);
++    else if (entry == "hvc1" || entry == "hev1")
++        track.codec = hevcCodecString(entry, track.extradata);
++    else if (entry == "mp4a")
++        track.codec = mp4aCodecString(track);
++    else if (entry == "Opus")
++        track.codec = "opus";
++    else if (entry == "ac-3" || entry == "ec-3")
++        track.codec = entry;
++    else if (entry == "fLaC")
++        track.codec = "flac";
++    else if (entry == "vp09")
++        track.codec = "vp09";
++    else if (entry == "mp4v")
++        track.codec = "mp4v";
++    else
++        return fail("unsupported sample entry " + entry);
++    if (!configured && entry != "mp4v")
++        return fail(entry + " sample entry without its decoder configuration");
++    return true;
++}
++
++bool FFmpegFMP4Parser::parseFragment(const uint8_t* data, size_t size, uint64_t moofOffset)
++{
++    m_fragment.clear();
++    // where the next track fragment's data starts when it names no base (§8.8.7.1)
++    uint64_t implicitBase = moofOffset;
++    bool ok = forEachChild(data, size, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++        if (type != fourcc("traf"))
++            return true;
++        int index = -1;
++        uint32_t tfhdFlags = 0, defaultDuration = 0, defaultSize = 0, defaultFlags = 0;
++        bool hasTfhd = false, hasBaseTime = false;
++        int64_t baseTime = 0;
++        uint64_t dataEnd = implicitBase;
++        bool first = true;
++        bool ok = forEachChild(payload, payloadSize, [&](uint32_t type, const uint8_t* payload, size_t payloadSize) {
++            Reader reader(payload, payloadSize);
++            if (type == fourcc("tfhd")) {
++                hasTfhd = true;
++                tfhdFlags = reader.u32() & 0xffffff;
++                uint32_t trackID = reader.u32();
++                if (tfhdFlags & kTfhdBaseDataOffset)
++                    return fail("tfhd with an explicit base-data-offset");
++                index = trackIndex(trackID);
++                if (tfhdFlags & kTfhdSampleDescriptionIndex)
++                    reader.skip(4);
++                if (index >= 0) {
++                    const Track& track = m_init.tracks[index];
++                    defaultDuration = tfhdFlags & kTfhdDefaultDuration ? reader.u32() : track.defaultDuration;
++                    defaultSize = tfhdFlags & kTfhdDefaultSize ? reader.u32() : track.defaultSize;
++                    defaultFlags = tfhdFlags & kTfhdDefaultFlags ? reader.u32() : track.defaultFlags;
++                }
++                return !reader.failed() || fail("malformed tfhd");
++            }
++            if (!hasTfhd)
++                return fail(fourccString(type) + " before tfhd");
++            if (index < 0)
++                return true; // a track that does not play
++            if (type == fourcc("tfdt")) {
++                uint8_t version = reader.u8();
++                reader.skip(3);
++                baseTime = static_cast<int64_t>(version ? reader.u64() : reader.u32());
++                hasBaseTime = true;
++                return !reader.failed() || fail("malformed tfdt");
++            }
++            if (type == fourcc("senc") || type == fourcc("saiz") || type == fourcc("saio"))
++                return fail("encrypted samples (" + fourccString(type) + "): no encrypted media");
++            if (type != fourcc("trun"))
++                return true;
++            const Track& track = m_init.tracks[index];
++            uint32_t flags = reader.u32() & 0xffffff;
++            uint32_t count = reader.u32();
++            uint64_t base = tfhdFlags & kTfhdDefaultBaseIsMoof ? moofOffset : implicitBase;
++            uint64_t offset = dataEnd;
++            if (flags & kTrunDataOffset)
++                offset = base + static_cast<int64_t>(static_cast<int32_t>(reader.u32()));
++            else if (first)
++                offset = base;
++            uint32_t firstFlags = flags & kTrunFirstSampleFlags ? reader.u32() : defaultFlags;
++            size_t perSample = 4 * (!!(flags & kTrunDuration) + !!(flags & kTrunSize) + !!(flags & kTrunFlags) + !!(flags & kTrunCompositionOffset));
++            if (reader.failed() || (perSample && count > reader.remaining() / perSample))
++                return fail("malformed trun");
++            // the samples must fit in the largest mdat taken (with default sizes nothing above
++            // bounds the count)
++            if (count > kMaxFragmentSamples - m_fragment.size() || (!(flags & kTrunSize) && static_cast<uint64_t>(count) * defaultSize > kMaxBoxSize))
++                return fail("trun with " + std::to_string(count) + " samples");
++            if (!hasBaseTime) {
++                // no tfdt: this fragment continues where the track's previous one ended
++                baseTime = m_nextDecodeTime[index];
++                hasBaseTime = true;
++            }
++            int64_t time = baseTime;
++            for (uint32_t i = 0; i < count; ++i) {
++                PendingSample pending;
++                Sample& sample = pending.sample;
++                sample.trackID = track.id;
++                sample.duration = flags & kTrunDuration ? reader.u32() : defaultDuration;
++                sample.size = flags & kTrunSize ? reader.u32() : defaultSize;
++                uint32_t sampleFlags = flags & kTrunFlags ? reader.u32() : (!i ? firstFlags : defaultFlags);
++                if (!i && (flags & kTrunFirstSampleFlags))
++                    sampleFlags = firstFlags;
++                // version 0 offsets are unsigned and version 1 signed; read as signed either way,
++                // as FFmpeg's mov demuxer does
++                int64_t compositionOffset = flags & kTrunCompositionOffset ? static_cast<int32_t>(reader.u32()) : 0;
++                sample.decodeTime = time;
++                sample.presentationTime = time + compositionOffset;
++                sample.isSync = track.kind == TrackKind::Audio || !(sampleFlags & (kSampleNonSync | kSampleDependsOnOthers));
++                if (m_applyEditLists) {
++                    sample.decodeTime += track.editOffset;
++                    sample.presentationTime += track.editOffset;
++                }
++                pending.track = static_cast<size_t>(index);
++                pending.offset = offset;
++                offset += sample.size;
++                time += sample.duration;
++                m_fragment.push_back(pending);
++            }
++            m_nextDecodeTime[index] = time;
++            baseTime = time;
++            dataEnd = offset;
++            first = false;
++            return true;
++        });
++        if (!ok)
++            return false;
++        if (!hasTfhd)
++            return fail("traf without tfhd");
++        implicitBase = dataEnd;
++        return true;
++    });
++    if (!ok)
++        return fail("malformed moof");
++    // file order, as a demuxer reads them (stable: a track's samples keep their order)
++    std::stable_sort(m_fragment.begin(), m_fragment.end(), [](const PendingSample& a, const PendingSample& b) {
++        return a.offset < b.offset;
++    });
++    m_hasFragment = true;
++    return true;
++}
++
++bool FFmpegFMP4Parser::emitSamples(uint64_t payloadOffset, uint64_t end, const uint8_t* payload, Client& client)
++{
++    for (auto& pending : m_fragment) {
++        if (pending.offset < payloadOffset || pending.offset > end || pending.sample.size > end - pending.offset)
++            return fail("sample data outside the mdat (track " + std::to_string(pending.sample.trackID) + ")");
++    }
++    for (auto& pending : m_fragment)
++        client.didParseSample(m_init.tracks[pending.track], pending.sample, payload + (pending.offset - payloadOffset));
++    m_fragment.clear();
++    m_hasFragment = false;
++    return true;
++}
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.h b/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.h
+new file mode 100644
+index 00000000..0d05be36
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.h
+@@ -0,0 +1,159 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#pragma once
++
++// Plain C++ on purpose: no WebCore or WTF types, no FFmpeg, so that the coordination repo's host
++// harness (tools/browser/media/hosttest) compiles this very file against FFmpeg's mov demuxer.
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace WebCore {
++
++// A parser for the ISO BMFF byte stream format of Media Source Extensions: fragmented MP4 as
++// SourceBuffer.appendBuffer() delivers it, an initialization segment (ftyp + moov) and then
++// media segments ([styp] [sidx] moof + mdat), split anywhere across appends.
++//
++// A top-level box is parsed when it is complete; the bytes of an incomplete one wait for the
++// next append. A media segment's samples are reported when its mdat is complete, in file order,
++// each with its payload. Timestamps are in the track's timescale: decode time from tfdt and the
++// sample durations, presentation time = decode time + composition offset, and the track's edit
++// list applied as FFmpeg's mov demuxer applies it (so a stream plays with the same timing through
++// MSE as through MediaPlayerPrivateFFmpeg): an edit list of empty edits (a presentation delay)
++// followed by one media edit moves every time by delay - media_time (the AAC priming, the B-frame
++// delay of a muxer that starts presentation at zero, an audio start offset). Other edit lists
++// are not applied. Encrypted tracks, an explicit base-data-offset and the other forms that the
++// byte stream format excludes are parse errors.
++class FFmpegFMP4Parser {
++public:
++    enum class TrackKind : uint8_t { Video, Audio };
++
++    struct Track {
++        uint32_t id { 0 };
++        TrackKind kind { TrackKind::Video };
++        uint32_t timescale { 0 };
++        // the sample entry's type ("avc1", "hvc1", "mp4a", "Opus", ...) and its RFC 6381 name
++        std::string sampleEntry;
++        std::string codec;
++        // mp4a: the esds object type (0x40 AAC, 0x69/0x6b MP3, ...)
++        uint8_t objectType { 0 };
++        // the decoder configuration as FFmpeg's mov demuxer hands it over: avcC / hvcC payload,
++        // AudioSpecificConfig, an OpusHead built from dOps, FLAC STREAMINFO
++        std::vector<uint8_t> extradata;
++        uint32_t width { 0 };
++        uint32_t height { 0 };
++        uint32_t sampleRate { 0 };
++        uint32_t channels { 0 };
++        std::string language;
++        // added to every decode and presentation time by the edit list (0: none);
++        // editListIgnored: an edit list of a shape that is not applied
++        int64_t editOffset { 0 };
++        bool editListIgnored { false };
++        // the edit list's empty edits (movie timescale) and media edit, until the movie timescale is known
++        uint64_t editDelay { 0 };
++        int64_t editMediaTime { -1 };
++        // mvex/trex
++        uint32_t defaultDuration { 0 };
++        uint32_t defaultSize { 0 };
++        uint32_t defaultFlags { 0 };
++    };
++
++    struct InitSegment {
++        uint32_t movieTimescale { 0 };
++        // movie time units; 0: not known (a live or open-ended presentation)
++        uint64_t duration { 0 };
++        std::vector<Track> tracks;
++        // 1 for the first initialization segment, then one more for each that follows
++        unsigned generation { 0 };
++    };
++
++    struct Sample {
++        uint32_t trackID { 0 };
++        int64_t decodeTime { 0 };
++        int64_t presentationTime { 0 };
++        uint32_t duration { 0 };
++        uint32_t size { 0 };
++        bool isSync { false };
++    };
++
++    class Client {
++    public:
++        virtual ~Client() = default;
++        virtual void didParseInitSegment(const InitSegment&) = 0;
++        // `data` holds `sample.size` bytes, valid during the call only
++        virtual void didParseSample(const Track&, const Sample&, const uint8_t* data) = 0;
++    };
++
++    // False: a parse error (error() says what); the parser rejects everything until reset().
++    bool append(const uint8_t*, size_t, Client&);
++    // SourceBuffer.abort() / the reset parser state algorithm: the bytes of an incomplete box and
++    // a media segment still waiting for its mdat are dropped; the initialization segment stays.
++    void reset();
++
++    const InitSegment* initSegment() const { return m_hasInitSegment ? &m_init : nullptr; }
++    const std::string& error() const { return m_error; }
++    size_t pendingBytes() const { return m_pending.size(); }
++    // The edit lists are applied (the default); the host harness also compares without them.
++    void setApplyEditLists(bool apply) { m_applyEditLists = apply; }
++
++private:
++    struct PendingSample {
++        Sample sample;
++        size_t track { 0 };      // index into m_init.tracks
++        uint64_t offset { 0 };   // in the byte stream
++    };
++
++    // parses the complete top-level boxes of [data, data + size), which starts at stream offset
++    // m_offset; returns the bytes consumed or -1 on an error
++    int64_t parseBoxes(const uint8_t*, size_t, Client&);
++    bool parseMovie(const uint8_t*, size_t);
++    bool parseTrack(const uint8_t*, size_t, Track&, bool& keep);
++    bool parseSampleEntry(const uint8_t*, size_t, Track&);
++    bool parseFragment(const uint8_t*, size_t, uint64_t moofOffset);
++    bool emitSamples(uint64_t payloadOffset, uint64_t end, const uint8_t* payload, Client&);
++    bool fail(std::string);
++    int trackIndex(uint32_t id) const;
++
++    InitSegment m_init;
++    bool m_hasInitSegment { false };
++    // per track of m_init: the decode time where the next fragment without a tfdt starts
++    std::vector<int64_t> m_nextDecodeTime;
++    // the samples of a moof whose mdat has not arrived yet
++    std::vector<PendingSample> m_fragment;
++    bool m_hasFragment { false };
++    // the bytes of an incomplete top-level box; m_offset is the stream offset of the next byte to
++    // parse (m_pending[0] when there are pending bytes)
++    std::vector<uint8_t> m_pending;
++    uint64_t m_offset { 0 };
++    unsigned m_generation { 0 };
++    bool m_applyEditLists { true };
++    std::string m_error;
++};
++
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp
+new file mode 100644
+index 00000000..2452c310
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp
+@@ -0,0 +1,963 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#include "config.h"
++#include "FFmpegPlaybackEngine.h"
++
++#if ENABLE(VIDEO) && USE(FFMPEG)
++
++#include "CoordinatedPlatformLayerBufferFFmpeg.h"
++#include "CoordinatedPlatformLayerBufferProxy.h"
++#include <cmath>
++#include <cstdarg>
++#include <errno.h>
++#include <fcntl.h>
++#include <mutex>
++#include <time.h>
++#include <unistd.h>
++#include <wtf/MainThread.h>
++
++extern "C" {
++#include <libavcodec/avcodec.h>
++#include <libavutil/channel_layout.h>
++#include <libavutil/error.h>
++#include <libavutil/log.h>
++#include <libavutil/pixdesc.h>
++#include <libswresample/swresample.h>
++#include <libswscale/swscale.h>
++}
++
++namespace WebCore {
++
++// the device, as MediaPlayerPrivateFFmpeg drives it: 44.1 kHz signed 16-bit stereo, a blocking
++// write() paces the writer (a free-running ~0.19 s DMA ring that replays what it holds when not fed)
++static constexpr int kAudioRate = 44100;
++static constexpr double kAudioFill = 0.12;   // seconds kept queued in the ring
++static constexpr double kAudioChunk = 0.01;  // silence is written in chunks of this
++static constexpr double kAudioLate = 0.05;   // a sound frame heard later than this is dropped
++static constexpr double kAudioEarly = 0.02;  // ... earlier than this waits behind silence
++static constexpr double kLateDrop = 0.10;    // a picture later than this is dropped
++// no picture this long after the last one's time while the clock runs: a stall (the clock holds)
++static constexpr double kStallAfter = 0.25;
++// the input queues: ready for more below kQueueFull seconds (and, video, kQueueMaxVideo frames);
++// a waiting producer is called back below kQueueLow
++static constexpr double kQueueFull = 2.0;
++static constexpr double kQueueLow = 1.0;
++static constexpr size_t kQueueMaxVideo = 120;
++static constexpr AVRational kTimeBase = { 1, 1000000 };
++static const char* const kAudioDevice = "/dev/audio0";
++// one writer of the device in the whole system: a process-owned record lock (dropped at exit),
++// the same file as MediaPlayerPrivateFFmpeg's
++static const char* const kAudioLockFile = "/tmp/.wpe-audio0.lock";
++
++static uint64_t monotonicMs()
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<uint64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
++}
++
++static int envNumber(const char* name, int fallback)
++{
++    const char* value = getenv(name);
++    if (!value || !*value)
++        return fallback;
++    return atoi(value);
++}
++
++// The player threads' stack: WPE_PHOENIX_MEDIA_STACK_KB as MediaPlayerPrivateFFmpeg's
++static size_t mediaThreadStack()
++{
++    static const size_t bytes = static_cast<size_t>(std::max(envNumber("WPE_PHOENIX_MEDIA_STACK_KB", 2048), 256)) * 1024;
++    return bytes;
++}
++
++// FFmpeg's messages, as MediaPlayerPrivateFFmpeg logs them (whichever player installs its
++// callback last, the lines and the rpivid verdict are the same): warnings, errors and the
++// rpivid decoder's lines, which also say whether the block or the CPU decodes. A decoder
++// context's opaque is its player's std::atomic<int> verdict.
++static void ffmpegLog(void* object, int level, const char* format, va_list args)
++{
++    if (level > AV_LOG_INFO)
++        return;
++    char line[512];
++    int printPrefix = 1;
++    va_list copy;
++    va_copy(copy, args);
++    av_log_format_line2(object, level, format, copy, line, sizeof(line), &printPrefix);
++    va_end(copy);
++    bool rpivid = strstr(line, "rpivid");
++    if (level > AV_LOG_WARNING && !rpivid)
++        return;
++    if (object && rpivid) {
++        auto* avClass = *static_cast<const AVClass* const*>(object);
++        if (avClass && !strcmp(avClass->class_name, "AVCodecContext")) {
++            if (auto* verdict = static_cast<std::atomic<int>*>(static_cast<AVCodecContext*>(object)->opaque)) {
++                if (strstr(line, "rpivid: hardware HEVC decode"))
++                    verdict->store(1);
++                else if (strstr(line, "rpivid: CPU decode") || strstr(line, "continuing on the CPU decoder"))
++                    verdict->store(0);
++            }
++        }
++    }
++    size_t length = strlen(line);
++    while (length && (line[length - 1] == '\n' || line[length - 1] == '\r'))
++        line[--length] = '\0';
++    fprintf(stderr, "WPEB-MEDIA mono=%llu ffmpeg %s\n", static_cast<unsigned long long>(monotonicMs()), line);
++}
++
++/* --- FFmpegCodecConfig ---------------------------------------------------------------------- */
++
++Ref<FFmpegCodecConfig> FFmpegCodecConfig::create(AVCodecParameters* parameters, String&& codec)
++{
++    return adoptRef(*new FFmpegCodecConfig(parameters, WTF::move(codec)));
++}
++
++FFmpegCodecConfig::FFmpegCodecConfig(AVCodecParameters* parameters, String&& codec)
++    : m_parameters(parameters)
++    , m_codec(WTF::move(codec))
++{
++}
++
++FFmpegCodecConfig::~FFmpegCodecConfig()
++{
++    avcodec_parameters_free(&m_parameters);
++}
++
++bool FFmpegCodecConfig::isVideo() const
++{
++    return m_parameters->codec_type == AVMEDIA_TYPE_VIDEO;
++}
++
++FloatSize FFmpegCodecConfig::size() const
++{
++    if (!isVideo())
++        return { };
++    AVRational sar = m_parameters->sample_aspect_ratio;
++    double aspect = sar.num > 0 && sar.den > 0 ? av_q2d(sar) : 1;
++    return FloatSize(m_parameters->width * aspect, m_parameters->height);
++}
++
++/* --- the engine ----------------------------------------------------------------------------- */
++
++Ref<FFmpegPlaybackEngine> FFmpegPlaybackEngine::create(unsigned playerID, EventHandler&& handler)
++{
++    return adoptRef(*new FFmpegPlaybackEngine(playerID, WTF::move(handler)));
++}
++
++FFmpegPlaybackEngine::FFmpegPlaybackEngine(unsigned playerID, EventHandler&& handler)
++    : m_playerID(playerID)
++    , m_eventHandler(WTF::move(handler))
++    , m_contentsBufferProxy(CoordinatedPlatformLayerBufferProxy::create())
++    , m_frameCounters(FFmpegFrameCounters::create())
++{
++    static std::once_flag once;
++    std::call_once(once, [] {
++        av_log_set_callback(ffmpegLog);
++    });
++}
++
++FFmpegPlaybackEngine::~FFmpegPlaybackEngine()
++{
++    stop();
++}
++
++void FFmpegPlaybackEngine::log(const char* format, ...) const
++{
++    char line[512];
++    va_list args;
++    va_start(args, format);
++    vsnprintf(line, sizeof(line), format, args);
++    va_end(args);
++    fprintf(stderr, "WPEB-MEDIA mono=%llu id=%u mse %s\n", static_cast<unsigned long long>(monotonicMs()), m_playerID, line);
++}
++
++PlatformLayer* FFmpegPlaybackEngine::platformLayer() const
++{
++    return m_contentsBufferProxy.get();
++}
++
++FloatSize FFmpegPlaybackEngine::naturalSize() const
++{
++    Locker locker { m_sizeLock };
++    return m_naturalSize;
++}
++
++// Events go to the owner on the main thread
++// (an event of a run that stop() ended is dropped)
++void FFmpegPlaybackEngine::post(Event event, double value)
++{
++    callOnMainThread([protectedThis = Ref { *this }, event, value, run = m_run.load()] {
++        if (protectedThis->m_eventHandler && run == protectedThis->m_run)
++            protectedThis->m_eventHandler(event, value);
++    });
++}
++
++/* --- input queues --------------------------------------------------------------------------- */
++
++void FFmpegPlaybackEngine::freePacket(Packet& packet)
++{
++    av_packet_free(&packet.packet);
++    packet.config = nullptr;
++}
++
++void FFmpegPlaybackEngine::enqueue(Track track, AVPacket* packet, Ref<FFmpegCodecConfig>&& config, double duration)
++{
++    auto& queue = this->queue(track);
++    Locker locker { queue.lock };
++    if (queue.aborted) {
++        av_packet_free(&packet);
++        return;
++    }
++    // more frames after the end (the MediaSource was reopened): the stream goes on
++    queue.end = false;
++    m_endPosted = false;
++    queue.used = true;
++    queue.bytes += packet->size;
++    queue.seconds += duration;
++    queue.packets.append({ packet, WTF::move(config), duration });
++    queue.condition.notifyAll();
++}
++
++void FFmpegPlaybackEngine::flush(Track track)
++{
++    // a new pass (WebCore enqueues again from a sync frame): its end is reported again
++    m_endPosted = false;
++    queueFlush(queue(track));
++}
++
++void FFmpegPlaybackEngine::setEnded(Track track)
++{
++    auto& queue = this->queue(track);
++    Locker locker { queue.lock };
++    queue.end = true;
++    queue.condition.notifyAll();
++}
++
++bool FFmpegPlaybackEngine::isReadyForMore(Track track)
++{
++    auto& queue = this->queue(track);
++    Locker locker { queue.lock };
++    return queue.seconds < kQueueFull && (track == Track::Audio || queue.packets.size() < kQueueMaxVideo);
++}
++
++void FFmpegPlaybackEngine::notifyWhenReadyForMore(Track track, Function<void()>&& ready)
++{
++    auto& queue = this->queue(track);
++    Locker locker { queue.lock };
++    queue.whenReady = WTF::move(ready);
++}
++
++// Waits up to `timeout` for a packet; also ends at once on an abort, a flush (a serial other
++// than `knownSerial`) and, unless the caller has drained its decoder already, the end.
++auto FFmpegPlaybackEngine::queueGet(Queue& queue, Packet& packet, unsigned knownSerial, bool drained, unsigned& serial, Seconds timeout) -> Get
++{
++    Function<void()> ready;
++    Get result;
++    {
++        Locker locker { queue.lock };
++        queue.condition.waitFor(queue.lock, timeout, [&] {
++            assertIsHeld(queue.lock);
++            return !queue.packets.isEmpty() || queue.aborted || queue.serial != knownSerial || (queue.end && !drained);
++        });
++        serial = queue.serial;
++        if (queue.aborted)
++            return Get::Aborted;
++        if (queue.packets.isEmpty())
++            return queue.end ? Get::End : Get::Empty;
++        packet = queue.packets.takeFirst();
++        queue.bytes -= packet.packet->size;
++        queue.seconds = std::max(0.0, queue.seconds - packet.duration);
++        if (queue.whenReady && queue.seconds < kQueueLow)
++            ready = std::exchange(queue.whenReady, nullptr);
++        result = Get::Packet;
++    }
++    if (ready)
++        callOnMainThread(WTF::move(ready));
++    return result;
++}
++
++void FFmpegPlaybackEngine::queueFlush(Queue& queue)
++{
++    Locker locker { queue.lock };
++    while (!queue.packets.isEmpty()) {
++        auto packet = queue.packets.takeFirst();
++        freePacket(packet);
++    }
++    queue.bytes = 0;
++    queue.seconds = 0;
++    queue.serial++;
++    queue.end = false;
++    queue.condition.notifyAll();
++}
++
++unsigned FFmpegPlaybackEngine::queueSerial(Queue& queue)
++{
++    Locker locker { queue.lock };
++    return queue.serial;
++}
++
++/* --- the clock ------------------------------------------------------------------------------ */
++
++double FFmpegPlaybackEngine::clockNow() const
++{
++    Locker locker { m_clockLock };
++    double t = m_clockTime;
++    if (!m_clockPaused && !m_clockWaiting && !m_clockHold)
++        t += (MonotonicTime::now() - m_clockStart).seconds();
++    return t;
++}
++
++void FFmpegPlaybackEngine::clockSet(double time, bool hold)
++{
++    Locker locker { m_clockLock };
++    m_clockTime = time;
++    m_clockStart = MonotonicTime::now();
++    m_clockHold = hold;
++}
++
++bool FFmpegPlaybackEngine::clockRunning() const
++{
++    Locker locker { m_clockLock };
++    return !m_clockPaused && !m_clockWaiting && !m_clockHold;
++}
++
++bool FFmpegPlaybackEngine::clockHeld() const
++{
++    Locker locker { m_clockLock };
++    return m_clockHold;
++}
++
++double FFmpegPlaybackEngine::currentTime() const
++{
++    return clockNow();
++}
++
++bool FFmpegPlaybackEngine::isClockRunning() const
++{
++    return clockRunning();
++}
++
++void FFmpegPlaybackEngine::setPaused(bool paused)
++{
++    Locker locker { m_clockLock };
++    if (paused == m_clockPaused)
++        return;
++    if (!m_clockPaused && !m_clockWaiting && !m_clockHold)
++        m_clockTime += (MonotonicTime::now() - m_clockStart).seconds();
++    m_clockStart = MonotonicTime::now();
++    m_clockPaused = paused;
++}
++
++void FFmpegPlaybackEngine::setWaitingForData(bool waiting)
++{
++    Locker locker { m_clockLock };
++    if (waiting == m_clockWaiting)
++        return;
++    if (!m_clockPaused && !m_clockWaiting && !m_clockHold)
++        m_clockTime += (MonotonicTime::now() - m_clockStart).seconds();
++    m_clockStart = MonotonicTime::now();
++    m_clockWaiting = waiting;
++}
++
++void FFmpegPlaybackEngine::beginSeek(double time)
++{
++    m_seekPending = true;
++    m_seekTarget = time;
++    m_endPosted = false;
++    clockSet(time, true);
++    // what is queued belongs to the old position
++    queueFlush(m_videoQueue);
++    queueFlush(m_audioQueue);
++}
++
++void FFmpegPlaybackEngine::endSeek(double time)
++{
++    m_seekTarget = time;
++    m_seekPending = false;
++}
++
++/* --- threads -------------------------------------------------------------------------------- */
++
++void FFmpegPlaybackEngine::start()
++{
++    if (m_started)
++        return;
++    m_started = true;
++    m_quit = false;
++    log("start (decoders open with the first frames)");
++    m_videoThread = Thread::create("FFmpegMSEVideo"_s, [this] { videoThread(); }, ThreadType::Graphics, Thread::QOS::UserInteractive,
++        Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(mediaThreadStack()));
++    m_audioThread = Thread::create("FFmpegMSEAudio"_s, [this] { audioThread(); }, ThreadType::Audio, Thread::QOS::UserInteractive,
++        Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(mediaThreadStack()));
++}
++
++// Joins the threads and returns to the state before start() (main thread): the owner may load
++// again. Nothing the threads wait for needs the main thread: a blocked queue is woken by its
++// abort, and the device is written 10 ms at a time.
++void FFmpegPlaybackEngine::stop()
++{
++    m_quit = true;
++    for (auto* queue : { &m_videoQueue, &m_audioQueue }) {
++        Locker locker { queue->lock };
++        queue->aborted = true;
++        queue->whenReady = nullptr;
++        queue->condition.notifyAll();
++    }
++    for (auto* thread : { &m_videoThread, &m_audioThread }) {
++        if (RefPtr t = std::exchange(*thread, nullptr))
++            t->waitForCompletion();
++    }
++    m_run++;
++    for (auto* queue : { &m_videoQueue, &m_audioQueue }) {
++        queueFlush(*queue);
++        Locker locker { queue->lock };
++        queue->aborted = false;
++        queue->used = false;
++    }
++    {
++        Locker locker { m_clockLock };
++        m_clockTime = 0;
++        m_clockPaused = true;
++        m_clockWaiting = false;
++        m_clockHold = true;
++    }
++    m_seekPending = false;
++    m_seekTarget = 0;
++    m_endPosted = false;
++    m_videoDrainedSerial = m_audioDrainedSerial = kNotDrained;
++    m_audioDeviceTried = false;
++    m_audioWritten = 0;
++    m_audioFeedStart = { };
++    m_quit = false;
++    if (m_audioFd >= 0) {
++        // the ring replays what it holds after close: leave it full of silence
++        audioSilence(0.25);
++        close(m_audioFd);
++        m_audioFd = -1;
++    }
++    if (m_audioLockFd >= 0) {
++        close(m_audioLockFd);
++        m_audioLockFd = -1;
++    }
++    m_started = false;
++}
++
++AVCodecContext* FFmpegPlaybackEngine::openDecoder(const FFmpegCodecConfig& config)
++{
++    const AVCodecParameters& parameters = config.parameters();
++    const AVCodec* codec = avcodec_find_decoder(parameters.codec_id);
++    if (!codec) {
++        log("error no-decoder codec=%s", avcodec_get_name(parameters.codec_id));
++        return nullptr;
++    }
++    AVCodecContext* context = avcodec_alloc_context3(codec);
++    if (!context)
++        return nullptr;
++    avcodec_parameters_to_context(context, &parameters);
++    context->pkt_timebase = kTimeBase;
++    // H.264 (720p30) needs less than three cores; the page and the compositor share them
++    context->thread_count = envNumber("WPE_PHOENIX_MEDIA_THREADS", codec->id == AV_CODEC_ID_H264 ? 3 : 0);
++    context->opaque = &m_hardwareState;
++    if (avcodec_open2(context, codec, nullptr) < 0) {
++        log("error decoder-open codec=%s", codec->name);
++        avcodec_free_context(&context);
++        return nullptr;
++    }
++    const char* rpivid = getenv("FFMPEG_RPIVID");
++    log("decoder %s=%s codec=%s config=%s threads=%d FFMPEG_RPIVID=%s", config.isVideo() ? "video" : "audio", codec->name,
++        avcodec_get_name(parameters.codec_id), config.codec().utf8().data(), context->thread_count, rpivid ? rpivid : "unset");
++    return context;
++}
++
++bool FFmpegPlaybackEngine::presentFrame(AVFrame& decoded)
++{
++    AVFrame* frame = &decoded;
++    if (!CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(decoded.format)) {
++        // 10-bit, 4:2:2, 4:4:4, RGB...: converted to 8-bit 4:2:0 on the CPU (libswscale)
++        if (!m_converter.frame || m_converter.frame->width != decoded.width || m_converter.frame->height != decoded.height || m_converter.format != decoded.format) {
++            sws_freeContext(m_converter.context);
++            av_frame_free(&m_converter.frame);
++            m_converter.format = decoded.format;
++            m_converter.context = sws_getContext(decoded.width, decoded.height, static_cast<AVPixelFormat>(decoded.format), decoded.width, decoded.height,
++                AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
++            m_converter.frame = av_frame_alloc();
++            if (m_converter.frame) {
++                m_converter.frame->format = AV_PIX_FMT_YUV420P;
++                m_converter.frame->width = decoded.width;
++                m_converter.frame->height = decoded.height;
++            }
++            if (!m_converter.context || !m_converter.frame || av_frame_get_buffer(m_converter.frame, 0) < 0) {
++                log("error pixel-format %s: no converter", av_get_pix_fmt_name(static_cast<AVPixelFormat>(decoded.format)));
++                sws_freeContext(std::exchange(m_converter.context, nullptr));
++                av_frame_free(&m_converter.frame);
++                return false;
++            }
++            log("convert %s -> yuv420p %dx%d (CPU)", av_get_pix_fmt_name(static_cast<AVPixelFormat>(decoded.format)), decoded.width, decoded.height);
++        }
++        // the compositor may still hold the previous picture: a new buffer for each one
++        if (av_frame_make_writable(m_converter.frame) < 0)
++            return false;
++        sws_scale(m_converter.context, decoded.data, decoded.linesize, 0, decoded.height, m_converter.frame->data, m_converter.frame->linesize);
++        av_frame_copy_props(m_converter.frame, &decoded);
++        m_converter.frame->colorspace = decoded.colorspace;
++        m_converter.frame->color_range = decoded.color_range;
++        frame = m_converter.frame;
++    }
++    auto buffer = CoordinatedPlatformLayerBufferFFmpeg::create(*frame, m_frameCounters.copyRef());
++    if (!buffer)
++        return false;
++    m_contentsBufferProxy->setDisplayBuffer(WTF::move(buffer));
++    m_presented++;
++    return true;
++}
++
++// A decoding thread played out its queue's end: the end is reported once every track that was
++// fed has (each serial is a pass from a start, seek or flush)
++void FFmpegPlaybackEngine::didDrain(Track track, unsigned serial)
++{
++    (track == Track::Video ? m_videoDrainedSerial : m_audioDrainedSerial) = serial;
++    auto drained = [&](Queue& queue, std::atomic<unsigned>& drainedSerial) {
++        Locker locker { queue.lock };
++        return !queue.used || (queue.end && queue.packets.isEmpty() && drainedSerial == queue.serial);
++    };
++    if (drained(m_videoQueue, m_videoDrainedSerial) && drained(m_audioQueue, m_audioDrainedSerial) && !m_endPosted.exchange(true)) {
++        log("end clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu", clockNow(), static_cast<unsigned long long>(m_decoded.load()),
++            static_cast<unsigned long long>(m_presented.load()), static_cast<unsigned long long>(m_frameCounters->painted.load()),
++            static_cast<unsigned long long>(m_dropped.load()));
++        post(Event::Ended);
++    }
++}
++
++void FFmpegPlaybackEngine::videoThread()
++{
++    Packet packet;
++    AVFrame* frame = av_frame_alloc();
++    AVCodecContext* decoder = nullptr;
++    RefPtr<FFmpegCodecConfig> config;
++    unsigned serial = std::numeric_limits<unsigned>::max(), queueSerialNow;
++    bool drained = false, first = true, stalled = false;
++    double lastPts = 0;
++    MonotonicTime lastShown, stallStart;
++
++    // the frames the decoder returns: a first picture after a start, seek or flush starts the
++    // clock; the others wait for their time or are dropped when late
++    auto receiveFrames = [&]() -> int {
++        int ret = 0;
++        while (!m_quit && decoder && !(ret = avcodec_receive_frame(decoder, frame))) {
++            m_decoded++;
++            double pts = frame->best_effort_timestamp != AV_NOPTS_VALUE ? frame->best_effort_timestamp * av_q2d(kTimeBase) : lastPts;
++            if (first) {
++                // nothing is shown until the seek's frames are all enqueued
++                while (!m_quit && m_seekPending && queueSerial(m_videoQueue) == serial)
++                    usleep(5000);
++                if (m_quit || queueSerial(m_videoQueue) != serial) {
++                    av_frame_unref(frame);
++                    break;
++                }
++                double target = m_seekTarget;
++                presentFrame(*frame);
++                clockSet(std::max(pts, target), false);
++                lastPts = pts;
++                lastShown = MonotonicTime::now();
++                first = false;
++                log("first-frame pts=%.3f %dx%d format=%s", pts, frame->width, frame->height, av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format)));
++                post(Event::FirstFrame, std::max(pts, target));
++                av_frame_unref(frame);
++                continue;
++            }
++            if (stalled) {
++                // after a stall the clock resumes at this picture
++                log("stall end after_ms=%.0f pts=%.3f", (MonotonicTime::now() - stallStart).milliseconds(), pts);
++                presentFrame(*frame);
++                clockSet(pts, false);
++                lastPts = pts;
++                lastShown = MonotonicTime::now();
++                stalled = false;
++                post(Event::Stalled, 0);
++                av_frame_unref(frame);
++                continue;
++            }
++            // wait for its time (the clock stands still while paused, seeking or without data)
++            double wait = 0;
++            while (!m_quit && queueSerial(m_videoQueue) == serial) {
++                wait = pts - clockNow();
++                bool running = clockRunning();
++                if (!running || wait > 0.002) {
++                    usleep(wait > 0.02 || !running ? 10000 : static_cast<useconds_t>(wait * 1000000));
++                    continue;
++                }
++                break;
++            }
++            if (m_quit || queueSerial(m_videoQueue) != serial) {
++                av_frame_unref(frame);
++                break;
++            }
++            // late: dropped, unless nothing was shown for half a second (a decoder slower than
++            // the stream still shows a picture now and then)
++            if (wait < -kLateDrop && MonotonicTime::now() - lastShown < 500_ms)
++                m_dropped++;
++            else if (presentFrame(*frame))
++                lastShown = MonotonicTime::now();
++            lastPts = pts;
++            av_frame_unref(frame);
++        }
++        return ret;
++    };
++
++    while (!m_quit) {
++        auto got = queueGet(m_videoQueue, packet, serial, drained, queueSerialNow, 20_ms);
++        if (got == Get::Aborted)
++            break;
++        if (queueSerialNow != serial) {
++            if (decoder)
++                avcodec_flush_buffers(decoder);
++            serial = queueSerialNow;
++            drained = false;
++            first = true;
++            stalled = false;
++        }
++        if (got == Get::Empty && !first && !stalled && !drained && clockRunning() && clockNow() > lastPts + kStallAfter) {
++            double held = clockNow();
++            clockSet(held, true);
++            stalled = true;
++            stallStart = MonotonicTime::now();
++            log("stall start clock=%.3f last-pts=%.3f n=%u", held, lastPts, ++m_stalls);
++            post(Event::Stalled, 1);
++        }
++        if (got == Get::Empty || (got == Get::End && drained))
++            continue;
++        if (got == Get::End) {
++            // the last frame is in: the decoder gives back the pictures it still holds
++            if (decoder)
++                avcodec_send_packet(decoder, nullptr);
++            drained = true;
++        } else {
++            if (drained) {
++                // more frames after an end that was already played out
++                if (decoder)
++                    avcodec_flush_buffers(decoder);
++                drained = false;
++            }
++            if (packet.config != config) {
++                if (decoder) {
++                    // a new configuration: the old decoder's last pictures first
++                    avcodec_send_packet(decoder, nullptr);
++                    receiveFrames();
++                    avcodec_free_context(&decoder);
++                    log("decoder reopen %s -> %s", config->codec().utf8().data(), packet.config->codec().utf8().data());
++                }
++                config = packet.config;
++                decoder = openDecoder(*config);
++                if (!decoder)
++                    post(Event::DecodeError);
++                FloatSize size = config->size();
++                bool sizeChanged;
++                {
++                    Locker locker { m_sizeLock };
++                    sizeChanged = size != m_naturalSize;
++                    m_naturalSize = size;
++                }
++                if (sizeChanged)
++                    post(Event::SizeChanged);
++            }
++            if (decoder)
++                avcodec_send_packet(decoder, packet.packet);
++            freePacket(packet);
++        }
++        int ret = receiveFrames();
++        // drained: the decoder said AVERROR_EOF (not a break for a seek or quit)
++        if (drained && (ret == AVERROR_EOF || !decoder) && !m_quit && queueSerial(m_videoQueue) == serial && m_videoDrainedSerial != serial) {
++            log("drained video decoded=%llu", static_cast<unsigned long long>(m_decoded.load()));
++            didDrain(Track::Video, serial);
++        }
++    }
++    freePacket(packet);
++    avcodec_free_context(&decoder);
++    sws_freeContext(std::exchange(m_converter.context, nullptr));
++    av_frame_free(&m_converter.frame);
++    av_frame_free(&frame);
++}
++
++/* --- audio ---------------------------------------------------------------------------------- */
++
++void FFmpegPlaybackEngine::openAudioDevice()
++{
++    m_audioDeviceTried = true;
++    if (!envNumber("WPE_PHOENIX_MEDIA_AUDIO", 1)) {
++        log("audio sound=off reason=disabled");
++        return;
++    }
++    // one writer for the device: its ring would interleave two streams
++    m_audioLockFd = open(kAudioLockFile, O_RDWR | O_CREAT, 0666);
++    struct flock lock { };
++    lock.l_type = F_WRLCK;
++    lock.l_whence = SEEK_SET;
++    if (m_audioLockFd < 0 || fcntl(m_audioLockFd, F_SETLK, &lock) < 0) {
++        log("audio sound=off reason=busy (%s held by another player)", kAudioLockFile);
++        if (m_audioLockFd >= 0)
++            close(m_audioLockFd);
++        m_audioLockFd = -1;
++        return;
++    }
++    m_audioFd = open(kAudioDevice, O_WRONLY);
++    if (m_audioFd < 0) {
++        log("audio sound=off reason=open device=%s errno=%d", kAudioDevice, errno);
++        close(m_audioLockFd);
++        m_audioLockFd = -1;
++        return;
++    }
++    log("audio sound=on device=%s fill_ms=%.0f", kAudioDevice, kAudioFill * 1000);
++}
++
++// The fill (sound queued but not heard yet): seconds written minus seconds elapsed since the
++// first write; the ring drains at the playback rate
++double FFmpegPlaybackEngine::audioFill()
++{
++    if (!m_audioFeedStart)
++        return 0;
++    double fill = m_audioWritten - (MonotonicTime::now() - m_audioFeedStart).seconds();
++    if (fill < 0) {
++        // the ring ran dry (or the model drifted): start the model again
++        m_audioFeedStart = { };
++        m_audioWritten = 0;
++        fill = 0;
++    }
++    return fill;
++}
++
++void FFmpegPlaybackEngine::audioWrite(const uint8_t* data, size_t length)
++{
++    if (!m_audioFeedStart)
++        m_audioFeedStart = MonotonicTime::now();
++    m_audioWritten += length / (4.0 * kAudioRate);
++    while (length && m_audioFd >= 0) {
++        ssize_t n = write(m_audioFd, data, length);
++        if (n < 0) {
++            if (errno == EINTR)
++                continue;
++            log("audio write-failed errno=%d: sound off", errno);
++            close(m_audioFd);
++            m_audioFd = -1;
++            return;
++        }
++        data += n;
++        length -= n;
++    }
++}
++
++void FFmpegPlaybackEngine::audioSilence(double seconds)
++{
++    static const uint8_t zero[4 * (kAudioRate / 100)] = { };
++    size_t length = static_cast<size_t>(seconds * kAudioRate) * 4;
++    while (length && m_audioFd >= 0) {
++        size_t n = std::min(length, sizeof(zero));
++        audioWrite(zero, n);
++        length -= n;
++    }
++}
++
++void FFmpegPlaybackEngine::audioThread()
++{
++    Packet packet;
++    AVFrame* frame = av_frame_alloc();
++    AVCodecContext* decoder = nullptr;
++    RefPtr<FFmpegCodecConfig> config;
++    AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
++    SwrContext* resampler = nullptr;
++    // what the resampler was set up for
++    int resamplerRate = 0, resamplerFormat = -1, resamplerChannels = 0;
++    Vector<uint8_t> out;
++    size_t outLength = 0;
++    unsigned serial = std::numeric_limits<unsigned>::max(), queueSerialNow = 0, haveSerial = 0;
++    bool drained = false, have = false;
++    double pts = 0, duration = 0;
++
++    while (!m_quit) {
++        if (!m_audioDeviceTried && clockRunning())
++            openAudioDevice();
++        double fill = audioFill();
++        if (m_audioFd >= 0 && fill > kAudioFill) {
++            usleep(fill - kAudioFill > 0.01 ? 10000 : static_cast<useconds_t>((fill - kAudioFill) * 1000000) + 500);
++            continue;
++        }
++        if (have && queueSerial(m_audioQueue) != haveSerial)
++            have = false; // decoded before a seek
++        if (!have) {
++            int ret = decoder ? avcodec_receive_frame(decoder, frame) : AVERROR(EAGAIN);
++            if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
++                // AVERROR_EOF: drained, and every sound decoded was written (or dropped late)
++                if ((ret == AVERROR_EOF || !decoder) && drained && m_audioDrainedSerial != serial && queueSerial(m_audioQueue) == serial) {
++                    log("drained audio");
++                    didDrain(Track::Audio, serial);
++                }
++                auto got = queueGet(m_audioQueue, packet, serial, drained, queueSerialNow, m_audioFd >= 0 ? 5_ms : 20_ms);
++                if (got == Get::Aborted)
++                    break;
++                if (queueSerialNow != serial) {
++                    if (decoder)
++                        avcodec_flush_buffers(decoder);
++                    serial = queueSerialNow;
++                    drained = false;
++                }
++                if (got == Get::Packet) {
++                    if (drained) {
++                        if (decoder)
++                            avcodec_flush_buffers(decoder);
++                        drained = false;
++                    }
++                    if (packet.config != config) {
++                        if (decoder)
++                            log("decoder reopen %s -> %s", config->codec().utf8().data(), packet.config->codec().utf8().data());
++                        avcodec_free_context(&decoder);
++                        config = packet.config;
++                        decoder = openDecoder(*config);
++                        if (!decoder)
++                            post(Event::DecodeError);
++                    }
++                    if (decoder)
++                        avcodec_send_packet(decoder, packet.packet);
++                    freePacket(packet);
++                } else if (got == Get::End && !drained) {
++                    if (decoder)
++                        avcodec_send_packet(decoder, nullptr);
++                    drained = true;
++                }
++            } else if (!ret) {
++                if (frame->pts != AV_NOPTS_VALUE) {
++                    pts = frame->pts * av_q2d(kTimeBase);
++                    duration = static_cast<double>(frame->nb_samples) / frame->sample_rate;
++                    if (resampler && (frame->sample_rate != resamplerRate || frame->format != resamplerFormat || frame->ch_layout.nb_channels != resamplerChannels))
++                        swr_free(&resampler); // a new configuration
++                    if (!resampler) {
++                        if (frame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC)
++                            av_channel_layout_default(&frame->ch_layout, frame->ch_layout.nb_channels);
++                        if (swr_alloc_set_opts2(&resampler, &stereo, AV_SAMPLE_FMT_S16, kAudioRate, &frame->ch_layout,
++                            static_cast<AVSampleFormat>(frame->format), frame->sample_rate, 0, nullptr) < 0 || swr_init(resampler) < 0) {
++                            log("error audio-resampler: sound off");
++                            swr_free(&resampler);
++                        } else {
++                            resamplerRate = frame->sample_rate;
++                            resamplerFormat = frame->format;
++                            resamplerChannels = frame->ch_layout.nb_channels;
++                            log("audio %s %d Hz %d ch -> S16 %d Hz stereo", av_get_sample_fmt_name(static_cast<AVSampleFormat>(frame->format)),
++                                frame->sample_rate, frame->ch_layout.nb_channels, kAudioRate);
++                        }
++                    }
++                    if (resampler) {
++                        int maxSamples = swr_get_out_samples(resampler, frame->nb_samples);
++                        out.grow(std::max<size_t>(out.size(), maxSamples * 4));
++                        uint8_t* outPlane = out.mutableSpan().data();
++                        int n = swr_convert(resampler, &outPlane, maxSamples, const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
++                        outLength = n > 0 ? n * 4 : 0;
++                        have = outLength;
++                        haveSerial = serial;
++                    }
++                }
++                av_frame_unref(frame);
++            }
++        }
++        if (have && !m_expectsVideo && !m_seekPending) {
++            // no picture stream: the first sound starts the clock (start, seek)
++            bool released = false;
++            {
++                Locker locker { m_clockLock };
++                if (m_clockHold) {
++                    m_clockTime = std::max(pts, m_seekTarget.load());
++                    m_clockStart = MonotonicTime::now();
++                    m_clockHold = false;
++                    released = true;
++                }
++            }
++            if (released) {
++                log("first-sound pts=%.3f", pts);
++                post(Event::FirstFrame, pts);
++            }
++        }
++        if (m_audioFd < 0) {
++            // no device: consume the sound at the clock's pace so the queue keeps moving
++            if (have && clockRunning() && pts <= clockNow() + 0.5)
++                have = false;
++            else if (have)
++                usleep(10000);
++            continue;
++        }
++        if (!have || !clockRunning()) {
++            audioSilence(kAudioChunk);
++            continue;
++        }
++        double heard = clockNow() + audioFill();
++        if (pts + duration < heard - kAudioLate) {
++            have = false; // late: dropped
++            continue;
++        }
++        if (pts > heard + kAudioEarly) {
++            audioSilence(std::min(pts - heard, kAudioChunk));
++            continue;
++        }
++        m_avDriftMs = static_cast<int>((pts - heard) * 1000);
++        double gain = m_muted ? 0 : m_volume.load();
++        if (gain < 0.999) {
++            auto* samples = reinterpret_cast<int16_t*>(out.mutableSpan().data());
++            for (size_t i = 0; i < outLength / 2; ++i)
++                samples[i] = static_cast<int16_t>(samples[i] * gain);
++        }
++        audioWrite(out.span().data(), outLength);
++        have = false;
++    }
++    freePacket(packet);
++    avcodec_free_context(&decoder);
++    swr_free(&resampler);
++    av_frame_free(&frame);
++}
++
++auto FFmpegPlaybackEngine::counters() -> Counters
++{
++    Counters counters;
++    counters.decoded = m_decoded;
++    counters.presented = m_presented;
++    counters.painted = m_frameCounters->painted;
++    counters.dropped = m_dropped;
++    counters.uploadMicroseconds = m_frameCounters->uploadMicroseconds;
++    counters.avDriftMs = m_avDriftMs;
++    counters.hardware = m_hardwareState;
++    counters.stalls = m_stalls;
++    {
++        Locker locker { m_videoQueue.lock };
++        counters.videoPackets = m_videoQueue.packets.size();
++        counters.queuedBytes += m_videoQueue.bytes;
++    }
++    {
++        Locker locker { m_audioQueue.lock };
++        counters.audioPackets = m_audioQueue.packets.size();
++        counters.queuedBytes += m_audioQueue.bytes;
++    }
++    return counters;
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.h b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.h
+new file mode 100644
+index 00000000..c0e154d1
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.h
+@@ -0,0 +1,265 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#pragma once
++
++#if ENABLE(VIDEO) && USE(FFMPEG)
++
++#include "FloatSize.h"
++#include "PlatformLayer.h"
++#include <atomic>
++#include <limits>
++#include <wtf/Condition.h>
++#include <wtf/Deque.h>
++#include <wtf/Function.h>
++#include <wtf/Lock.h>
++#include <wtf/MonotonicTime.h>
++#include <wtf/ThreadSafeRefCounted.h>
++#include <wtf/Threading.h>
++#include <wtf/text/WTFString.h>
++
++struct AVCodecContext;
++struct AVCodecParameters;
++struct AVFrame;
++struct AVPacket;
++struct SwrContext;
++struct SwsContext;
++
++namespace WebCore {
++
++class CoordinatedPlatformLayerBufferProxy;
++struct FFmpegFrameCounters;
++
++// What an FFmpeg decoder is opened with: the codec parameters of one track of one
++// initialization segment (codec, extradata, picture size, sample rate, channels). Every coded
++// frame carries its configuration, so a new initialization segment (a quality or codec switch)
++// reaches the decoding thread exactly at the first frame that needs it.
++class FFmpegCodecConfig final : public ThreadSafeRefCounted<FFmpegCodecConfig> {
++public:
++    // takes the parameters (avcodec_parameters_alloc()ed)
++    static Ref<FFmpegCodecConfig> create(AVCodecParameters*, String&& codec);
++    ~FFmpegCodecConfig();
++
++    const AVCodecParameters& parameters() const { return *m_parameters; }
++    // the RFC 6381 name
++    const String& codec() const { return m_codec; }
++    bool isVideo() const;
++    FloatSize size() const;
++
++private:
++    FFmpegCodecConfig(AVCodecParameters*, String&&);
++
++    AVCodecParameters* m_parameters;
++    const String m_codec;
++};
++
++// Decodes and presents coded frames that arrive already demuxed: one video and one audio input
++// queue, each frame with its FFmpegCodecConfig, decode timestamps in order. The media player
++// that owns it feeds the queues and drives the clock (play, pause, seek, data starvation);
++// everything else happens on the engine's two threads:
++//
++//   video   libavcodec (hevc_rpivid for HEVC, as avcodec_find_decoder() picks it); each picture
++//           waits for the clock and goes to the compositor through the platform layer (8-bit
++//           4:2:0 planes uploaded and colour-converted on the GPU, anything else converted on
++//           the CPU first); a picture later than 100 ms is dropped
++//   audio   libavcodec -> libswresample -> 44.1 kHz S16 stereo -> /dev/audio0 (one writer in the
++//           system: a lock file shared with MediaPlayerPrivateFFmpeg)
++//
++// The clock is a pausable wall clock that runs while playing, not seeking, with data
++// (setWaitingForData) and once the first picture after a start, seek or flush is shown (without
++// video: the first sound). A video queue that runs dry while the clock runs holds the clock at
++// the last picture ("stall"), and the next picture resumes it. Frames enqueued as non-displaying
++// (the decode-only frames before a seek target) are decoded with AV_PKT_FLAG_DISCARD: libavcodec
++// returns no picture or sound for them. A frame with a new configuration first drains the old
++// decoder (its pictures are still shown), then reopens it.
++//
++// Packet timestamps are microseconds (pkt_timebase 1/1000000). Threads start at start() (the
++// owner's first play()): until then nothing is decoded and no decoder exists.
++class FFmpegPlaybackEngine final : public ThreadSafeRefCounted<FFmpegPlaybackEngine> {
++public:
++    enum class Track : uint8_t { Video, Audio };
++    enum class Event : uint8_t {
++        FirstFrame,   // a picture (or, without video, a sound) after a start, seek or flush: value = its time
++        Ended,        // every track that was set ended has played out
++        SizeChanged,  // the picture size of a new configuration (value unused; see naturalSize())
++        DecodeError,  // a decoder that does not open
++        Stalled,      // the video ran dry while playing (value: 1 start, 0 end)
++    };
++    using EventHandler = Function<void(Event, double)>;
++
++    static Ref<FFmpegPlaybackEngine> create(unsigned playerID, EventHandler&&);
++    ~FFmpegPlaybackEngine();
++
++    PlatformLayer* platformLayer() const;
++
++    // input (the MediaSource's dispatcher): takes the packet; its pts/dts are microseconds
++    void enqueue(Track, AVPacket*, Ref<FFmpegCodecConfig>&&, double durationSeconds);
++    void flush(Track);
++    void setEnded(Track);
++    bool isReadyForMore(Track);
++    // `ready` runs on the main thread once the queue is below its low mark
++    void notifyWhenReadyForMore(Track, Function<void()>&& ready);
++
++    // playback (main thread)
++    void start();
++    // back to the state before start(); queued frames are dropped
++    void stop();
++    bool isStarted() const { return m_started; }
++    void setPaused(bool);
++    void setWaitingForData(bool);
++    // whether a video track takes part (without one, the first sound starts the clock)
++    void setExpectsVideo(bool expects) { m_expectsVideo = expects; }
++    // a seek: the clock holds at `time`, the queues are emptied, and nothing is shown until
++    // endSeek() (the frames of the target are being enqueued meanwhile)
++    void beginSeek(double time);
++    void endSeek(double time);
++    void setVolume(double volume) { m_volume = volume; }
++    void setMuted(bool muted) { m_muted = muted; }
++
++    // any thread
++    double currentTime() const;
++    bool isClockRunning() const;
++    FloatSize naturalSize() const;
++
++    struct Counters {
++        uint64_t decoded { 0 };
++        uint64_t presented { 0 };
++        uint64_t painted { 0 };
++        uint64_t dropped { 0 };
++        uint64_t uploadMicroseconds { 0 };
++        int avDriftMs { 0 };
++        int hardware { -1 }; // the rpivid verdict: -1 none yet, 0 the CPU, 1 the block
++        unsigned stalls { 0 };
++        size_t videoPackets { 0 };
++        size_t audioPackets { 0 };
++        size_t queuedBytes { 0 };
++    };
++    Counters counters();
++
++private:
++    FFmpegPlaybackEngine(unsigned playerID, EventHandler&&);
++
++    struct Packet {
++        AVPacket* packet { nullptr };
++        RefPtr<FFmpegCodecConfig> config;
++        double duration { 0 };
++    };
++    struct Queue {
++        Lock lock;
++        Condition condition;
++        Deque<Packet> packets WTF_GUARDED_BY_LOCK(lock);
++        size_t bytes WTF_GUARDED_BY_LOCK(lock) { 0 };
++        double seconds WTF_GUARDED_BY_LOCK(lock) { 0 };
++        unsigned serial WTF_GUARDED_BY_LOCK(lock) { 0 };
++        bool end WTF_GUARDED_BY_LOCK(lock) { false };
++        bool aborted WTF_GUARDED_BY_LOCK(lock) { false };
++        Function<void()> whenReady WTF_GUARDED_BY_LOCK(lock);
++        // set by the first frame queued: the track takes part in the end
++        bool used WTF_GUARDED_BY_LOCK(lock) { false };
++    };
++    enum class Get : uint8_t { Packet, Empty, End, Aborted };
++    Queue& queue(Track track) { return track == Track::Video ? m_videoQueue : m_audioQueue; }
++    Get queueGet(Queue&, Packet&, unsigned knownSerial, bool drained, unsigned& serial, Seconds timeout);
++    void queueFlush(Queue&);
++    unsigned queueSerial(Queue&);
++    static void freePacket(Packet&);
++
++    double clockNow() const;
++    void clockSet(double time, bool hold);
++    bool clockRunning() const;
++    bool clockHeld() const;
++
++    AVCodecContext* openDecoder(const FFmpegCodecConfig&);
++    void videoThread();
++    void audioThread();
++    bool presentFrame(AVFrame&);
++    void didDrain(Track, unsigned serial);
++    void post(Event, double value = 0);
++    void openAudioDevice();
++    void audioWrite(const uint8_t*, size_t);
++    void audioSilence(double seconds);
++    double audioFill();
++    void log(const char* format, ...) const WTF_ATTRIBUTE_PRINTF(2, 3);
++
++    const unsigned m_playerID;
++    EventHandler m_eventHandler;
++    RefPtr<CoordinatedPlatformLayerBufferProxy> m_contentsBufferProxy;
++    Ref<FFmpegFrameCounters> m_frameCounters;
++
++    Queue m_videoQueue;
++    Queue m_audioQueue;
++    RefPtr<Thread> m_videoThread;
++    RefPtr<Thread> m_audioThread;
++    std::atomic<bool> m_started { false };
++    std::atomic<bool> m_quit { false };
++    std::atomic<bool> m_expectsVideo { true };
++    std::atomic<bool> m_seekPending { false };
++    std::atomic<double> m_seekTarget { 0 };
++    // the serial each decoding thread has played out (drained) after its queue's end
++    static constexpr unsigned kNotDrained = std::numeric_limits<unsigned>::max();
++    std::atomic<unsigned> m_videoDrainedSerial { kNotDrained };
++    std::atomic<unsigned> m_audioDrainedSerial { kNotDrained };
++    std::atomic<bool> m_endPosted { false };
++    // one more at each stop(): the events of an earlier run are not delivered
++    std::atomic<unsigned> m_run { 0 };
++
++    mutable Lock m_clockLock;
++    double m_clockTime WTF_GUARDED_BY_LOCK(m_clockLock) { 0 };
++    MonotonicTime m_clockStart WTF_GUARDED_BY_LOCK(m_clockLock);
++    bool m_clockPaused WTF_GUARDED_BY_LOCK(m_clockLock) { true };
++    bool m_clockWaiting WTF_GUARDED_BY_LOCK(m_clockLock) { false };
++    bool m_clockHold WTF_GUARDED_BY_LOCK(m_clockLock) { true };
++
++    mutable Lock m_sizeLock;
++    FloatSize m_naturalSize WTF_GUARDED_BY_LOCK(m_sizeLock);
++
++    // pictures in a format the compositor does not take (video thread)
++    struct {
++        SwsContext* context { nullptr };
++        AVFrame* frame { nullptr };
++        int format { -1 };
++    } m_converter;
++
++    // the audio device (audio thread)
++    int m_audioFd { -1 };
++    int m_audioLockFd { -1 };
++    bool m_audioDeviceTried { false };
++    MonotonicTime m_audioFeedStart;
++    double m_audioWritten { 0 };
++    std::atomic<double> m_volume { 1 };
++    std::atomic<bool> m_muted { false };
++
++    std::atomic<uint64_t> m_decoded { 0 };
++    std::atomic<uint64_t> m_presented { 0 };
++    std::atomic<uint64_t> m_dropped { 0 };
++    std::atomic<int> m_avDriftMs { 0 };
++    std::atomic<int> m_hardwareState { -1 };
++    std::atomic<unsigned> m_stalls { 0 };
++};
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp
+new file mode 100644
+index 00000000..f1e22744
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp
+@@ -0,0 +1,623 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#include "config.h"
++#include "MediaPlayerPrivateFFmpegMSE.h"
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++#include "ContentType.h"
++#include "FFmpegMediaPolicy.h"
++#include "MediaPlayer.h"
++#include "MediaSourcePrivateClient.h"
++#include "MediaSourcePrivateFFmpeg.h"
++#include "VideoPlaybackQualityMetrics.h"
++#include <cstdarg>
++#include <time.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/TZoneMallocInlines.h>
++#include <wtf/text/StringToIntegerConversion.h>
++
++namespace WebCore {
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(MediaPlayerPrivateFFmpegMSE);
++
++static uint64_t monotonicMs()
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<uint64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
++}
++
++static bool envFlag(const char* name)
++{
++    const char* value = getenv(name);
++    return value && *value && atoi(value);
++}
++
++// One numbering with MediaPlayerPrivateFFmpeg's players would need a shared symbol; the MSE
++// players count from 1001, so that the two kinds of "id=" never collide in a log.
++static unsigned nextPlayerID()
++{
++    static std::atomic<unsigned> id { 1000 };
++    return ++id;
++}
++
++static std::atomic<unsigned> livePlayers { 0 };
++
++/* --- supported types ------------------------------------------------------------------------ */
++
++static const HashSet<String>& mimeTypeCache()
++{
++    static NeverDestroyed<HashSet<String>> cache = HashSet<String> { "video/mp4"_s, "audio/mp4"_s };
++    return cache;
++}
++
++// The level of an H.264 name: avc1.PPCCLL (hex) or the older avc1.<profile>.<level> (decimal);
++// nullopt: none given
++static std::optional<unsigned> h264Level(StringView codec)
++{
++    auto dot = codec.find('.');
++    if (dot == notFound)
++        return std::nullopt;
++    auto rest = codec.substring(dot + 1);
++    if (rest.length() == 6 && rest.containsOnly<isASCIIHexDigit>())
++        return parseInteger<unsigned>(rest.substring(4, 2), 16);
++    if (auto second = rest.find('.'); second != notFound)
++        return parseInteger<unsigned>(rest.substring(second + 1));
++    return std::nullopt;
++}
++
++// The level_idc of an HEVC name: hvc1.<profile>.<compatibility>.<tier><level>[.<constraints>]
++static std::optional<unsigned> hevcLevel(StringView codec)
++{
++    unsigned field = 0;
++    for (auto part : codec.split('.')) {
++        if (field++ == 3 && part.length() > 1 && (part[0] == 'L' || part[0] == 'H'))
++            return parseInteger<unsigned>(part.substring(1));
++    }
++    return std::nullopt;
++}
++
++static constexpr unsigned kH264Level31 = 31;   // 1280x720 30 fps
++static constexpr unsigned kH264Level42 = 42;   // 1920x1080 60 fps
++static constexpr unsigned kHEVCLevel41 = 123;  // level_idc = 30 x level: 4.1, 1920x1080 60 fps
++
++// IsSupported or IsNotSupported for one RFC 6381 name in `container`; `reason` says why not
++static bool codecPlays(StringView codec, bool videoContainer, const ContentType& type, const char*& reason)
++{
++    using namespace FFmpegMediaPolicy;
++    auto kind = classifyCodec(codec.utf8().data());
++    unsigned width = parseInteger<unsigned>(type.parameter("width"_s)).value_or(0);
++    unsigned height = parseInteger<unsigned>(type.parameter("height"_s)).value_or(0);
++    double framerate = type.parameter("framerate"_s).toDouble();
++    switch (kind) {
++    case CodecKind::H264: {
++        if (!videoContainer) {
++            reason = "video-in-audio";
++            return false;
++        }
++        bool full = envFlag("WPE_PHOENIX_MSE_H264_1080");
++        auto level = h264Level(codec);
++        if (level && *level > (full ? kH264Level42 : kH264Level31)) {
++            reason = "h264-level";
++            return false;
++        }
++        unsigned maxWidth = full ? 1920 : 1280, maxHeight = full ? 1080 : 720;
++        if (std::max(width, height) > maxWidth || std::min(width, height) > maxHeight || framerate > 30) {
++            reason = "h264-size";
++            return false;
++        }
++        return true;
++    }
++    case CodecKind::HEVCMain:
++    case CodecKind::HEVCMain10: {
++        if (!videoContainer) {
++            reason = "video-in-audio";
++            return false;
++        }
++        bool large = envFlag("WPE_PHOENIX_MSE_HEVC_4K");
++        auto level = hevcLevel(codec);
++        if (!large && level && *level > kHEVCLevel41) {
++            reason = "hevc-level";
++            return false;
++        }
++        if (!large && (std::max(width, height) > 1920 || std::min(width, height) > 1088 || framerate > 60)) {
++            reason = "hevc-size";
++            return false;
++        }
++        return true;
++    }
++    case CodecKind::AAC:
++    case CodecKind::MP3:
++    case CodecKind::Opus:
++    case CodecKind::AC3:
++    case CodecKind::EAC3:
++    case CodecKind::FLAC:
++        return true;
++    default:
++        // VP8/VP9 (WebM, stage 2), AV1 (no decoder), Dolby Vision (no HDR), MPEG-4 Part 2, ...
++        reason = "codec";
++        return false;
++    }
++}
++
++static MediaPlayer::SupportsType answerSupportsType(const MediaEngineSupportParameters& parameters, const char*& reason)
++{
++    if (envFlag("WPE_PHOENIX_MEDIA_DISABLE")) {
++        reason = "disabled";
++        return MediaPlayer::SupportsType::IsNotSupported;
++    }
++    if (parameters.platformType != PlatformMediaDecodingType::MediaSource) {
++        reason = "not-mse";
++        return MediaPlayer::SupportsType::IsNotSupported;
++    }
++    auto container = parameters.type.containerType().convertToASCIILowercase();
++    // the engine choice for a MediaSource load: its blob: URL has no type (the SourceBuffers' types
++    // are asked for one by one)
++    if (container.isEmpty())
++        return MediaPlayer::SupportsType::MayBeSupported;
++    if (!mimeTypeCache().contains(container)) {
++        reason = "container";
++        return MediaPlayer::SupportsType::IsNotSupported;
++    }
++    auto codecs = parameters.type.codecs();
++    if (codecs.isEmpty())
++        return MediaPlayer::SupportsType::MayBeSupported;
++    bool videoContainer = container == "video/mp4"_s;
++    for (auto& codec : codecs) {
++        if (!codecPlays(codec, videoContainer, parameters.type, reason))
++            return MediaPlayer::SupportsType::IsNotSupported;
++    }
++    return MediaPlayer::SupportsType::IsSupported;
++}
++
++void MediaPlayerPrivateFFmpegMSE::getSupportedTypes(HashSet<String>& types)
++{
++    types = mimeTypeCache();
++}
++
++MediaPlayer::SupportsType MediaPlayerPrivateFFmpegMSE::supportsType(const MediaEngineSupportParameters& parameters)
++{
++    const char* reason = "";
++    auto answer = answerSupportsType(parameters, reason);
++    // MediaSource.isTypeSupported(), addSourceBuffer(), changeType(); MediaSource caches the
++    // first two per type. The first 200 per process.
++    static std::atomic<unsigned> logged { 0 };
++    if (parameters.platformType == PlatformMediaDecodingType::MediaSource && logged++ < 200) {
++        fprintf(stderr, "WPEB-MEDIA mono=%llu canplaytype type=%s platform=media-source answer=%s engine=mse%s%s\n",
++            static_cast<unsigned long long>(monotonicMs()), parameters.type.raw().utf8().data(),
++            answer == MediaPlayer::SupportsType::IsSupported ? "probably" : answer == MediaPlayer::SupportsType::MayBeSupported ? "maybe" : "",
++            *reason ? " reason=" : "", reason);
++    }
++    return answer;
++}
++
++class MediaPlayerFactoryFFmpegMSE final : public MediaPlayerFactory {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(MediaPlayerFactoryFFmpegMSE);
++    WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(MediaPlayerFactoryFFmpegMSE);
++private:
++    MediaPlayerEnums::MediaEngineIdentifier identifier() const final { return MediaPlayerEnums::MediaEngineIdentifier::FFmpegMSE; }
++    Ref<MediaPlayerPrivateInterface> createMediaEnginePlayer(MediaPlayer& player) const final { return adoptRef(*new MediaPlayerPrivateFFmpegMSE(player)); }
++    void getSupportedTypes(HashSet<String>& types) const final { MediaPlayerPrivateFFmpegMSE::getSupportedTypes(types); }
++    MediaPlayer::SupportsType supportsTypeAndCodecs(const MediaEngineSupportParameters& parameters) const final { return MediaPlayerPrivateFFmpegMSE::supportsType(parameters); }
++};
++
++void MediaPlayerPrivateFFmpegMSE::registerMediaEngine(MediaEngineRegistrar registrar)
++{
++    registrar(makeUnique<MediaPlayerFactoryFFmpegMSE>());
++}
++
++/* --- the player ----------------------------------------------------------------------------- */
++
++MediaPlayerPrivateFFmpegMSE::MediaPlayerPrivateFFmpegMSE(MediaPlayer& player)
++    : m_player(player)
++    , m_id(nextPlayerID())
++    , m_engine(FFmpegPlaybackEngine::create(m_id, [weakThis = ThreadSafeWeakPtr { *this }](FFmpegPlaybackEngine::Event event, double value) {
++        if (RefPtr protectedThis = weakThis.get())
++            protectedThis->engineEvent(event, value);
++    }))
++    , m_statTimer(RunLoop::mainSingleton(), "MediaPlayerPrivateFFmpegMSE::StatTimer"_s, this, &MediaPlayerPrivateFFmpegMSE::statTimerFired)
++{
++    livePlayers++;
++}
++
++MediaPlayerPrivateFFmpegMSE::~MediaPlayerPrivateFFmpegMSE()
++{
++    m_statTimer.stop();
++    m_engine->stop();
++    if (auto seekPromise = std::exchange(m_seekPromise, std::nullopt))
++        seekPromise->reject(PlatformMediaError::Cancelled);
++    livePlayers--;
++}
++
++void MediaPlayerPrivateFFmpegMSE::log(const char* format, ...) const
++{
++    char line[512];
++    va_list args;
++    va_start(args, format);
++    vsnprintf(line, sizeof(line), format, args);
++    va_end(args);
++    fprintf(stderr, "WPEB-MEDIA mono=%llu id=%u %s\n", static_cast<unsigned long long>(monotonicMs()), m_id, line);
++}
++
++#if !RELEASE_LOG_DISABLED
++const Logger& MediaPlayerPrivateFFmpegMSE::mediaPlayerLogger() const
++{
++    return protect(m_player.get())->mediaPlayerLogger();
++}
++
++uint64_t MediaPlayerPrivateFFmpegMSE::mediaPlayerLogIdentifier() const
++{
++    RefPtr player = m_player.get();
++    return player ? player->mediaPlayerLogIdentifier() : 0;
++}
++#endif
++
++void MediaPlayerPrivateFFmpegMSE::load(const String&)
++{
++    // only MediaSource loads come here (supportsType answers for MediaSource only)
++    setNetworkState(MediaPlayer::NetworkState::FormatError);
++}
++
++void MediaPlayerPrivateFFmpegMSE::load(const URL&, const LoadOptions&, MediaSourcePrivateClient& client)
++{
++    if (m_mediaSourcePrivate) {
++        // MediaPlayer chose this engine again for another MediaSource: from the start
++        m_engine->stop();
++        m_hasPlayed = false;
++        m_paused = true;
++        m_firstFrameShown = false;
++        m_naturalSize = { };
++        Locker locker { m_timeLock };
++        m_duration = MediaTime::invalidTime();
++        m_pendingSeekTime = std::nullopt;
++        m_ended = false;
++    }
++    if (auto seekPromise = std::exchange(m_seekPromise, std::nullopt))
++        seekPromise->reject(PlatformMediaError::Cancelled);
++    if (RefPtr mediaSourcePrivate = dynamicDowncast<MediaSourcePrivateFFmpeg>(client.mediaSourcePrivate())) {
++        // a MediaSource that was attached before (detached, then attached to this element)
++        mediaSourcePrivate->setPlayer(this);
++        m_mediaSourcePrivate = WTF::move(mediaSourcePrivate);
++        client.reOpen();
++    } else
++        m_mediaSourcePrivate = MediaSourcePrivateFFmpeg::create(*this, client);
++    log("mse load players=%u", livePlayers.load());
++    setNetworkState(MediaPlayer::NetworkState::Loading);
++    m_lastStatTime = MonotonicTime::now();
++    const char* period = getenv("WPE_PHOENIX_MEDIA_STAT_MS");
++    if (int ms = period && *period ? atoi(period) : 2000; ms > 0)
++        m_statTimer.startRepeating(Seconds::fromMilliseconds(ms));
++}
++
++#if ENABLE(MEDIA_STREAM)
++void MediaPlayerPrivateFFmpegMSE::load(MediaStreamPrivate&)
++{
++    setNetworkState(MediaPlayer::NetworkState::FormatError);
++}
++#endif
++
++void MediaPlayerPrivateFFmpegMSE::cancelLoad()
++{
++    m_statTimer.stop();
++    m_engine->stop();
++    setNetworkState(MediaPlayer::NetworkState::Empty);
++}
++
++void MediaPlayerPrivateFFmpegMSE::setNetworkState(MediaPlayer::NetworkState state)
++{
++    if (m_networkState == state)
++        return;
++    m_networkState = state;
++    if (RefPtr player = m_player.get())
++        player->networkStateChanged();
++}
++
++PlatformLayer* MediaPlayerPrivateFFmpegMSE::platformLayer() const
++{
++    return m_engine->platformLayer();
++}
++
++bool MediaPlayerPrivateFFmpegMSE::hasVideo() const
++{
++    return m_mediaSourcePrivate && m_mediaSourcePrivate->hasVideo();
++}
++
++bool MediaPlayerPrivateFFmpegMSE::hasAudio() const
++{
++    return m_mediaSourcePrivate && m_mediaSourcePrivate->hasAudio();
++}
++
++void MediaPlayerPrivateFFmpegMSE::play()
++{
++    if (!m_hasPlayed) {
++        m_hasPlayed = true;
++        // the decoders open with the first frames: a player that never plays holds none
++        m_engine->start();
++        if (m_mediaSourcePrivate)
++            m_mediaSourcePrivate->playerDidPlay();
++    }
++    if (!m_paused)
++        return;
++    m_paused = false;
++    m_engine->setPaused(false);
++    log("mse play clock=%.3f ready=%d", m_engine->currentTime(), static_cast<int>(readyState()));
++    if (RefPtr player = m_player.get())
++        player->playbackStateChanged();
++}
++
++void MediaPlayerPrivateFFmpegMSE::pause()
++{
++    if (m_paused)
++        return;
++    m_paused = true;
++    m_engine->setPaused(true);
++    log("mse pause clock=%.3f", m_engine->currentTime());
++    if (RefPtr player = m_player.get())
++        player->playbackStateChanged();
++}
++
++MediaTime MediaPlayerPrivateFFmpegMSE::duration() const
++{
++    Locker locker { m_timeLock };
++    return m_duration;
++}
++
++void MediaPlayerPrivateFFmpegMSE::durationChanged(const MediaTime& duration)
++{
++    {
++        Locker locker { m_timeLock };
++        if (m_duration == duration)
++            return;
++        m_duration = duration;
++    }
++    log("mse duration %.3f", duration.isFinite() ? duration.toDouble() : -1.0);
++    if (RefPtr player = m_player.get())
++        player->durationChanged();
++}
++
++MediaTime MediaPlayerPrivateFFmpegMSE::currentTime() const
++{
++    MediaTime duration;
++    {
++        Locker locker { m_timeLock };
++        if (m_pendingSeekTime)
++            return *m_pendingSeekTime;
++        if (m_ended && m_duration.isFinite())
++            return m_duration;
++        duration = m_duration;
++    }
++    MediaTime now = MediaTime::createWithDouble(std::max(0.0, m_engine->currentTime()));
++    return duration.isFinite() ? std::min(now, duration) : now;
++}
++
++bool MediaPlayerPrivateFFmpegMSE::timeIsProgressing() const
++{
++    return m_engine->isClockRunning();
++}
++
++MediaTime MediaPlayerPrivateFFmpegMSE::maxTimeSeekable() const
++{
++    auto duration = this->duration();
++    return duration.isFinite() ? duration : MediaTime::zeroTime();
++}
++
++// The MockMediaPlayerMediaSource pattern: wait until the MediaSource has the target, then
++// WebCore flushes and enqueues every track from the sync frame before it. The clock holds at the
++// target meanwhile and runs again from the first picture.
++Ref<MediaTimePromise> MediaPlayerPrivateFFmpegMSE::seekToTarget(const SeekTarget& target)
++{
++    if (auto previous = std::exchange(m_seekPromise, std::nullopt))
++        previous->reject(PlatformMediaError::Cancelled);
++    RefPtr mediaSourcePrivate = m_mediaSourcePrivate;
++    if (!mediaSourcePrivate)
++        return MediaTimePromise::createAndReject(PlatformMediaError::Cancelled);
++    unsigned generation = ++m_seekGeneration;
++    {
++        Locker locker { m_timeLock };
++        m_pendingSeekTime = target.time;
++        m_ended = false;
++    }
++    log("mse seek target=%.3f", target.time.toDouble());
++    m_engine->beginSeek(target.time.toDouble());
++    m_seekPromise.emplace(PlatformMediaError::Cancelled);
++    Ref promise = m_seekPromise->promise();
++    mediaSourcePrivate->waitForTarget(target)->whenSettled(RunLoop::mainSingleton(), [weakThis = ThreadSafeWeakPtr { *this }, generation](auto&& result) {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis || generation != protectedThis->m_seekGeneration)
++            return;
++        if (!result) {
++            protectedThis->log("mse seek failed");
++            {
++                Locker locker { protectedThis->m_timeLock };
++                protectedThis->m_pendingSeekTime = std::nullopt;
++            }
++            if (auto seekPromise = std::exchange(protectedThis->m_seekPromise, std::nullopt))
++                seekPromise->reject(result.error());
++            return;
++        }
++        MediaTime seekTime = *result;
++        protect(protectedThis->m_mediaSourcePrivate)->reenqueueMediaForTime(seekTime)->whenSettled(RunLoop::mainSingleton(), [weakThis, generation, seekTime](auto&& result) {
++            RefPtr protectedThis = weakThis.get();
++            if (!protectedThis || generation != protectedThis->m_seekGeneration || !result)
++                return;
++            {
++                Locker locker { protectedThis->m_timeLock };
++                protectedThis->m_pendingSeekTime = std::nullopt;
++            }
++            // every track's frames from the sync frame on are enqueued: the first picture may show
++            protectedThis->m_engine->endSeek(seekTime.toDouble());
++            protectedThis->log("seek done pts=%.3f", seekTime.toDouble());
++            if (auto seekPromise = std::exchange(protectedThis->m_seekPromise, std::nullopt))
++                seekPromise->resolve(seekTime);
++        });
++    });
++    return promise;
++}
++
++void MediaPlayerPrivateFFmpegMSE::setVolumeDouble(double volume)
++{
++    m_engine->setVolume(std::clamp(volume, 0.0, 1.0));
++}
++
++void MediaPlayerPrivateFFmpegMSE::setMuted(bool muted)
++{
++    m_engine->setMuted(muted);
++}
++
++MediaPlayer::ReadyState MediaPlayerPrivateFFmpegMSE::readyState() const
++{
++    return m_mediaSourcePrivate ? m_mediaSourcePrivate->mediaPlayerReadyState() : MediaPlayer::ReadyState::HaveNothing;
++}
++
++// WebCore's verdict on the buffered data: below HaveFutureData the clock waits (HTMLMediaElement
++// keeps a stalled element playing; 'waiting' fires) and resumes when data is back
++void MediaPlayerPrivateFFmpegMSE::readyStateFromMediaSourceChanged()
++{
++    auto state = readyState();
++    if (state != m_lastReadyState) {
++        log("mse ready-state %d -> %d clock=%.3f", static_cast<int>(m_lastReadyState), static_cast<int>(state), m_engine->currentTime());
++        m_lastReadyState = state;
++    }
++    m_engine->setWaitingForData(state < MediaPlayer::ReadyState::HaveFutureData);
++    if (RefPtr player = m_player.get())
++        player->readyStateChanged();
++}
++
++void MediaPlayerPrivateFFmpegMSE::characteristicsFromMediaSourceChanged()
++{
++    m_engine->setExpectsVideo(hasVideo());
++    if (RefPtr player = m_player.get())
++        player->characteristicChanged();
++}
++
++void MediaPlayerPrivateFFmpegMSE::mediaSourceHasRetrievedAllData()
++{
++    log("mse end-of-stream");
++    setNetworkState(MediaPlayer::NetworkState::Loaded);
++}
++
++void MediaPlayerPrivateFFmpegMSE::notifyActiveSourceBuffersChanged()
++{
++    if (RefPtr player = m_player.get())
++        player->activeSourceBuffersChanged();
++}
++
++void MediaPlayerPrivateFFmpegMSE::videoSizeChanged(FloatSize size)
++{
++    if (size.isEmpty() || size == m_naturalSize)
++        return;
++    log("mse size %.0fx%.0f -> %.0fx%.0f", m_naturalSize.width(), m_naturalSize.height(), size.width(), size.height());
++    m_naturalSize = size;
++    if (RefPtr player = m_player.get())
++        player->sizeChanged();
++}
++
++const PlatformTimeRanges& MediaPlayerPrivateFFmpegMSE::buffered() const
++{
++    m_buffered = m_mediaSourcePrivate ? m_mediaSourcePrivate->buffered() : PlatformTimeRanges();
++    return m_buffered;
++}
++
++bool MediaPlayerPrivateFFmpegMSE::didLoadingProgress() const
++{
++    auto buffered = m_mediaSourcePrivate ? m_mediaSourcePrivate->buffered() : PlatformTimeRanges();
++    bool progress = buffered != m_lastProgressBuffered;
++    m_lastProgressBuffered = WTF::move(buffered);
++    return progress;
++}
++
++std::optional<VideoPlaybackQualityMetrics> MediaPlayerPrivateFFmpegMSE::videoPlaybackQualityMetrics()
++{
++    auto counters = m_engine->counters();
++    return VideoPlaybackQualityMetrics {
++        static_cast<uint32_t>(counters.presented + counters.dropped),
++        static_cast<uint32_t>(counters.dropped),
++        0,
++        0,
++        static_cast<uint32_t>(counters.painted),
++    };
++}
++
++DestinationColorSpace MediaPlayerPrivateFFmpegMSE::colorSpace()
++{
++    return DestinationColorSpace::SRGB();
++}
++
++void MediaPlayerPrivateFFmpegMSE::engineEvent(FFmpegPlaybackEngine::Event event, double value)
++{
++    RefPtr player = m_player.get();
++    switch (event) {
++    case FFmpegPlaybackEngine::Event::FirstFrame:
++        if (!m_firstFrameShown && hasVideo() && player)
++            player->firstVideoFrameAvailable();
++        m_firstFrameShown = true;
++        break;
++    case FFmpegPlaybackEngine::Event::Ended:
++        {
++            Locker locker { m_timeLock };
++            m_ended = true;
++        }
++        // HTMLMediaElement sees currentTime == duration: 'ended' (or a seek to 0 for 'loop')
++        if (player)
++            player->timeChanged();
++        break;
++    case FFmpegPlaybackEngine::Event::SizeChanged:
++        videoSizeChanged(m_engine->naturalSize());
++        break;
++    case FFmpegPlaybackEngine::Event::DecodeError:
++        log("mse error decoder");
++        setNetworkState(MediaPlayer::NetworkState::DecodeError);
++        break;
++    case FFmpegPlaybackEngine::Event::Stalled:
++        log("mse stall %s clock=%.3f", value ? "start" : "end", m_engine->currentTime());
++        break;
++    }
++}
++
++void MediaPlayerPrivateFFmpegMSE::statTimerFired()
++{
++    auto now = MonotonicTime::now();
++    auto counters = m_engine->counters();
++    double seconds = (now - m_lastStatTime).seconds();
++    double fps = seconds > 0 ? (counters.presented - m_lastStatPresented) / seconds : 0;
++    m_lastStatPresented = counters.presented;
++    m_lastStatTime = now;
++    auto stats = m_mediaSourcePrivate ? m_mediaSourcePrivate->stats() : MediaSourcePrivateFFmpeg::Stats { };
++    log("stat clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu fps=%.1f av_ms=%d vq=%zu aq=%zu paused=%d hw=%s upload_ms=%.2f"
++        " ready=%d stalls=%u q_kb=%zu mse_sb=%u mse_kb=%llu mse_samples=%llu played=%d players=%u",
++        m_engine->currentTime(), static_cast<unsigned long long>(counters.decoded), static_cast<unsigned long long>(counters.presented),
++        static_cast<unsigned long long>(counters.painted), static_cast<unsigned long long>(counters.dropped), fps, counters.avDriftMs,
++        counters.videoPackets, counters.audioPackets, m_paused, counters.hardware < 0 ? "-" : counters.hardware ? "1" : "0",
++        counters.painted ? counters.uploadMicroseconds / 1000.0 / counters.painted : 0.0, static_cast<int>(readyState()), counters.stalls,
++        counters.queuedBytes / 1024, stats.sourceBuffers, static_cast<unsigned long long>(stats.bufferedBytes / 1024),
++        static_cast<unsigned long long>(stats.samples), m_hasPlayed, livePlayers.load());
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.h b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.h
+new file mode 100644
+index 00000000..2bba0154
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.h
+@@ -0,0 +1,185 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#pragma once
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++#include "FFmpegPlaybackEngine.h"
++#include "MediaPlayerPrivate.h"
++#include "PlatformLayer.h"
++#include "PlatformTimeRanges.h"
++#include <atomic>
++#include <wtf/Lock.h>
++#include <wtf/RunLoop.h>
++#include <wtf/TZoneMalloc.h>
++
++namespace WebCore {
++
++class MediaSourcePrivateFFmpeg;
++
++// The Media Source Extensions engine over FFmpeg's decoders (WPE on Phoenix-RTOS, USE_FFMPEG):
++// a separate engine from MediaPlayerPrivateFFmpeg (which plays URLs and native HLS), chosen by
++// MediaPlayer only for a MediaSource (platformType MediaSource).
++//
++//   MediaSourcePrivateFFmpeg    the MediaSource's platform side: SourceBuffers, duration
++//   SourceBufferPrivateFFmpeg   appendBuffer() -> FFmpegFMP4Parser (fragmented MP4) -> one
++//                               MediaSampleFFmpeg per coded frame; WebCore's TrackBuffers keep
++//                               them (coded frame processing, eviction, buffered ranges) and
++//                               enqueue them back in decode order
++//   FFmpegPlaybackEngine        the decoding threads, the clock, the picture and sound output
++//
++// What plays is what WebCore enqueues: a seek waits for the MediaSource to buffer the target
++// (waitForTarget), then WebCore flushes every track and enqueues from the sync frame before the
++// target (the frames before the target non-displaying: decoded, never shown). The readyState is
++// WebCore's (MediaSource::monitorSourceBuffers); the clock runs only from HaveFutureData on.
++// Duration, buffered and seekable are the MediaSource's. The decoders open at the first play():
++// a MediaSource player that never plays holds parsed samples only, no decoder and not the rpivid
++// block.
++//
++// The type answers steer adaptive players (hls.js, Shaka and dash.js choose renditions by
++// MediaSource.isTypeSupported()): fragmented MP4 only; HEVC Main and Main10 up to level 4.1
++// (1080p60: the rpivid block; WPE_PHOENIX_MSE_HEVC_4K=1 lifts it); H.264 up to level 3.1 (720p30,
++// the CPU's limit; WPE_PHOENIX_MSE_H264_1080=1: up to 4.2); AAC, MP3, Opus, AC-3, E-AC-3, FLAC.
++// No WebM, no MPEG-TS, no VP9, no AV1, no encrypted media. Width/height/framerate parameters
++// of a type are held to the same limits.
++//
++// Every event prints a "WPEB-MEDIA mono=<ms> id=<n> mse ..." line on stderr; the "stat" line
++// every WPE_PHOENIX_MEDIA_STAT_MS (default 2000, 0 off).
++class MediaPlayerPrivateFFmpegMSE final
++    : public MediaPlayerPrivateInterface
++    , public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<MediaPlayerPrivateFFmpegMSE, WTF::DestructionThread::Main> {
++    WTF_MAKE_TZONE_ALLOCATED(MediaPlayerPrivateFFmpegMSE);
++public:
++    explicit MediaPlayerPrivateFFmpegMSE(MediaPlayer&);
++    ~MediaPlayerPrivateFFmpegMSE();
++
++    void ref() const final { ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr::ref(); }
++    void deref() const final { ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr::deref(); }
++
++    constexpr MediaPlayerType mediaPlayerType() const final { return MediaPlayerType::FFmpegMSE; }
++
++    static void registerMediaEngine(MediaEngineRegistrar);
++    static void getSupportedTypes(HashSet<String>&);
++    static MediaPlayer::SupportsType supportsType(const MediaEngineSupportParameters&);
++
++    // for MediaSourcePrivateFFmpeg and SourceBufferPrivateFFmpeg (main thread)
++    unsigned playerID() const { return m_id; }
++    FFmpegPlaybackEngine& engine() const { return m_engine.get(); }
++    bool hasPlayed() const { return m_hasPlayed; }
++    void durationChanged(const MediaTime&);
++    void videoSizeChanged(FloatSize);
++    void notifyActiveSourceBuffersChanged() final;
++    void log(const char* format, ...) const WTF_ATTRIBUTE_PRINTF(2, 3);
++#if !RELEASE_LOG_DISABLED
++    const Logger& mediaPlayerLogger() const;
++    uint64_t mediaPlayerLogIdentifier() const;
++#endif
++
++private:
++    void load(const String&) final;
++    void load(const URL&, const LoadOptions&, MediaSourcePrivateClient&) final;
++#if ENABLE(MEDIA_STREAM)
++    void load(MediaStreamPrivate&) final;
++#endif
++    void cancelLoad() final;
++
++    void play() final;
++    void pause() final;
++    bool paused() const final { return m_paused; }
++
++    PlatformLayer* platformLayer() const final;
++    bool supportsAcceleratedRendering() const final { return true; }
++
++    FloatSize naturalSize() const final { return m_naturalSize; }
++    bool hasVideo() const final;
++    bool hasAudio() const final;
++
++    void setPageIsVisible(bool) final { }
++
++    MediaTime duration() const final;
++    MediaTime currentTime() const final;
++    bool timeIsProgressing() const final;
++    Ref<MediaTimePromise> seekToTarget(const SeekTarget&) final;
++    MediaTime maxTimeSeekable() const final;
++    double rate() const final { return 1; }
++
++    void setVolumeDouble(double) final;
++    void setMuted(bool) final;
++
++    MediaPlayer::NetworkState networkState() const final { return m_networkState; }
++    MediaPlayer::ReadyState readyState() const final;
++    const PlatformTimeRanges& buffered() const final;
++    bool didLoadingProgress() const final;
++
++    void readyStateFromMediaSourceChanged() final;
++    void characteristicsFromMediaSourceChanged() final;
++    void mediaSourceHasRetrievedAllData() final;
++    std::optional<VideoPlaybackQualityMetrics> videoPlaybackQualityMetrics() final;
++
++    void paint(GraphicsContext&, const FloatRect&) final { }
++    DestinationColorSpace colorSpace() final;
++    String engineDescription() const final { return "FFmpeg MSE"_s; }
++
++    void setNetworkState(MediaPlayer::NetworkState);
++    void engineEvent(FFmpegPlaybackEngine::Event, double);
++    void statTimerFired();
++
++    ThreadSafeWeakPtr<MediaPlayer> m_player;
++    const unsigned m_id;
++    const Ref<FFmpegPlaybackEngine> m_engine;
++    RefPtr<MediaSourcePrivateFFmpeg> m_mediaSourcePrivate;
++    RunLoop::Timer m_statTimer;
++
++    // main thread
++    MediaPlayer::NetworkState m_networkState { MediaPlayer::NetworkState::Empty };
++    MediaPlayer::ReadyState m_lastReadyState { MediaPlayer::ReadyState::HaveNothing };
++    FloatSize m_naturalSize;
++    bool m_paused { true };
++    bool m_hasPlayed { false };
++    bool m_firstFrameShown { false };
++    mutable PlatformTimeRanges m_buffered;
++    mutable PlatformTimeRanges m_lastProgressBuffered;
++    std::optional<MediaTimePromise::AutoRejectProducer> m_seekPromise;
++    // seeks requested so far: a seek completes only if no later one started
++    unsigned m_seekGeneration { 0 };
++    uint64_t m_lastStatPresented { 0 };
++    MonotonicTime m_lastStatTime;
++
++    // currentTime() and timeIsProgressing() are also called from the MediaSource's dispatcher
++    mutable Lock m_timeLock;
++    MediaTime m_duration WTF_GUARDED_BY_LOCK(m_timeLock) { MediaTime::invalidTime() };
++    std::optional<MediaTime> m_pendingSeekTime WTF_GUARDED_BY_LOCK(m_timeLock);
++    bool m_ended WTF_GUARDED_BY_LOCK(m_timeLock) { false };
++};
++
++} // namespace WebCore
++
++SPECIALIZE_TYPE_TRAITS_BEGIN(WebCore::MediaPlayerPrivateFFmpegMSE)
++static bool isType(const WebCore::MediaPlayerPrivateInterface& player) { return player.mediaPlayerType() == WebCore::MediaPlayerType::FFmpegMSE; }
++SPECIALIZE_TYPE_TRAITS_END()
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaSampleFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaSampleFFmpeg.cpp
+new file mode 100644
+index 00000000..286fc59d
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaSampleFFmpeg.cpp
+@@ -0,0 +1,121 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#include "config.h"
++#include "MediaSampleFFmpeg.h"
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++extern "C" {
++#include <libavcodec/packet.h>
++}
++
++namespace WebCore {
++
++Ref<MediaSampleFFmpeg> MediaSampleFFmpeg::create(AVPacket* packet, Ref<FFmpegCodecConfig>&& config, TrackID trackID, const MediaTime& presentationTime,
++    const MediaTime& decodeTime, const MediaTime& duration, bool isSync)
++{
++    return adoptRef(*new MediaSampleFFmpeg(packet, WTF::move(config), trackID, presentationTime, decodeTime, duration, isSync ? IsSync : None));
++}
++
++MediaSampleFFmpeg::MediaSampleFFmpeg(AVPacket* packet, Ref<FFmpegCodecConfig>&& config, TrackID trackID, const MediaTime& presentationTime,
++    const MediaTime& decodeTime, const MediaTime& duration, SampleFlags flags)
++    : m_packet(packet)
++    , m_config(WTF::move(config))
++    , m_trackID(trackID)
++    , m_presentationTime(presentationTime)
++    , m_decodeTime(decodeTime)
++    , m_duration(duration)
++    , m_flags(flags)
++{
++}
++
++MediaSampleFFmpeg::~MediaSampleFFmpeg()
++{
++    av_packet_free(&m_packet);
++}
++
++size_t MediaSampleFFmpeg::sizeInBytes() const
++{
++    return m_packet ? static_cast<size_t>(m_packet->size) : 0;
++}
++
++void MediaSampleFFmpeg::offsetTimestampsBy(const MediaTime& offset)
++{
++    m_presentationTime += offset;
++    m_decodeTime += offset;
++}
++
++void MediaSampleFFmpeg::setTimestamps(const MediaTime& presentationTime, const MediaTime& decodeTime)
++{
++    m_presentationTime = presentationTime;
++    m_decodeTime = decodeTime;
++}
++
++MediaSample::SampleFlags MediaSampleFFmpeg::flags() const
++{
++    return m_flags;
++}
++
++PlatformSample MediaSampleFFmpeg::platformSample() const
++{
++    return PlatformSample { static_cast<const AVPacket*>(m_packet) };
++}
++
++Ref<MediaSample> MediaSampleFFmpeg::createNonDisplayingCopy() const
++{
++    // the copy shares the payload (a packet reference)
++    return adoptRef(*new MediaSampleFFmpeg(av_packet_clone(m_packet), m_config.copyRef(), m_trackID, m_presentationTime, m_decodeTime, m_duration,
++        static_cast<SampleFlags>(m_flags | IsNonDisplaying)));
++}
++
++// Trimming at an append window edge: the times move forward by `offset`, the end stays
++Ref<MediaSample> MediaSampleFFmpeg::createCopyWithAdjustedStartTime(const MediaTime& offset) const
++{
++    MediaTime clamped = std::max(MediaTime::zeroTime(), std::min(offset, m_duration));
++    return adoptRef(*new MediaSampleFFmpeg(av_packet_clone(m_packet), m_config.copyRef(), m_trackID, m_presentationTime + clamped, m_decodeTime + clamped,
++        m_duration - clamped, m_flags));
++}
++
++AVPacket* MediaSampleFFmpeg::createPacket() const
++{
++    AVPacket* packet = av_packet_clone(m_packet);
++    if (!packet)
++        return nullptr;
++    packet->pts = m_presentationTime.toMicroseconds();
++    packet->dts = m_decodeTime.toMicroseconds();
++    packet->duration = m_duration.toMicroseconds();
++    packet->flags = 0;
++    if (m_flags & IsSync)
++        packet->flags |= AV_PKT_FLAG_KEY;
++    if (m_flags & IsNonDisplaying)
++        packet->flags |= AV_PKT_FLAG_DISCARD;
++    return packet;
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaSampleFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/MediaSampleFFmpeg.h
+new file mode 100644
+index 00000000..accac148
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaSampleFFmpeg.h
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#pragma once
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++#include "FFmpegPlaybackEngine.h"
++#include "MediaSample.h"
++
++struct AVPacket;
++
++namespace WebCore {
++
++// One coded frame of a SourceBuffer: its payload in an AVPacket (with FFmpeg's input padding;
++// copies of the sample share it), its times as rationals of the track's timescale, and the
++// decoder configuration of the initialization segment it came after.
++class MediaSampleFFmpeg final : public MediaSample {
++public:
++    // takes the packet
++    static Ref<MediaSampleFFmpeg> create(AVPacket*, Ref<FFmpegCodecConfig>&&, TrackID, const MediaTime& presentationTime, const MediaTime& decodeTime,
++        const MediaTime& duration, bool isSync);
++    virtual ~MediaSampleFFmpeg();
++
++    MediaTime presentationTime() const final { return m_presentationTime; }
++    MediaTime decodeTime() const final { return m_decodeTime; }
++    MediaTime duration() const final { return m_duration; }
++    TrackID trackID() const final { return m_trackID; }
++    size_t sizeInBytes() const final;
++    FloatSize presentationSize() const final { return m_config->size(); }
++    void offsetTimestampsBy(const MediaTime&) final;
++    void setTimestamps(const MediaTime& presentationTime, const MediaTime& decodeTime) final;
++    Ref<MediaSample> createNonDisplayingCopy() const final;
++    Ref<MediaSample> createCopyWithAdjustedStartTime(const MediaTime& offset) const final;
++    SampleFlags flags() const final;
++    PlatformSample platformSample() const final;
++    Type type() const final { return Type::FFmpegSample; }
++
++    FFmpegCodecConfig& config() const { return m_config.get(); }
++    // For the decoder: a new reference to the payload, pts/dts in microseconds, flagged as a key
++    // frame (sync) and, for a non-displaying sample, AV_PKT_FLAG_DISCARD
++    AVPacket* createPacket() const;
++
++private:
++    MediaSampleFFmpeg(AVPacket*, Ref<FFmpegCodecConfig>&&, TrackID, const MediaTime&, const MediaTime&, const MediaTime&, SampleFlags);
++
++    AVPacket* m_packet;
++    const Ref<FFmpegCodecConfig> m_config;
++    const TrackID m_trackID;
++    MediaTime m_presentationTime;
++    MediaTime m_decodeTime;
++    MediaTime m_duration;
++    SampleFlags m_flags;
++};
++
++} // namespace WebCore
++
++SPECIALIZE_TYPE_TRAITS_BEGIN(WebCore::MediaSampleFFmpeg)
++static bool isType(const WebCore::MediaSample& sample) { return sample.type() == WebCore::MediaSample::Type::FFmpegSample; }
++SPECIALIZE_TYPE_TRAITS_END()
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.cpp
+new file mode 100644
+index 00000000..8613eba5
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.cpp
+@@ -0,0 +1,162 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#include "config.h"
++#include "MediaSourcePrivateFFmpeg.h"
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++#include "ContentType.h"
++#include "MediaPlayerPrivateFFmpegMSE.h"
++#include "MediaSourcePrivateClient.h"
++#include "SourceBufferPrivateFFmpeg.h"
++
++namespace WebCore {
++
++Ref<MediaSourcePrivateFFmpeg> MediaSourcePrivateFFmpeg::create(MediaPlayerPrivateFFmpegMSE& player, MediaSourcePrivateClient& client)
++{
++    Ref source = adoptRef(*new MediaSourcePrivateFFmpeg(player, client));
++    client.setPrivateAndOpen(source.copyRef());
++    return source;
++}
++
++MediaSourcePrivateFFmpeg::MediaSourcePrivateFFmpeg(MediaPlayerPrivateFFmpegMSE& player, MediaSourcePrivateClient& client)
++    : MediaSourcePrivate(client)
++    , m_player(player)
++{
++#if !RELEASE_LOG_DISABLED
++    client.setLogIdentifier(player.mediaPlayerLogIdentifier());
++#endif
++}
++
++MediaSourcePrivateFFmpeg::~MediaSourcePrivateFFmpeg() = default;
++
++RefPtr<MediaPlayerPrivateInterface> MediaSourcePrivateFFmpeg::player() const
++{
++    return m_player.get();
++}
++
++void MediaSourcePrivateFFmpeg::setPlayer(MediaPlayerPrivateInterface* player)
++{
++    // a detached MediaSource attached to another element: a new engine, nothing plays from before
++    m_player = downcast<MediaPlayerPrivateFFmpegMSE>(player);
++    m_videoOwner = std::nullopt;
++    m_audioOwner = std::nullopt;
++}
++
++MediaSourcePrivate::AddStatus MediaSourcePrivateFFmpeg::addSourceBuffer(const ContentType& type, const MediaSourceConfiguration&, RefPtr<SourceBufferPrivate>& sourceBuffer)
++{
++    MediaEngineSupportParameters parameters {
++        .platformType = PlatformMediaDecodingType::MediaSource,
++        .type = type
++    };
++    bool supported = MediaPlayerPrivateFFmpegMSE::supportsType(parameters) != MediaPlayer::SupportsType::IsNotSupported;
++    RefPtr player = ffmpegPlayer();
++    if (player)
++        player->log("mse addsourcebuffer type=%s supported=%d", type.raw().utf8().data(), supported);
++    if (!supported)
++        return AddStatus::NotSupported;
++    {
++        Locker locker { m_lock };
++        m_sourceBuffers.append(SourceBufferPrivateFFmpeg::create(*this, type));
++        sourceBuffer = m_sourceBuffers.last();
++    }
++    sourceBuffer->setMediaSourceDuration(duration());
++    return AddStatus::Ok;
++}
++
++void MediaSourcePrivateFFmpeg::removeSourceBuffer(SourceBufferPrivate& sourceBuffer)
++{
++    for (auto* owner : { &m_videoOwner, &m_audioOwner }) {
++        if (*owner && (*owner)->sourceBuffer == &sourceBuffer)
++            *owner = std::nullopt;
++    }
++    MediaSourcePrivate::removeSourceBuffer(sourceBuffer);
++}
++
++void MediaSourcePrivateFFmpeg::durationChanged(const MediaTime& duration)
++{
++    MediaSourcePrivate::durationChanged(duration);
++    ensureOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, duration] {
++        RefPtr protectedThis = weakThis.get();
++        if (!protectedThis)
++            return;
++        if (RefPtr player = protectedThis->ffmpegPlayer())
++            player->durationChanged(duration);
++    });
++}
++
++void MediaSourcePrivateFFmpeg::notifyActiveSourceBuffersChanged()
++{
++    if (RefPtr player = ffmpegPlayer())
++        player->notifyActiveSourceBuffersChanged();
++}
++
++bool MediaSourcePrivateFFmpeg::claimEngineTrack(FFmpegPlaybackEngine::Track track, const SourceBufferPrivateFFmpeg& sourceBuffer, TrackID trackID)
++{
++    auto& owner = track == FFmpegPlaybackEngine::Track::Video ? m_videoOwner : m_audioOwner;
++    if (!owner) {
++        owner = Owner { &sourceBuffer, trackID };
++        if (RefPtr player = ffmpegPlayer())
++            player->log("mse plays %s track=%llu", track == FFmpegPlaybackEngine::Track::Video ? "video" : "audio", static_cast<unsigned long long>(trackID));
++    }
++    return owner->sourceBuffer == &sourceBuffer && owner->track == trackID;
++}
++
++void MediaSourcePrivateFFmpeg::sourceBufferTracksChanged(const SourceBufferPrivateFFmpeg& sourceBuffer, std::optional<TrackID> video, std::optional<TrackID> audio)
++{
++    // a new initialization segment of a SourceBuffer that plays: its track of that kind (WebCore
++    // renames the track buffer when the track ID changes)
++    for (auto [owner, track] : { std::pair { &m_videoOwner, video }, std::pair { &m_audioOwner, audio } }) {
++        if (!*owner || (*owner)->sourceBuffer != &sourceBuffer)
++            continue;
++        if (track)
++            (*owner)->track = *track;
++        else
++            *owner = std::nullopt;
++    }
++}
++
++void MediaSourcePrivateFFmpeg::playerDidPlay()
++{
++    for (Ref sourceBuffer : sourceBuffers())
++        downcast<SourceBufferPrivateFFmpeg>(sourceBuffer.get()).updateMaximumBufferSize();
++}
++
++auto MediaSourcePrivateFFmpeg::stats() const -> Stats
++{
++    Stats stats;
++    for (Ref sourceBuffer : sourceBuffers()) {
++        stats.sourceBuffers++;
++        stats.bufferedBytes += sourceBuffer->contentSize();
++        stats.samples += downcast<SourceBufferPrivateFFmpeg>(sourceBuffer.get()).samplesReceived();
++    }
++    return stats;
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.h
+new file mode 100644
+index 00000000..6869eadf
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.h
+@@ -0,0 +1,94 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#pragma once
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++#include "FFmpegPlaybackEngine.h"
++#include "MediaSourcePrivate.h"
++#include <wtf/LoggerHelper.h>
++
++namespace WebCore {
++
++class MediaPlayerPrivateFFmpegMSE;
++class SourceBufferPrivateFFmpeg;
++
++// The platform side of a MediaSource for MediaPlayerPrivateFFmpegMSE: creates the SourceBuffers
++// (fragmented MP4 of the types the engine answers for), passes the duration to the player, and
++// decides which SourceBuffer's track feeds the engine's one video and one audio input (the first
++// track of each kind; a second video track, in another SourceBuffer, is parsed and buffered but
++// not played).
++class MediaSourcePrivateFFmpeg final : public MediaSourcePrivate {
++public:
++    static Ref<MediaSourcePrivateFFmpeg> create(MediaPlayerPrivateFFmpegMSE&, MediaSourcePrivateClient&);
++    virtual ~MediaSourcePrivateFFmpeg();
++
++    constexpr MediaPlatformType platformType() const final { return MediaPlatformType::FFmpeg; }
++
++    RefPtr<MediaPlayerPrivateInterface> player() const final;
++    void setPlayer(MediaPlayerPrivateInterface*) final;
++    RefPtr<MediaPlayerPrivateFFmpegMSE> ffmpegPlayer() const { return m_player.get(); }
++
++    AddStatus addSourceBuffer(const ContentType&, const MediaSourceConfiguration&, RefPtr<SourceBufferPrivate>&) final;
++    void removeSourceBuffer(SourceBufferPrivate&) final;
++    void durationChanged(const MediaTime&) final;
++    void notifyActiveSourceBuffersChanged() final;
++
++    // main thread (the dispatcher): whether `trackID` of `sourceBuffer` is the one that plays
++    // `track`; the first to ask for a kind gets it
++    bool claimEngineTrack(FFmpegPlaybackEngine::Track, const SourceBufferPrivateFFmpeg&, TrackID);
++    // a SourceBuffer's new initialization segment: its first video and audio track
++    void sourceBufferTracksChanged(const SourceBufferPrivateFFmpeg&, std::optional<TrackID> video, std::optional<TrackID> audio);
++    // the player played: its SourceBuffers may hold more
++    void playerDidPlay();
++
++    struct Stats {
++        unsigned sourceBuffers { 0 };
++        uint64_t bufferedBytes { 0 };
++        uint64_t samples { 0 };
++    };
++    Stats stats() const;
++
++private:
++    MediaSourcePrivateFFmpeg(MediaPlayerPrivateFFmpegMSE&, MediaSourcePrivateClient&);
++
++    ThreadSafeWeakPtr<MediaPlayerPrivateFFmpegMSE> m_player;
++    struct Owner {
++        const SourceBufferPrivateFFmpeg* sourceBuffer { nullptr };
++        TrackID track { 0 };
++    };
++    std::optional<Owner> m_videoOwner;
++    std::optional<Owner> m_audioOwner;
++};
++
++} // namespace WebCore
++
++SPECIALIZE_TYPE_TRAITS_BEGIN(WebCore::MediaSourcePrivateFFmpeg)
++static bool isType(const WebCore::MediaSourcePrivate& mediaSource) { return mediaSource.platformType() == WebCore::MediaPlatformType::FFmpeg; }
++SPECIALIZE_TYPE_TRAITS_END()
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp
+index 9db20439..2146c6df 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp
++++ b/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp
+@@ -30,6 +30,9 @@
+ #include "ContentType.h"
+ #include "FFmpegMediaPolicy.h"
+ #include "MediaPlayerPrivateFFmpeg.h"
++#if ENABLE(MEDIA_SOURCE)
++#include "MediaPlayerPrivateFFmpegMSE.h"
++#endif
+ #include "PlatformMediaCapabilitiesDecodingInfo.h"
+ #include "PlatformMediaDecodingConfiguration.h"
+ #include <atomic>
+@@ -60,7 +63,11 @@ void createMediaPlayerDecodingConfigurationFFmpeg(PlatformMediaDecodingConfigura
+     MediaPlayerPrivateFFmpeg::getSupportedTypes(types);
+     bool typeSupported = configuration.type == PlatformMediaDecodingType::FileOrHLS;
+ #if ENABLE(MEDIA_SOURCE)
+-    typeSupported |= configuration.type == PlatformMediaDecodingType::MediaSource;
++    if (configuration.type == PlatformMediaDecodingType::MediaSource) {
++        // the MSE engine's containers (fragmented MP4), as MediaSource.isTypeSupported() answers
++        typeSupported = !types.isEmpty();
++        MediaPlayerPrivateFFmpegMSE::getSupportedTypes(types);
++    }
+ #endif
+     FFmpegMediaPolicy::Capability result { typeSupported && !types.isEmpty() && (configuration.video || configuration.audio), true, true };
+     auto combine = [&](FFmpegMediaPolicy::Capability capability) {
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.cpp
+new file mode 100644
+index 00000000..ab63317d
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.cpp
+@@ -0,0 +1,407 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#include "config.h"
++#include "SourceBufferPrivateFFmpeg.h"
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++#include "AudioTrackPrivate.h"
++#include "ContentType.h"
++#include "Logging.h"
++#include "MediaDescription.h"
++#include "MediaPlayerPrivateFFmpegMSE.h"
++#include "MediaSampleFFmpeg.h"
++#include "MediaSourcePrivateFFmpeg.h"
++#include "SharedBuffer.h"
++#include "SourceBufferPrivateClient.h"
++#include "VideoTrackPrivate.h"
++#include <wtf/TZoneMallocInlines.h>
++
++extern "C" {
++#include <libavcodec/avcodec.h>
++#include <libavutil/channel_layout.h>
++#include <libavutil/mem.h>
++}
++
++namespace WebCore {
++
++/* --- what an initialization segment reports -------------------------------------------------- */
++
++class FFmpegMediaDescription final : public MediaDescription {
++public:
++    static Ref<FFmpegMediaDescription> create(const FFmpegCodecConfig& config) { return adoptRef(*new FFmpegMediaDescription(config)); }
++
++    bool isVideo() const final { return m_isVideo; }
++    bool isAudio() const final { return !m_isVideo; }
++    bool isText() const final { return false; }
++
++private:
++    explicit FFmpegMediaDescription(const FFmpegCodecConfig& config)
++        : MediaDescription(config.codec().isolatedCopy())
++        , m_isVideo(config.isVideo())
++    {
++    }
++    const bool m_isVideo;
++};
++
++class FFmpegVideoTrackPrivate final : public VideoTrackPrivate {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(FFmpegVideoTrackPrivate);
++public:
++    static Ref<FFmpegVideoTrackPrivate> create(TrackID id, String&& language) { return adoptRef(*new FFmpegVideoTrackPrivate(id, WTF::move(language))); }
++    TrackID id() const final { return m_id; }
++    String language() const final { return m_language; }
++    Kind kind() const final { return Kind::Main; }
++
++private:
++    FFmpegVideoTrackPrivate(TrackID id, String&& language)
++        : m_id(id)
++        , m_language(WTF::move(language))
++    {
++    }
++    const TrackID m_id;
++    const String m_language;
++};
++
++class FFmpegAudioTrackPrivate final : public AudioTrackPrivate {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(FFmpegAudioTrackPrivate);
++public:
++    static Ref<FFmpegAudioTrackPrivate> create(TrackID id, String&& language) { return adoptRef(*new FFmpegAudioTrackPrivate(id, WTF::move(language))); }
++    TrackID id() const final { return m_id; }
++    String language() const final { return m_language; }
++    Kind kind() const final { return Kind::Main; }
++
++private:
++    FFmpegAudioTrackPrivate(TrackID id, String&& language)
++        : m_id(id)
++        , m_language(WTF::move(language))
++    {
++    }
++    const TrackID m_id;
++    const String m_language;
++};
++
++// The decoder parameters of a parsed track, as FFmpeg's mov demuxer fills them in
++static Ref<FFmpegCodecConfig> createCodecConfig(const FFmpegFMP4Parser::Track& track)
++{
++    AVCodecParameters* parameters = avcodec_parameters_alloc();
++    RELEASE_ASSERT(parameters);
++    const std::string& entry = track.sampleEntry;
++    bool video = track.kind == FFmpegFMP4Parser::TrackKind::Video;
++    parameters->codec_type = video ? AVMEDIA_TYPE_VIDEO : AVMEDIA_TYPE_AUDIO;
++    if (entry == "avc1" || entry == "avc3")
++        parameters->codec_id = AV_CODEC_ID_H264;
++    else if (entry == "hvc1" || entry == "hev1")
++        parameters->codec_id = AV_CODEC_ID_HEVC;
++    else if (entry == "vp09")
++        parameters->codec_id = AV_CODEC_ID_VP9;
++    else if (entry == "mp4v")
++        parameters->codec_id = AV_CODEC_ID_MPEG4;
++    else if (entry == "Opus")
++        parameters->codec_id = AV_CODEC_ID_OPUS;
++    else if (entry == "ac-3")
++        parameters->codec_id = AV_CODEC_ID_AC3;
++    else if (entry == "ec-3")
++        parameters->codec_id = AV_CODEC_ID_EAC3;
++    else if (entry == "fLaC")
++        parameters->codec_id = AV_CODEC_ID_FLAC;
++    else if (entry == "mp4a") {
++        // the esds object type (ISO/IEC 14496-1 Table 5, as the mp4 registration authority lists it)
++        switch (track.objectType) {
++        case 0x69:
++        case 0x6b:
++            parameters->codec_id = AV_CODEC_ID_MP3;
++            break;
++        case 0xa5:
++            parameters->codec_id = AV_CODEC_ID_AC3;
++            break;
++        case 0xa6:
++            parameters->codec_id = AV_CODEC_ID_EAC3;
++            break;
++        default:
++            parameters->codec_id = AV_CODEC_ID_AAC;
++            break;
++        }
++    }
++    if (!track.extradata.empty()) {
++        parameters->extradata = static_cast<uint8_t*>(av_mallocz(track.extradata.size() + AV_INPUT_BUFFER_PADDING_SIZE));
++        RELEASE_ASSERT(parameters->extradata);
++        memcpy(parameters->extradata, track.extradata.data(), track.extradata.size());
++        parameters->extradata_size = static_cast<int>(track.extradata.size());
++    }
++    if (video) {
++        parameters->width = static_cast<int>(track.width);
++        parameters->height = static_cast<int>(track.height);
++    } else {
++        parameters->sample_rate = static_cast<int>(track.sampleRate);
++        if (track.channels)
++            av_channel_layout_default(&parameters->ch_layout, static_cast<int>(track.channels));
++    }
++    return FFmpegCodecConfig::create(parameters, String::fromUTF8(track.codec.c_str()));
++}
++
++/* --- the SourceBuffer ----------------------------------------------------------------------- */
++
++static size_t megabytes(const char* name, int fallback)
++{
++    const char* value = getenv(name);
++    int number = value && *value ? atoi(value) : fallback;
++    return static_cast<size_t>(std::max(number, 1)) * 1024 * 1024;
++}
++
++Ref<SourceBufferPrivateFFmpeg> SourceBufferPrivateFFmpeg::create(MediaSourcePrivateFFmpeg& parent, const ContentType& type)
++{
++    return adoptRef(*new SourceBufferPrivateFFmpeg(parent, type));
++}
++
++SourceBufferPrivateFFmpeg::SourceBufferPrivateFFmpeg(MediaSourcePrivateFFmpeg& parent, const ContentType& type)
++    : SourceBufferPrivate(parent)
++    , m_type(type.raw())
++#if !RELEASE_LOG_DISABLED
++    , m_logger(parent.ffmpegPlayer()->mediaPlayerLogger())
++    , m_logIdentifier(childLogIdentifier(parent.ffmpegPlayer()->mediaPlayerLogIdentifier(), reinterpret_cast<uint64_t>(this)))
++#endif
++{
++}
++
++SourceBufferPrivateFFmpeg::~SourceBufferPrivateFFmpeg() = default;
++
++#if !RELEASE_LOG_DISABLED
++WTFLogChannel& SourceBufferPrivateFFmpeg::logChannel() const
++{
++    return LogMediaSource;
++}
++#endif
++
++RefPtr<MediaSourcePrivateFFmpeg> SourceBufferPrivateFFmpeg::mediaSourcePrivate() const
++{
++    return downcast<MediaSourcePrivateFFmpeg>(m_mediaSource.get());
++}
++
++RefPtr<MediaPlayerPrivateFFmpegMSE> SourceBufferPrivateFFmpeg::player() const
++{
++    RefPtr mediaSource = mediaSourcePrivate();
++    return mediaSource ? mediaSource->ffmpegPlayer() : nullptr;
++}
++
++class SourceBufferPrivateFFmpeg::ParserClient final : public FFmpegFMP4Parser::Client {
++public:
++    explicit ParserClient(SourceBufferPrivateFFmpeg& sourceBuffer)
++        : m_sourceBuffer(sourceBuffer)
++    {
++    }
++    void didParseInitSegment(const FFmpegFMP4Parser::InitSegment& init) final { m_sourceBuffer.didParseInitSegment(init); }
++    void didParseSample(const FFmpegFMP4Parser::Track& track, const FFmpegFMP4Parser::Sample& sample, const uint8_t* data) final
++    {
++        m_sourceBuffer.didParseSample(track, sample, data);
++    }
++
++private:
++    SourceBufferPrivateFFmpeg& m_sourceBuffer;
++};
++
++Ref<MediaPromise> SourceBufferPrivateFFmpeg::appendInternal(Ref<SharedBuffer>&& buffer)
++{
++    RefPtr player = this->player();
++    auto data = buffer->span();
++    ParserClient client(*this);
++    m_appendSamples = 0;
++    bool parsed = m_parser.append(data.data(), data.size(), client);
++    if (!parsed) {
++        if (player)
++            player->log("mse append-error bytes=%zu reason=%s", data.size(), m_parser.error().c_str());
++        return MediaPromise::createAndReject(PlatformMediaError::ParsingError);
++    }
++    if (player)
++        player->log("mse append bytes=%zu samples=%u pending=%zu buffered_kb=%llu", data.size(), m_appendSamples, m_parser.pendingBytes(),
++            static_cast<unsigned long long>(contentSize() / 1024));
++    return MediaPromise::createAndResolve();
++}
++
++void SourceBufferPrivateFFmpeg::resetParserStateInternal()
++{
++    if (RefPtr player = this->player())
++        player->log("mse reset-parser pending=%zu", m_parser.pendingBytes());
++    m_parser.reset();
++}
++
++bool SourceBufferPrivateFFmpeg::canSwitchToType(const ContentType& type)
++{
++    MediaEngineSupportParameters parameters {
++        .platformType = PlatformMediaDecodingType::MediaSource,
++        .type = type
++    };
++    bool supported = MediaPlayerPrivateFFmpegMSE::supportsType(parameters) != MediaPlayer::SupportsType::IsNotSupported;
++    if (RefPtr player = this->player())
++        player->log("mse changetype from=%s to=%s supported=%d", m_type.utf8().data(), type.raw().utf8().data(), supported);
++    if (supported)
++        m_type = type.raw();
++    return supported;
++}
++
++void SourceBufferPrivateFFmpeg::didParseInitSegment(const FFmpegFMP4Parser::InitSegment& init)
++{
++    InitializationSegment segment;
++    segment.duration = init.duration && init.movieTimescale ? MediaTime(static_cast<int64_t>(init.duration), init.movieTimescale) : MediaTime::invalidTime();
++    m_configs.clear();
++    m_hasVideo = false;
++    String videoCodec = "none"_s, audioCodec = "none"_s;
++    FloatSize size;
++    std::optional<TrackID> firstVideo, firstAudio;
++    for (auto& track : init.tracks) {
++        TrackID id = track.id;
++        Ref config = createCodecConfig(track);
++        String language = String::fromUTF8(track.language.c_str());
++        if (track.kind == FFmpegFMP4Parser::TrackKind::Video) {
++            segment.videoTracks.append({ FFmpegMediaDescription::create(config), FFmpegVideoTrackPrivate::create(id, WTF::move(language)) });
++            if (!m_hasVideo) {
++                videoCodec = String::fromLatin1(avcodec_get_name(config->parameters().codec_id));
++                size = config->size();
++                firstVideo = id;
++            }
++            m_hasVideo = true;
++        } else {
++            segment.audioTracks.append({ FFmpegMediaDescription::create(config), FFmpegAudioTrackPrivate::create(id, WTF::move(language)) });
++            if (!firstAudio) {
++                audioCodec = String::fromLatin1(avcodec_get_name(config->parameters().codec_id));
++                firstAudio = id;
++            }
++        }
++        m_configs.set(id, WTF::move(config));
++    }
++    if (RefPtr mediaSource = mediaSourcePrivate())
++        mediaSource->sourceBufferTracksChanged(*this, firstVideo, firstAudio);
++    RefPtr player = this->player();
++    if (player) {
++        player->log("mse init tracks=%zu video=%s %.0fx%.0f audio=%s generation=%u duration=%.3f", init.tracks.size(), videoCodec.utf8().data(),
++            size.width(), size.height(), audioCodec.utf8().data(), init.generation, segment.duration.isValid() ? segment.duration.toDouble() : -1.0);
++        for (auto& track : init.tracks) {
++            player->log("mse track id=%u kind=%s codec=%s timescale=%u edit=%lld%s", track.id, track.kind == FFmpegFMP4Parser::TrackKind::Video ? "video" : "audio",
++                track.codec.c_str(), track.timescale, static_cast<long long>(track.editOffset), track.editListIgnored ? " (edit list not applied)" : "");
++        }
++        if (m_hasVideo)
++            player->videoSizeChanged(size);
++    }
++    SourceBufferPrivate::didReceiveInitializationSegment(WTF::move(segment));
++}
++
++void SourceBufferPrivateFFmpeg::didParseSample(const FFmpegFMP4Parser::Track& track, const FFmpegFMP4Parser::Sample& sample, const uint8_t* data)
++{
++    auto config = m_configs.find(static_cast<TrackID>(track.id));
++    if (config == m_configs.end())
++        return;
++    // a copy with FFmpeg's input padding: decoders read a little past the end
++    AVPacket* packet = av_packet_alloc();
++    if (!packet || av_new_packet(packet, static_cast<int>(sample.size)) < 0) {
++        av_packet_free(&packet);
++        return;
++    }
++    memcpy(packet->data, data, sample.size);
++    m_appendSamples++;
++    m_samplesReceived++;
++    SourceBufferPrivate::didReceiveSample(MediaSampleFFmpeg::create(packet, config->value.copyRef(), track.id,
++        MediaTime(sample.presentationTime, track.timescale), MediaTime(sample.decodeTime, track.timescale), MediaTime(sample.duration, track.timescale),
++        sample.isSync));
++}
++
++std::optional<FFmpegPlaybackEngine::Track> SourceBufferPrivateFFmpeg::engineTrack(TrackID trackID)
++{
++    auto config = m_configs.find(trackID);
++    if (config == m_configs.end())
++        return std::nullopt;
++    auto track = config->value->isVideo() ? FFmpegPlaybackEngine::Track::Video : FFmpegPlaybackEngine::Track::Audio;
++    RefPtr mediaSource = mediaSourcePrivate();
++    if (!mediaSource || !mediaSource->claimEngineTrack(track, *this, trackID))
++        return std::nullopt;
++    return track;
++}
++
++void SourceBufferPrivateFFmpeg::flush(TrackID trackID)
++{
++    RefPtr player = this->player();
++    if (auto track = engineTrack(trackID); track && player)
++        player->engine().flush(*track);
++}
++
++void SourceBufferPrivateFFmpeg::enqueueSample(Ref<MediaSample>&& sample, TrackID trackID)
++{
++    RefPtr player = this->player();
++    auto track = engineTrack(trackID);
++    if (!player || !track || !is<MediaSampleFFmpeg>(sample.get()))
++        return;
++    auto& ffmpegSample = downcast<MediaSampleFFmpeg>(sample.get());
++    if (AVPacket* packet = ffmpegSample.createPacket())
++        player->engine().enqueue(*track, packet, ffmpegSample.config(), ffmpegSample.duration().toDouble());
++}
++
++void SourceBufferPrivateFFmpeg::allSamplesInTrackEnqueued(TrackID trackID)
++{
++    RefPtr player = this->player();
++    if (auto track = engineTrack(trackID); track && player) {
++        player->log("mse track-ended id=%llu", static_cast<unsigned long long>(trackID));
++        player->engine().setEnded(*track);
++    }
++}
++
++bool SourceBufferPrivateFFmpeg::isReadyForMoreSamples(TrackID trackID)
++{
++    RefPtr player = this->player();
++    auto track = engineTrack(trackID);
++    // a track that does not play takes everything (and drops it)
++    return !player || !track || player->engine().isReadyForMore(*track);
++}
++
++void SourceBufferPrivateFFmpeg::notifyClientWhenReadyForMoreSamples(TrackID trackID)
++{
++    RefPtr player = this->player();
++    auto track = engineTrack(trackID);
++    if (!player || !track)
++        return;
++    player->engine().notifyWhenReadyForMore(*track, [weakThis = ThreadSafeWeakPtr { *this }, trackID] {
++        if (RefPtr protectedThis = weakThis.get())
++            protectedThis->provideMediaData(trackID);
++    });
++}
++
++size_t SourceBufferPrivateFFmpeg::platformMaximumBufferSize() const
++{
++    RefPtr player = this->player();
++    bool played = player && player->hasPlayed();
++    // before the first initialization segment: as a video SourceBuffer
++    bool video = m_hasVideo || m_configs.isEmpty();
++    if (played)
++        return video ? megabytes("WPE_PHOENIX_MSE_MAX_MB", 40) : 8 * 1024 * 1024;
++    return video ? megabytes("WPE_PHOENIX_MSE_IDLE_MAX_MB", 8) : 2 * 1024 * 1024;
++}
++
++void SourceBufferPrivateFFmpeg::updateMaximumBufferSize()
++{
++    setMaximumBufferSize(platformMaximumBufferSize());
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.h
+new file mode 100644
+index 00000000..4d7b44b1
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.h
+@@ -0,0 +1,111 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++
++#pragma once
++
++#if ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
++
++#include "FFmpegFMP4Parser.h"
++#include "FFmpegPlaybackEngine.h"
++#include "SourceBufferPrivate.h"
++#include <wtf/HashMap.h>
++
++namespace WebCore {
++
++class MediaPlayerPrivateFFmpegMSE;
++class MediaSourcePrivateFFmpeg;
++
++// A SourceBuffer of MediaPlayerPrivateFFmpegMSE. appendBuffer() bytes go through
++// FFmpegFMP4Parser on the dispatcher (the main thread; parsing walks boxes, it decodes nothing),
++// which reports initialization segments and coded frames back to WebCore's SourceBufferPrivate;
++// the frames WebCore then enqueues go to the player's FFmpegPlaybackEngine.
++//
++// Buffer limit (WebCore evicts above it): 40 MB for a SourceBuffer with video
++// (WPE_PHOENIX_MSE_MAX_MB), 8 MB for audio only; 8 / 2 MB as long as the player has not
++// played (WPE_PHOENIX_MSE_IDLE_MAX_MB), as MediaPlayerPrivateFFmpeg's idle read-ahead.
++class SourceBufferPrivateFFmpeg final : public SourceBufferPrivate {
++public:
++    static Ref<SourceBufferPrivateFFmpeg> create(MediaSourcePrivateFFmpeg&, const ContentType&);
++    virtual ~SourceBufferPrivateFFmpeg();
++
++    constexpr MediaPlatformType platformType() const final { return MediaPlatformType::FFmpeg; }
++
++    // MediaSourcePrivateFFmpeg
++    void updateMaximumBufferSize();
++    uint64_t samplesReceived() const { return m_samplesReceived; }
++
++#if !RELEASE_LOG_DISABLED
++    const Logger& sourceBufferLogger() const final { return m_logger.get(); }
++    uint64_t sourceBufferLogIdentifier() final { return m_logIdentifier; }
++    const Logger& logger() const final { return m_logger.get(); }
++    ASCIILiteral logClassName() const final { return "SourceBufferPrivateFFmpeg"_s; }
++    uint64_t logIdentifier() const final { return m_logIdentifier; }
++    WTFLogChannel& logChannel() const final;
++#endif
++
++private:
++    SourceBufferPrivateFFmpeg(MediaSourcePrivateFFmpeg&, const ContentType&);
++
++    RefPtr<MediaSourcePrivateFFmpeg> mediaSourcePrivate() const;
++    RefPtr<MediaPlayerPrivateFFmpegMSE> player() const;
++    // the engine input that `trackID` feeds, if it is the track that plays its kind
++    std::optional<FFmpegPlaybackEngine::Track> engineTrack(TrackID);
++
++    // SourceBufferPrivate
++    Ref<MediaPromise> appendInternal(Ref<SharedBuffer>&&) final;
++    void resetParserStateInternal() final;
++    bool canSwitchToType(const ContentType&) final;
++    void flush(TrackID) final;
++    void enqueueSample(Ref<MediaSample>&&, TrackID) final;
++    void allSamplesInTrackEnqueued(TrackID) final;
++    bool isReadyForMoreSamples(TrackID) final;
++    void notifyClientWhenReadyForMoreSamples(TrackID) final;
++    size_t platformMaximumBufferSize() const final;
++
++    class ParserClient;
++    void didParseInitSegment(const FFmpegFMP4Parser::InitSegment&);
++    void didParseSample(const FFmpegFMP4Parser::Track&, const FFmpegFMP4Parser::Sample&, const uint8_t*);
++
++    FFmpegFMP4Parser m_parser;
++    String m_type;
++    // per track of the last initialization segment
++    HashMap<TrackID, Ref<FFmpegCodecConfig>> m_configs;
++    bool m_hasVideo { false };
++    unsigned m_appendSamples { 0 };
++    std::atomic<uint64_t> m_samplesReceived { 0 };
++#if !RELEASE_LOG_DISABLED
++    const Ref<const Logger> m_logger;
++    const uint64_t m_logIdentifier;
++#endif
++};
++
++} // namespace WebCore
++
++SPECIALIZE_TYPE_TRAITS_BEGIN(WebCore::SourceBufferPrivateFFmpeg)
++static bool isType(const WebCore::SourceBufferPrivate& sourceBuffer) { return sourceBuffer.platformType() == WebCore::MediaPlatformType::FFmpeg; }
++SPECIALIZE_TYPE_TRAITS_END()
++
++#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
+diff --git a/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in b/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
+index e52bd29c..56b3d365 100644
+--- a/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
++++ b/Source/WebKit/Shared/WebCoreArgumentCoders.serialization.in
+@@ -3092,7 +3092,8 @@ enum class WebCore::MediaPlayerMediaEngineIdentifier : uint8_t {
+     MockMSE,
+     CocoaWebM,
+     WirelessPlayback,
+-    FFmpeg
++    FFmpeg,
++    FFmpegMSE
+ };
+ 
+ enum class WebCore::MediaPlayerWirelessPlaybackTargetType : uint8_t {
+diff --git a/Source/WebKit/WebProcess/GPU/media/MediaPlayerPrivateRemote.cpp b/Source/WebKit/WebProcess/GPU/media/MediaPlayerPrivateRemote.cpp
+index 3f3520f8..55c0d577 100644
+--- a/Source/WebKit/WebProcess/GPU/media/MediaPlayerPrivateRemote.cpp
++++ b/Source/WebKit/WebProcess/GPU/media/MediaPlayerPrivateRemote.cpp
+@@ -1735,6 +1735,7 @@ bool MediaPlayerPrivateRemote::supportsLinearMediaPlayer() const
+     case MediaPlayerMediaEngineIdentifier::MockMSE:
+     case MediaPlayerMediaEngineIdentifier::WirelessPlayback:
+     case MediaPlayerMediaEngineIdentifier::FFmpeg:
++    case MediaPlayerMediaEngineIdentifier::FFmpegMSE:
+         return false;
+     }
+ 

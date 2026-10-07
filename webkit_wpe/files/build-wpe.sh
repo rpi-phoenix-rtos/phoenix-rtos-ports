@@ -43,6 +43,10 @@
 #                   of ../patches/webkit-video/0030, no GStreamer; a WEBKIT_SRC tree must carry that
 #                   patch); 0 (default): no media. Changing it rebuilds nearly all of WebKit, as
 #                   PHX_WPE_RELEASE_LOG
+#   PHX_WPE_MSE     1 (needs PHX_WPE_VIDEO=1): Media Source Extensions (ENABLE_MEDIA_SOURCE) through
+#                   the FFmpeg MSE engine of ../patches/webkit-mse/0032 (a WEBKIT_SRC tree must carry
+#                   it); 0 (default): no MSE. Changing it rebuilds nearly all of WebKit, as
+#                   PHX_WPE_RELEASE_LOG
 #   PHX_FFMPEG      with PHX_WPE_VIDEO=1: the FFmpeg libraries, a prefix with include/, lib/*.a and
 #                   lib/pkgconfig/ (the video_player port installs one as ffmpeg/: FFmpeg 6.1 with
 #                   the hevc_rpivid decoder)
@@ -77,6 +81,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 patches="$(cd "${here}/../patches/webkit" && pwd)"
 # applied only with PHX_WPE_VIDEO=1 (the port: USE video), after patches/webkit
 patches_video="${here}/../patches/webkit-video"
+# applied only with PHX_WPE_MSE=1 (the port: USE mse), after patches/webkit-video
+patches_mse="${here}/../patches/webkit-mse"
 out=""
 dl=""
 jobs=8
@@ -216,6 +222,7 @@ stage_extract() {
 	[ -z "${WEBKIT_SRC:-}" ] || { log "WEBKIT_SRC=${WEBKIT_SRC} (not extracted)"; return; }
 	local dir="${out}/src/webkit" stamp p list=("${patches}"/*.patch)
 	[ "${video}" = 0 ] || list+=("${patches_video}"/*.patch)
+	[ "${mse}" = 0 ] || list+=("${patches_mse}"/*.patch)
 	stamp="$( { pkg_field webkit 3; cat "${list[@]}"; } | sha256sum | cut -c1-16)"
 	if [ "$(cat "${dir}.stamp" 2>/dev/null || true)" = "${stamp}" ]; then
 		return
@@ -554,6 +561,14 @@ case "${video}" in 0 | 1) ;; *) echo "build-wpe.sh: PHX_WPE_VIDEO=${video}: 0 or
 if [ "${video}" = 1 ]; then
 	WPE_CMAKE_OPTS=("${WPE_CMAKE_OPTS[@]/-DENABLE_VIDEO=OFF/-DENABLE_VIDEO=ON}" -DUSE_FFMPEG=ON)
 fi
+# PHX_WPE_MSE=1: Media Source Extensions over the same FFmpeg libraries (patch 0032: an MSE engine,
+# a fragmented-MP4 parser); still no Web Audio, WebCodecs or encrypted media.
+mse="${PHX_WPE_MSE:-0}"
+case "${mse}" in 0 | 1) ;; *) echo "build-wpe.sh: PHX_WPE_MSE=${mse}: 0 or 1" >&2; exit 2 ;; esac
+[ "${mse}" = 0 ] || [ "${video}" = 1 ] || { echo "build-wpe.sh: PHX_WPE_MSE=1 needs PHX_WPE_VIDEO=1" >&2; exit 2; }
+if [ "${mse}" = 1 ]; then
+	WPE_CMAKE_OPTS=("${WPE_CMAKE_OPTS[@]/-DENABLE_MEDIA_SOURCE=OFF/-DENABLE_MEDIA_SOURCE=ON}")
+fi
 
 stage_configure() {
 	[ -n "${RUBY}" ] || stage_ruby
@@ -713,6 +728,16 @@ check_program() {
 		grep -qE ' [Tt] _ZN7WebCore16FFmpegHLSSession' <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no FFmpegHLSSession" >&2; exit 1; }
 		grep -qE ' [Tt] _ZN7WebCore44createMediaPlayerDecodingConfigurationFFmpeg' <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no MediaCapabilities factory" >&2; exit 1; }
 		grep -qF 'WPEB-MEDIA mono=%llu id=%u %s' < <(strings "${out}/wpe-browser") || { echo "build-wpe.sh: wpe-browser (video) lacks the WPEB-MEDIA log" >&2; exit 1; }
+		# Media Source Extensions (patch 0032): the MSE engine and its parser, and none of it without
+		if [ "${mse}" = 1 ]; then
+			for s in _ZN7WebCore27MediaPlayerPrivateFFmpegMSE _ZN7WebCore25SourceBufferPrivateFFmpeg _ZN7WebCore16FFmpegFMP4Parser; do
+				grep -qE " [Tt] ${s}" <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (mse) has no ${s}" >&2; exit 1; }
+			done
+			grep -qF 'mse append ' < <(strings "${out}/wpe-browser") || { echo "build-wpe.sh: wpe-browser (mse) lacks the 'mse append' log" >&2; exit 1; }
+		elif grep -qE ' [Tt] _ZN7WebCore27MediaPlayerPrivateFFmpegMSE' <<< "${syms}"; then
+			echo "build-wpe.sh: wpe-browser has the MSE engine in a build without PHX_WPE_MSE" >&2
+			exit 1
+		fi
 	elif grep -qE ' [Tt] _ZN7WebCore24MediaPlayerPrivateFFmpeg' <<< "${syms}"; then
 		echo "build-wpe.sh: wpe-browser has the FFmpeg media player in a build without PHX_WPE_VIDEO" >&2
 		exit 1

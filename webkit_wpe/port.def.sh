@@ -66,6 +66,12 @@
 	#                             MediaCapabilities.decodingInfo() answers (coordination repo
 	#                             docs/browser/MSE-DESIGN.md stage 0); needs video_player's hls
 	#                             demuxer and its files/hls hunks
+	#   patches/webkit-mse/0032   USE mse only (needs USE video): Media Source Extensions over the same
+	#                             FFmpeg decoders (ENABLE_MEDIA_SOURCE: an MSE engine, MediaSource and
+	#                             SourceBuffer backends, a fragmented-MP4 parser; type answers that
+	#                             steer adaptive players to HEVC and H.264 <= 720p; MSE-DESIGN.md
+	#                             stage 1). Kept apart from webkit-video: turning MSE on changes
+	#                             cmakeconfig.h, so a video build without it keeps its tree
 	#   files/build-wpe.sh        the build (also run by tools/browser/wpe/build.sh for scratch
 	#                             builds): host ruby if missing, a private dependency prefix,
 	#                             the libphoenix compat objects, CMake + ninja, the link checks
@@ -130,7 +136,10 @@
 	#      FFmpeg media player of patch 0030 (no GStreamer, no Media Source Extensions, no Web
 	#      Audio), sound on /dev/audio0. Off: no media, as before. Toggling it rebuilds nearly all
 	#      of WebKit (~2 h without ccache hits), as release_log.
-	iuse="rootfs checks jit release_log webgl video"
+	# mse: Media Source Extensions (needs video): ENABLE_MEDIA_SOURCE with patch 0032's FFmpeg MSE
+	#      engine (hls.js, dash.js, Shaka, video.js-VHS players; wpe-browser --mse=on|managed|off).
+	#      Off: native HLS and plain files only. Toggling it rebuilds nearly all of WebKit (~2 h).
+	iuse="rootfs checks jit release_log webgl video mse"
 
 	supports="phoenix>=3.3"
 }
@@ -168,6 +177,10 @@ p_prepare() {
 	if b_use video; then
 		b_port_apply_patches "${PREFIX_PORT_WORKDIR}" webkit-video
 	fi
+	if b_use mse; then
+		b_use video || b_die "webkit_wpe: USE mse needs USE video"
+		b_port_apply_patches "${PREFIX_PORT_WORKDIR}" webkit-mse
+	fi
 }
 
 p_build() {
@@ -195,7 +208,7 @@ p_build() {
 		PHX_WPE_JIT="$(b_use jit && echo 1 || echo 0)" \
 		PHX_WPE_RELEASE_LOG="$(b_use release_log && echo 1 || echo 0)" \
 		PHX_WPE_WEBGL="$(b_use webgl && echo 1 || echo 0)" \
-		PHX_WPE_VIDEO="${video}" PHX_FFMPEG="${ffmpeg}" \
+		PHX_WPE_VIDEO="${video}" PHX_FFMPEG="${ffmpeg}" PHX_WPE_MSE="$(b_use mse && echo 1 || echo 0)" \
 		"${F}/build-wpe.sh" --out "${out}" --dl "${PHOENIX_DISTFILES:-${HOME}/.phoenix-distfiles}/newlane" \
 		--src-copy -j 8 || b_die "webkit_wpe: build-wpe.sh failed"
 
@@ -233,6 +246,11 @@ p_build() {
 		for s in 'WPEB-MEDIA mono=%llu id=%u %s' 'rpivid: hardware HEVC decode' 'media autoplay=%s' 'hls choose i=%d rule=%s audio=%s' \
 			'canplaytype type=%s platform=%s answer=%s' 'capabilities type=%s codec=%s'; do
 			grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser (USE video) lacks '${s}'"; bad=1; }
+		done
+	fi
+	if b_use mse; then
+		for s in 'mse append bytes=%zu samples=%u' 'mse init tracks=%zu video=%s' 'media mse=%s managed=%s'; do
+			grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser (USE mse) lacks '${s}'"; bad=1; }
 		done
 	fi
 	"${TC}-readelf" -dW "${ST}/usr/lib/wpe-webkit-2.0/injected-bundle/libWPEInjectedBundle.so" | grep -q '(HASH)' ||

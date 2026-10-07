@@ -41,6 +41,10 @@
  *     --autoplay=POLICY     <video>/<audio> autoplay in a build with media (USE video): muted
  *                           (default, WebKit's: only without sound), allow, deny
  *                           (WPE_BROWSER_AUTOPLAY)
+ *     --mse=MODE            Media Source Extensions in a build with them (USE mse): on (default:
+ *                           MediaSource, as hls.js, dash.js and Shaka use it), managed (also
+ *                           ManagedMediaSource, which hls.js prefers when present), off (sites fall
+ *                           back to native HLS or plain files) (WPE_BROWSER_MSE)
  *     --stock-features      keep WebKit 2.54's defaults for the CSS features this program turns
  *                           on (see enableCSSFeatures(); WPE_BROWSER_STOCK_FEATURES=1)
  *     --memory-limit=MB     the web processes' memory pressure handler (WebKit's periodic monitor)
@@ -885,6 +889,9 @@ static double optMemoryPollSecs;
 #if ENABLE_VIDEO
 static char* optAutoplay;
 #endif
+#if ENABLE_MEDIA_SOURCE
+static char* optMSE;
+#endif
 static char** optURIs;
 
 static const GOptionEntry optionEntries[] = {
@@ -924,6 +931,9 @@ static const GOptionEntry optionEntries[] = {
 #if ENABLE_VIDEO
     { "autoplay", 0, 0, G_OPTION_ARG_STRING, &optAutoplay, "Media autoplay: muted (default), allow, deny", "POLICY" },
 #endif
+#if ENABLE_MEDIA_SOURCE
+    { "mse", 0, 0, G_OPTION_ARG_STRING, &optMSE, "Media Source Extensions: on (default), managed (also ManagedMediaSource), off", "MODE" },
+#endif
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_STRING_ARRAY, &optURIs, nullptr, "[URL|FILE|WORDS]" },
     { }
 };
@@ -946,6 +956,10 @@ static void optionsFromEnvironment()
 #if ENABLE_VIDEO
     if (!optAutoplay && g_getenv("WPE_BROWSER_AUTOPLAY"))
         optAutoplay = g_strdup(g_getenv("WPE_BROWSER_AUTOPLAY"));
+#endif
+#if ENABLE_MEDIA_SOURCE
+    if (!optMSE && g_getenv("WPE_BROWSER_MSE"))
+        optMSE = g_strdup(g_getenv("WPE_BROWSER_MSE"));
 #endif
     auto number = [](const char* name, int fallback) {
         const char* value = g_getenv(name);
@@ -2345,6 +2359,16 @@ static int uiMain(int argc, char** argv)
     }
     LOG("media autoplay=%s", autoplay);
 #endif
+#if ENABLE_MEDIA_SOURCE
+    /* Media Source Extensions (WebKit patch 0032's FFmpeg MSE engine). ManagedMediaSource, on by
+     * default in WPE, stays off unless asked for: hls.js prefers it when it exists, and one MSE
+     * surface is enough to start with (coordination repo docs/browser/MSE-DESIGN.md §5). */
+    const char* mse = optMSE ? optMSE : "on";
+    if (strcmp(mse, "on") && strcmp(mse, "managed") && strcmp(mse, "off")) {
+        fprintf(stderr, "wpe-browser: --mse wants on, managed or off\n");
+        return 1;
+    }
+#endif
     WebKitSettings* settings = webkit_settings_new_with_settings(
         "enable-webgl", static_cast<gboolean>(ENABLE_WEBGL && optWebGL),
         "enable-media", ENABLE_VIDEO ? TRUE : FALSE,
@@ -2355,6 +2379,17 @@ static int uiMain(int argc, char** argv)
         "enable-write-console-messages-to-stdout", TRUE,
         nullptr);
     enableCSSFeatures(settings);
+#if ENABLE_MEDIA_SOURCE
+    webkit_settings_set_enable_mediasource(settings, strcmp(mse, "off") ? TRUE : FALSE);
+    {
+        WebKitFeatureList* features = webkit_settings_get_all_features();
+        WebKitFeature* managed = webkit_feature_list_find(features, "ManagedMediaSource");
+        if (managed)
+            webkit_settings_set_feature_enabled(settings, managed, !strcmp(mse, "managed"));
+        LOG("media mse=%s managed=%s", mse, managed ? (!strcmp(mse, "managed") ? "1" : "0") : "absent");
+        webkit_feature_list_unref(features);
+    }
+#endif
 
     /* the chrome overlay, in its own script world (window mode) */
     WebKitUserContentManager* contentManager = webkit_user_content_manager_new();
