@@ -17,7 +17,9 @@
 #   loop      the HEVC clip on the block with the loop attribute: one wrap, then to the end
 #   again     the HEVC clip on the block, played to the end, then a seek to 12 s and to the end again
 #
-# (default h264,hevc,hevc-cpu,seek; loop and again only when named). Lines of ours start with
+# (default h264,hevc,hevc-cpu,seek; loop and again only when named). The browser runs with its
+# defaults (GPU raster, frames as dma-bufs); B8_BROWSER_ARGS adds words (e.g. "--cpu-rendering
+# --shm", what these arms used up to build 55). Lines of ours start with
 # "B8 ", the page's with "B8PAGE ", the browser's with "WPEB ", the media player's with
 # "WPEB-MEDIA ". After each arm (transport arms too):
 #
@@ -31,11 +33,11 @@
 # "transport": the frame path's A/B, every arm the H.264 clip in the same window, one knob set
 # each (raster, frame transport, frame pacing):
 #
-#   shm           --cpu-rendering                          (the default before dma-bufs)
+#   shm           --cpu-rendering --shm                    (the default before dma-bufs)
 #   gpu           Skia's GPU raster, shared memory
-#   dmabuf        --cpu-rendering --dmabuf                 (/bin/browser's default)
+#   dmabuf        --cpu-rendering --dmabuf
 #   both          GPU raster, --dmabuf
-#   shm-ahead     --cpu-rendering --frame-ahead
+#   shm-ahead     --cpu-rendering --shm --frame-ahead
 #   dmabuf-ahead  --cpu-rendering --dmabuf --frame-ahead
 #   both-ahead    GPU raster, --dmabuf --frame-ahead
 #
@@ -126,7 +128,8 @@ arm() {  # arm <name> <clip> <seconds> [page query suffix] [env...]
 	# browser's pid and exit status: in a pipeline only the last command's status reaches us.
 	(
 		[ "$#" = 0 ] || export "$@"
-		"${BROWSER}" --cpu-rendering --autoplay=allow --size=1000x620 "${PAGE}?src=${src}${extra}" 2>&1 &
+		# shellcheck disable=SC2086 # B8_BROWSER_ARGS: plain words
+		"${BROWSER}" ${B8_BROWSER_ARGS-} --autoplay=allow --size=1000x620 "${PAGE}?src=${src}${extra}" 2>&1 &
 		echo "$!" > "${PIDFILE}"
 		wait "$!"
 		echo "$?" > "${RCFILE}"
@@ -246,7 +249,7 @@ transport_arm() {  # transport_arm <name>
 		return
 	fi
 	[ "${raster}" = cpu ] && args+=(--cpu-rendering)
-	[ "${transport}" = dmabuf ] && args+=(--dmabuf)
+	[ "${transport}" = dmabuf ] && args+=(--dmabuf) || args+=(--shm)
 	[ "${ahead}" = 1 ] && args+=(--frame-ahead)
 	log=/tmp/b8-${name}.log
 	echo "B8 arm=${name} start clip=${H264} secs=${ARM_SECS} args=${args[*]} t=${SECONDS}"

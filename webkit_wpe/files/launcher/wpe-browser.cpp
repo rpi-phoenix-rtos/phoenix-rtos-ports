@@ -18,7 +18,9 @@
  *     --cpu-rendering       paint with Skia's CPU raster (WEBKIT_SKIA_ENABLE_CPU_RENDERING=1)
  *     --dmabuf              window mode: the web process hands its frames to the compositor as
  *                           dma-bufs instead of reading them back into shared memory (WebKit
- *                           patch 0016; WPE_BROWSER_DMABUF=1); needs linux-dmabuf from the compositor
+ *                           patch 0016); the default where the compositor offers linux-dmabuf
+ *     --shm                 frames through shared memory instead: read back by the web process,
+ *                           copied by this process (WPE_BROWSER_DMABUF=0; a headless view always)
  *     --frame-ahead         the web process renders the next frame while the compositor shows
  *                           this one, instead of after its frame callback (WebKit patch 0019;
  *                           WPE_BROWSER_FRAME_AHEAD=1)
@@ -854,6 +856,8 @@ static gboolean optExitAfterLoad;
 static gboolean optIgnoreTLSErrors;
 static gboolean optCPURendering;
 static gboolean optDMABuf;
+static gboolean optSHM;
+static bool dmabufAsked; /* --dmabuf or WPE_BROWSER_DMABUF=1: say why when it cannot be used */
 static gboolean optFrameAhead;
 static gboolean optWebGL;
 static int optPresentSecs;
@@ -891,7 +895,8 @@ static const GOptionEntry optionEntries[] = {
     { "exit-after-load", 0, 0, G_OPTION_ARG_NONE, &optExitAfterLoad, "Exit when the first load has finished", nullptr },
     { "ignore-tls-errors", 0, 0, G_OPTION_ARG_NONE, &optIgnoreTLSErrors, "Accept invalid TLS certificates", nullptr },
     { "cpu-rendering", 0, 0, G_OPTION_ARG_NONE, &optCPURendering, "Skia CPU raster in the WebProcess", nullptr },
-    { "dmabuf", 0, 0, G_OPTION_ARG_NONE, &optDMABuf, "Frames to the compositor as dma-bufs, no readback (window mode)", nullptr },
+    { "dmabuf", 0, 0, G_OPTION_ARG_NONE, &optDMABuf, "Frames to the compositor as dma-bufs, no readback (window mode; the default)", nullptr },
+    { "shm", 0, 0, G_OPTION_ARG_NONE, &optSHM, "Frames to the compositor through shared memory (read back and copied)", nullptr },
     { "frame-ahead", 0, 0, G_OPTION_ARG_NONE, &optFrameAhead, "Render the next frame while the compositor shows this one", nullptr },
     { "webgl", 0, 0, G_OPTION_ARG_NONE, &optWebGL, "Enable WebGL (a webgl build)", nullptr },
     { "present-stats", 0, 0, G_OPTION_ARG_INT, &optPresentSecs, "Log the frames the view presented every S s", "S" },
@@ -946,8 +951,10 @@ static void optionsFromEnvironment()
         const char* value = g_getenv(name);
         return value && *value ? atoi(value) : fallback;
     };
-    if (!optDMABuf)
-        optDMABuf = number("WPE_BROWSER_DMABUF", 0) != 0;
+    /* dma-bufs unless asked otherwise: GPU raster into shared memory reads every frame back and
+     * the compositor uploads it again, which held a 1080p30 video at 19 painted frames/s */
+    dmabufAsked = optDMABuf || number("WPE_BROWSER_DMABUF", 0) != 0;
+    optDMABuf = !optSHM && number("WPE_BROWSER_DMABUF", 1) != 0;
     if (!optFrameAhead)
         optFrameAhead = number("WPE_BROWSER_FRAME_AHEAD", 0) != 0;
     if (!optWebGL)
@@ -2014,20 +2021,21 @@ static gboolean logUIFootprint(gpointer)
 static constexpr guint32 fourccABGR8888 = 0x34324241; /* drm_fourcc.h DRM_FORMAT_ABGR8888, 'AB24' */
 
 /*
- * The frame transport. By default the web process renders with GLES (EGL surfaceless on the V3D)
- * and reads every frame back into shared memory, which the UI process copies once more into a
- * wl_shm pool for labwc. With --dmabuf (WebKit patch 0016: WPE_PHOENIX_DMABUF=1, read by the UI
- * process when it starts a web process) each render target is a GL texture exported as a dma-buf
- * and handed to the compositor through zwp_linux_dmabuf_v1: no readback, no copy. Window mode
- * only, and only when the compositor offers linux-dmabuf: a headless view takes snapshots, and
- * without GBM WebKit cannot read a dma-buf back for one.
+ * The frame transport. By default (--dmabuf; WebKit patch 0016: WPE_PHOENIX_DMABUF=1, read by the
+ * UI process when it starts a web process) each render target is a GL texture exported as a
+ * dma-buf and handed to the compositor through zwp_linux_dmabuf_v1: no readback, no copy. Window
+ * mode only, and only when the compositor offers linux-dmabuf: a headless view takes snapshots,
+ * and without GBM WebKit cannot read a dma-buf back for one. Otherwise (--shm) the web process
+ * renders with GLES (EGL surfaceless on the V3D) and reads every frame back into shared memory,
+ * which the UI process copies once more into a wl_shm pool for labwc.
  */
 static const char* chooseFrameTransport(WPEDisplay* display)
 {
     if (!optDMABuf)
         return "shm";
     if (optHeadless) {
-        LOG("gpu dmabuf-refused reason=headless (snapshots read SHM frames only)");
+        if (dmabufAsked)
+            LOG("gpu dmabuf-refused reason=headless (snapshots read SHM frames only)");
         return "shm";
     }
     WPEBufferFormats* formats = wpe_display_get_preferred_buffer_formats(display); /* transfer none */

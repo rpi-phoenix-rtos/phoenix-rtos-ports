@@ -48,7 +48,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ]; then
 fi
 args=(--size="${BROWSER_SIZE:-1280x960}")
 [ "${BROWSER_GPU:-1}" = 1 ] || args+=(--cpu-rendering)
-[ "${BROWSER_DMABUF:-1}" = 0 ] || args+=(--dmabuf)
+[ "${BROWSER_DMABUF:-1}" != 0 ] || args+=(--shm)
 [ "${BROWSER_FRAME_AHEAD:-0}" != 1 ] || args+=(--frame-ahead)
 [ "${BROWSER_WEBGL:-1}" != 1 ] || args+=(--webgl)
 exec /usr/bin/wpe-browser "${args[@]}" "$@"

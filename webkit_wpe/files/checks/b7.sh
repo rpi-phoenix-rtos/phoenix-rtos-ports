@@ -7,15 +7,16 @@
 #
 #   anim      b7-anim.html (16 composited layers + a repainted block, 60 s each) in four runs,
 #             one browser after another in one XFCE session, same page, same boot:
-#               A  --cpu-rendering            shm     (today's default: the control)
-#               B  GPU raster (Skia Ganesh)   shm
+#               A  --cpu-rendering            --shm   (the default up to build 55: the control)
+#               B  GPU raster (Skia Ganesh)   --shm
 #               C  GPU raster                 --dmabuf
 #               D  --cpu-rendering            --dmabuf
 #   webgl     b7-webgl.html (20000 triangles, 60 s) in three runs:
 #               W0 GPU raster, shm, WebGL off  (the page must say context=none)
 #               W1 GPU raster, shm, --webgl
 #               W2 GPU raster, --dmabuf, --webgl
-#   webgl-ab  why a WebGL page stops drawing (build 35: W1/W2 froze ~15 s in), three runs of W1:
+#   webgl-ab  why a WebGL page stops drawing (build 35: W1/W2 froze ~15 s in), three runs of W1
+#             (all --shm, as when it was written):
 #               W1  GPU raster, --webgl                  (the control)
 #               W1n the same with JSC_useJIT=false      (the JIT's part: interpreter only)
 #               W1c --cpu-rendering, --webgl            (the Skia GPU painting threads' part)
@@ -106,25 +107,25 @@ inner() {
 	case "${B7_INNER}" in
 		anim)
 			local page="${PAGES}/b7-anim.html?mode=both&secs=60"
-			run A "${page}" --cpu-rendering
-			run B "${page}"
+			run A "${page}" --cpu-rendering --shm
+			run B "${page}" --shm
 			run C "${page}" --dmabuf
 			run D "${page}" --cpu-rendering --dmabuf
 			;;
 		webgl)
 			local page="${PAGES}/b7-webgl.html?secs=60&tris=20000"
-			run W0 "${page}"
-			run W1 "${page}" --webgl
+			run W0 "${page}" --shm
+			run W1 "${page}" --webgl --shm
 			run W2 "${page}" --webgl --dmabuf
 			;;
 		webgl-ab)
 			local page="${PAGES}/b7-webgl.html?secs=60&tris=20000"
 			local trace=(WPE_PHOENIX_WAIT_TRACE=1)
 			local watch=(--stall-secs=2 --frame-stall-secs=2)
-			run W1 "${page}" "${trace[@]}" --webgl "${watch[@]}"
-			run W1n "${page}" "${trace[@]}" JSC_useJIT=false --webgl "${watch[@]}"
-			run W1c "${page}" "${trace[@]}" --webgl --cpu-rendering "${watch[@]}"
-			run W1e "${page}" "${trace[@]}" --webgl --ephemeral "${watch[@]}"
+			run W1 "${page}" "${trace[@]}" --webgl --shm "${watch[@]}"
+			run W1n "${page}" "${trace[@]}" JSC_useJIT=false --webgl --shm "${watch[@]}"
+			run W1c "${page}" "${trace[@]}" --webgl --shm --cpu-rendering "${watch[@]}"
+			run W1e "${page}" "${trace[@]}" --webgl --shm --ephemeral "${watch[@]}"
 			;;
 	esac
 	echo "B7 ${B7_INNER} done t=${SECONDS}"
