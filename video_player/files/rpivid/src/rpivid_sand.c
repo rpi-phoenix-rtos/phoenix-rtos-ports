@@ -14,6 +14,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "rpivid_sand.h"
@@ -94,11 +95,64 @@ static inline void unpack96(uint16_t *d, const uint8_t *s)
 }
 
 
+/* TEMPORARY A/B (FFMPEG_RPIVID_SAND=cols|rows): destination-row order, every row of the picture
+ * written front to back, each column's source read 128 bytes further per row */
+static void sand8_rows(uint8_t *dy, ptrdiff_t ly, uint8_t *du, ptrdiff_t lu, uint8_t *dv, ptrdiff_t lv,
+	const uint8_t *sy, const uint8_t *sc, uint32_t luma_stride, uint32_t chroma_stride, uint32_t w, uint32_t h)
+{
+	uint32_t full = w / 128u, rem = w % 128u, cw = (w + 1u) / 2u, ch = (h + 1u) / 2u, c, y;
+	uint8_t tu[128], tv[64];
+
+	for (y = 0; y < h; y++) {
+		const uint8_t *s = sy + (size_t)y * 128u;
+		uint8_t *d = dy + (size_t)y * (size_t)ly;
+
+		for (c = 0; c < full; c++) {
+			__builtin_prefetch(s + (size_t)c * luma_stride + 4u * 128u, 0, 0);
+			copy128(d + (size_t)c * 128u, s + (size_t)c * luma_stride);
+		}
+		if (rem != 0u) {
+			copy128(tu, s + (size_t)full * luma_stride);
+			memcpy(d + (size_t)full * 128u, tu, rem);
+		}
+	}
+
+	/* chroma: a column row is 64 Cb, Cr pairs */
+	full = cw / 64u;
+	rem = cw % 64u;
+	for (y = 0; y < ch; y++) {
+		const uint8_t *s = sc + (size_t)y * 128u;
+		uint8_t *u = du + (size_t)y * (size_t)lu, *v = dv + (size_t)y * (size_t)lv;
+
+		for (c = 0; c < full; c++) {
+			__builtin_prefetch(s + (size_t)c * chroma_stride + 4u * 128u, 0, 0);
+			deint128(u + (size_t)c * 64u, v + (size_t)c * 64u, s + (size_t)c * chroma_stride);
+		}
+		if (rem != 0u) {
+			deint128(tu, tv, s + (size_t)full * chroma_stride);
+			memcpy(u + (size_t)full * 64u, tu, rem);
+			memcpy(v + (size_t)full * 64u, tv, rem);
+		}
+	}
+}
+
+
 void rpivid_sand8_to_planar(uint8_t *dy, ptrdiff_t ly, uint8_t *du, ptrdiff_t lu, uint8_t *dv, ptrdiff_t lv,
 	const uint8_t *sy, const uint8_t *sc, uint32_t luma_stride, uint32_t chroma_stride, uint32_t w, uint32_t h)
 {
+	static int rows = -1;
 	uint32_t cols = (w + 127u) / 128u, cw = (w + 1u) / 2u, ch = (h + 1u) / 2u, c, y, n;
 	uint8_t tu[128], tv[64];
+
+	if (rows < 0) {
+		const char *e = getenv("FFMPEG_RPIVID_SAND");
+
+		rows = ((e != NULL) && (strcmp(e, "rows") == 0)) ? 1 : 0;
+	}
+	if (rows != 0) {
+		sand8_rows(dy, ly, du, lu, dv, lv, sy, sc, luma_stride, chroma_stride, w, h);
+		return;
+	}
 
 	for (c = 0; c < cols; c++) {
 		const uint8_t *s = sy + (size_t)c * luma_stride;
