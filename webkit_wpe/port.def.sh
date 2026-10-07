@@ -59,6 +59,13 @@
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).
 	#                             Kept apart so that a build without video has the same tree
 	#                             (its new CMake option would change cmakeconfig.h: a full rebuild)
+	#   patches/webkit-video/0031 USE video only: native HLS in that player (<video src=*.m3u8>:
+	#                             FFmpeg's hls demuxer, every playlist/segment/key through WebKit's
+	#                             loader, our variant choice -- HEVC 8-bit <= 1080p30 for rpivid,
+	#                             else H.264 <= 720p30 --, AES-128, live and VOD, lazy decoders) and
+	#                             MediaCapabilities.decodingInfo() answers (coordination repo
+	#                             docs/browser/MSE-DESIGN.md stage 0); needs video_player's hls
+	#                             demuxer and its files/hls hunks
 	#   files/build-wpe.sh        the build (also run by tools/browser/wpe/build.sh for scratch
 	#                             builds): host ruby if missing, a private dependency prefix,
 	#                             the libphoenix compat objects, CMake + ninja, the link checks
@@ -206,7 +213,7 @@ p_build() {
 			install -D -m 644 "${C}/${n}" "${ST}/usr/share/wpe-browser/${n}"
 		done
 		if [ "${video}" = 1 ]; then
-			for n in b8.html b8.sh; do
+			for n in b8.html b8.sh b8-stream.sh; do
 				install -D -m 644 "${C}/${n}" "${ST}/usr/share/wpe-browser/${n}"
 			done
 		fi
@@ -223,7 +230,8 @@ p_build() {
 		grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser lacks '${s}'"; bad=1; }
 	done
 	if [ "${video}" = 1 ]; then
-		for s in 'WPEB-MEDIA mono=%llu id=%u %s' 'rpivid: hardware HEVC decode' 'media autoplay=%s'; do
+		for s in 'WPEB-MEDIA mono=%llu id=%u %s' 'rpivid: hardware HEVC decode' 'media autoplay=%s' 'hls choose i=%d rule=%s audio=%s' \
+			'canplaytype type=%s platform=%s answer=%s' 'capabilities type=%s codec=%s'; do
 			grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser (USE video) lacks '${s}'"; bad=1; }
 		done
 	fi

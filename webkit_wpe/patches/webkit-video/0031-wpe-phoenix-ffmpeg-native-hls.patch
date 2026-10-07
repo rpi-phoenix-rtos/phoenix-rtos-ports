@@ -1,0 +1,3194 @@
+Subject: WPE on Phoenix: native HLS in the FFmpeg media player, MediaCapabilities answers
+
+<video src=*.m3u8> as Safari plays it (coordination repo docs/browser/MSE-DESIGN.md, stage 0),
+on top of patch 0030's player (platform/graphics/ffmpeg/, BSD-2-Clause):
+
+  FFmpegHLSSession   FFmpeg's hls demuxer on a context whose io_open/io_close2 are the
+                     session's: every media playlist (and live reload), init section, segment
+                     and key becomes an FFmpegMediaStream, a request of WebKit's media
+                     resource loader (cookies, TLS, CORS, cache: the browser's; FFmpeg stays
+                     --disable-network, the video_player port's hls.c hunk names http(s) URLs
+                     under custom I/O). Media playlists are read whole (<= 1 MiB), their URIs
+                     made absolute against the response URL, refused when encrypted with
+                     anything but AES-128/identity (SAMPLE-AES, DRM key formats), and served
+                     from memory; AES-128 segments are decrypted here (av_aes, CBC, PKCS#7);
+                     EXT-X-BYTERANGE segments are Range requests; segment streams share the
+                     player's read-ahead budget.
+  FFmpegMediaPolicy  plain C++ (host-tested): RFC 6381 codec strings, the decoding table
+                     (HEVC 8-bit <= 1080p30: supported, smooth, power-efficient -- the rpivid
+                     block; H.264 <= 720p30 supported and smooth; HEVC Main10 and larger H.264
+                     supported, not smooth; no AV1, Dolby Vision, HDR, VP9 above profile 0 or
+                     360p), master/media playlist parsing, the variant choice (HEVC 8-bit
+                     <= 1080p30, else H.264 <= 720p30, else HEVC Main10, else the lowest
+                     decodable; ties: lower BANDWIDTH; the DEFAULT audio rendition) and the
+                     single-variant master the demuxer gets (given the real one it would open
+                     and probe every rendition)
+  PlatformMediaEngineConfigurationFactoryFFmpeg
+                     MediaCapabilities.decodingInfo() from that table (it answered
+                     supported:false for everything: no factory without Cocoa/GStreamer);
+                     Media Source configurations only with ENABLE(MEDIA_SOURCE)
+
+MediaPlayerPrivateFFmpeg: HLS by MIME type (application/vnd.apple.mpegurl, application/x-mpegurl,
+application/mpegurl, audio/mpegurl, audio/x-mpegurl -- now in the engine's types, so canPlayType
+answers "maybe", "probably" with decodable codecs), by an .m3u8/.m3u path or by a body starting
+#EXTM3U. VOD: duration = the playlist's, seekable; live (no end list): duration +Infinity,
+LiveStream, not seekable (seeks resolve at the current time). The decoders open at the first
+play(), not at the metadata: an HLS player that never plays holds no decoder and never takes the
+rpivid block; it reports HaveEnoughData meanwhile (autoplay, 'canplay'), seeks complete at once
+and apply at play, and below preload="auto" its demuxer is closed after the metadata (no segment
+open). The stream probe decodes on the CPU (rpivid=0) for the same reason. A picture queue that
+runs dry while playing holds the clock (readyState HaveCurrentData: 'waiting'; a "rebuffer"),
+a pts jump of more than a second (EXT-X-DISCONTINUITY) moves the clock to it. H.264 decodes with
+3 threads in HLS mode. canPlayType codec answers come from FFmpegMediaPolicy (rejects av01, dvh1,
+dvhe, vp09.02, HEVC range extensions; accepts ac-3/ec-3); container types match case-blind.
+
+FFmpegMediaStream: created on any thread (requests still start on the main thread), byte ranges
+(Range: bytes=start-end, a server ignoring it is cut at the end), the response URL (redirects),
+a buffer of the resource's size when that is below the read-ahead window and a small first one
+when the size is unknown, peek() for the #EXTM3U sniff.
+
+Logs ("WPEB-MEDIA ..."): canplaytype type= platform= answer=, capabilities type= codec=
+<w>x<h>@<fps> audio= supported= smooth= efficient=, hls master/policy/variant i=/choose i= rule=
+audio=, hls live= segments= target=, hls playlist/reload/open (rate-limited), hls idle/opened,
+rebuffer start/end, discontinuity, error hls-*; the stat line gains (HLS only) hls=1 variant= rule=
+vcodec= res= bw= live= segments=<opened>/<in playlist> reloads= rebuffers= hls_streams= hls_kb=
+idle=. Knobs: WPE_PHOENIX_HLS_VARIANT=<i>, WPE_PHOENIX_HLS_POLICY=lowest|highest,
+WPE_PHOENIX_HLS_HEVC_MAX=WxH, WPE_PHOENIX_HLS_H264_MAX=WxH, WPE_PHOENIX_HLS_HEVC_MAX_FPS=<n>.
+
+diff --git a/Source/WebCore/platform/FFmpeg.cmake b/Source/WebCore/platform/FFmpeg.cmake
+index e246a456..9c268b2c 100644
+--- a/Source/WebCore/platform/FFmpeg.cmake
++++ b/Source/WebCore/platform/FFmpeg.cmake
+@@ -4,8 +4,11 @@ list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+ 
+ list(APPEND WebCore_SOURCES
+     platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
++    platform/graphics/ffmpeg/FFmpegHLSSession.cpp
++    platform/graphics/ffmpeg/FFmpegMediaPolicy.cpp
+     platform/graphics/ffmpeg/FFmpegMediaStream.cpp
+     platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
++    platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp
+ )
+ 
+ list(APPEND WebCore_LIBRARIES
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegHLSSession.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegHLSSession.cpp
+new file mode 100644
+index 00000000..6d258d47
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegHLSSession.cpp
+@@ -0,0 +1,735 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "FFmpegHLSSession.h"
++
++#if ENABLE(VIDEO) && USE(FFMPEG)
++#include "FFmpegMediaPolicy.h"
++#include "FFmpegMediaStream.h"
++#include "PlatformMediaResourceLoader.h"
++#include <cstdarg>
++#include <cstdio>
++#include <cstdlib>
++#include <time.h>
++#include <wtf/TZoneMallocInlines.h>
++#include <wtf/text/CString.h>
++
++extern "C" {
++#include <libavformat/avformat.h>
++#include <libavformat/avio.h>
++#include <libavutil/aes.h>
++#include <libavutil/dict.h>
++#include <libavutil/error.h>
++#include <libavutil/mem.h>
++}
++
++namespace WebCore {
++
++// a playlist is read whole, up to this
++static constexpr uint64_t kPlaylistMax = 1024 * 1024;
++static constexpr uint64_t kKeyMaxAhead = 64 * 1024;
++static constexpr int kIOBufferSize = 64 * 1024;
++static constexpr int kMemoryIOBufferSize = 4096;
++// the demuxer's stream probe (startup latency: the variant fixes the streams already)
++static constexpr int64_t kProbeBytes = 2 * 1024 * 1024;
++static constexpr int64_t kAnalyzeMicroseconds = 3 * 1000 * 1000;
++// a live playlist reloaded this many times without a new segment ends the stream (hls.c's
++// default, 3, ends a live stream on a server a reload late)
++static constexpr const char* kMaxReload = "30";
++// the "hls open" lines: every one up to this, then every 50th
++static constexpr unsigned kOpenLogs = 20;
++
++struct FFmpegHLSSession::Input {
++    WTF_MAKE_STRUCT_TZONE_ALLOCATED(Input);
++
++    ~Input()
++    {
++        if (ownsAVIO && avio) {
++            av_freep(&avio->buffer);
++            avio_context_free(&avio);
++        }
++        av_free(aes);
++    }
++
++    FFmpegHLSSession* session { nullptr };
++    // what the demuxer reads: the stream's own context, or one of ours (memory, decryption)
++    AVIOContext* avio { nullptr };
++    bool ownsAVIO { false };
++    RefPtr<FFmpegMediaStream> stream;
++    // a segment (or an init section): its read-ahead is a share of the player's budget
++    bool segment { false };
++    // a playlist, held whole
++    std::string memory;
++    size_t memoryPosition { 0 };
++    // AES-128-CBC: ciphertext not decrypted yet, plaintext not read yet
++    struct AVAES* aes { nullptr };
++    uint8_t iv[16] { };
++    Vector<uint8_t> cipher;
++    Vector<uint8_t> plain;
++    size_t plainPosition { 0 };
++    bool cipherEnd { false };
++};
++
++WTF_MAKE_STRUCT_TZONE_ALLOCATED_IMPL(FFmpegHLSSession::Input);
++
++static uint64_t monotonicMs()
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<uint64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
++}
++
++// WPE_PHOENIX_HLS_*: the variant policy, read once per process
++static const FFmpegMediaPolicy::Policy& hlsPolicy()
++{
++    static const FFmpegMediaPolicy::Policy policy = [] {
++        FFmpegMediaPolicy::Policy policy;
++        auto size = [](const char* name, unsigned& width, unsigned& height) {
++            const char* value = getenv(name);
++            unsigned w, h;
++            if (value && sscanf(value, "%ux%u", &w, &h) == 2 && w && h) {
++                width = w;
++                height = h;
++            }
++        };
++        size("WPE_PHOENIX_HLS_HEVC_MAX", policy.hevcMaxWidth, policy.hevcMaxHeight);
++        size("WPE_PHOENIX_HLS_H264_MAX", policy.h264MaxWidth, policy.h264MaxHeight);
++        if (const char* fps = getenv("WPE_PHOENIX_HLS_HEVC_MAX_FPS"); fps && atof(fps) > 0)
++            policy.hevcMaxFps = atof(fps);
++        if (const char* variant = getenv("WPE_PHOENIX_HLS_VARIANT"); variant && *variant)
++            policy.forcedVariant = atoi(variant);
++        if (const char* mode = getenv("WPE_PHOENIX_HLS_POLICY")) {
++            if (!strcmp(mode, "lowest"))
++                policy.mode = FFmpegMediaPolicy::Policy::Mode::Lowest;
++            else if (!strcmp(mode, "highest"))
++                policy.mode = FFmpegMediaPolicy::Policy::Mode::Highest;
++        }
++        return policy;
++    }();
++    return policy;
++}
++
++static std::string resolveAgainst(const std::string& uri, void* context)
++{
++    URL resolved { *static_cast<const URL*>(context), String::fromUTF8(uri.c_str()) };
++    if (!resolved.isValid())
++        return { };
++    CString utf8 = resolved.string().utf8();
++    return std::string { utf8.data(), utf8.length() };
++}
++
++static String fromStd(const std::string& string)
++{
++    return String::fromUTF8(std::span { string.data(), string.size() });
++}
++
++static bool parseHex16(const char* hex, uint8_t out[16])
++{
++    if (!hex || strlen(hex) != 32)
++        return false;
++    for (int i = 0; i < 16; ++i) {
++        unsigned byte;
++        if (sscanf(hex + 2 * i, "%2x", &byte) != 1)
++            return false;
++        out[i] = static_cast<uint8_t>(byte);
++    }
++    return true;
++}
++
++static bool isPlaylistPath(const URL& url)
++{
++    auto path = url.path();
++    return path.endsWithIgnoringASCIICase(".m3u8"_s) || path.endsWithIgnoringASCIICase(".m3u"_s);
++}
++
++Ref<FFmpegHLSSession> FFmpegHLSSession::create(unsigned playerID, const URL& url, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead)
++{
++    return adoptRef(*new FFmpegHLSSession(playerID, url, WTF::move(loader), maxAhead));
++}
++
++FFmpegHLSSession::FFmpegHLSSession(unsigned playerID, const URL& url, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead)
++    : m_id(playerID)
++    , m_url(url.isolatedCopy())
++    , m_loader(WTF::move(loader))
++    , m_maxAhead(maxAhead)
++{
++}
++
++FFmpegHLSSession::~FFmpegHLSSession()
++{
++    cancel();
++    closed();
++}
++
++void FFmpegHLSSession::log(const char* format, ...) const
++{
++    char line[768];
++    va_list args;
++    va_start(args, format);
++    vsnprintf(line, sizeof(line), format, args);
++    va_end(args);
++    fprintf(stderr, "WPEB-MEDIA mono=%llu id=%u %s\n", static_cast<unsigned long long>(monotonicMs()), m_id, line);
++}
++
++String FFmpegHLSSession::summary() const
++{
++    return fromStd(m_summary);
++}
++
++/* --- the top-level playlist and the variant ------------------------------------------------ */
++
++bool FFmpegHLSSession::prepare(std::span<const uint8_t> bytes, const URL& responseURL)
++{
++    std::string_view text { reinterpret_cast<const char*>(bytes.data()), bytes.size() };
++    URL base = responseURL.isValid() ? responseURL : m_url;
++    CString baseUTF8 = base.string().utf8();
++    auto playlist = FFmpegMediaPolicy::parsePlaylist(text);
++    if (!playlist.valid) {
++        log("error hls-playlist not-m3u8 bytes=%zu url=%s", bytes.size(), baseUTF8.data());
++        return false;
++    }
++
++    if (playlist.isMediaPlaylist) {
++        // a media playlist as the source: nothing to choose
++        std::string resolved = FFmpegMediaPolicy::resolveMediaPlaylist(text, resolveAgainst, &base);
++        auto info = FFmpegMediaPolicy::parseMediaPlaylist(resolved);
++        log("hls media url=%s", baseUTF8.data());
++        log("hls live=%d segments=%u target=%.1f duration=%.1f media-sequence=%lld discontinuities=%u byterange=%d init=%d aes128=%d",
++            !info.ended, info.segments, info.targetDuration, info.totalDuration, static_cast<long long>(info.mediaSequence),
++            info.discontinuities, info.byteRanges, info.initSection, info.aes128);
++        if (!info.refusedKey.empty()) {
++            log("error hls-encryption=%s unsupported (only AES-128 with the identity key format)", info.refusedKey.c_str());
++            return false;
++        }
++        for (auto& uri : info.keyURIs)
++            m_keyURLs.add(fromStd(uri));
++        for (auto& uri : info.initURIs)
++            m_initURLs.add(fromStd(uri));
++        m_live = !info.ended;
++        {
++            Locker locker { m_lock };
++            m_playlistSegments = info.segments;
++        }
++        // the demuxer reloads a live playlist from the element's URL
++        m_mainPlaylistURL = m_url.string();
++        m_playlistURLs.add(m_mainPlaylistURL);
++        m_playlistLoads.add(m_mainPlaylistURL, 1);
++        m_concurrentSegments = 1;
++        m_masterText = WTF::move(resolved);
++        m_summary = "variant=- rule=media";
++        return true;
++    }
++
++    auto& policy = hlsPolicy();
++    unsigned audioGroups = 0;
++    {
++        HashSet<String> groups;
++        for (auto& rendition : playlist.renditions) {
++            if (rendition.type == "AUDIO" && groups.add(fromStd(rendition.groupID)).isNewEntry)
++                audioGroups++;
++        }
++    }
++    log("hls master url=%s variants=%zu audio-groups=%u renditions=%zu", baseUTF8.data(), playlist.variants.size(), audioGroups, playlist.renditions.size());
++    log("hls policy hevc<=%ux%u@%.0f h264<=%ux%u@%.0f mode=%s forced=%d", policy.hevcMaxWidth, policy.hevcMaxHeight, policy.hevcMaxFps,
++        policy.h264MaxWidth, policy.h264MaxHeight, policy.h264MaxFps,
++        policy.mode == FFmpegMediaPolicy::Policy::Mode::Lowest ? "lowest" : policy.mode == FFmpegMediaPolicy::Policy::Mode::Highest ? "highest" : "default",
++        policy.forcedVariant);
++    if (!playlist.sessionKeyMethod.empty() && playlist.sessionKeyMethod != "NONE" && playlist.sessionKeyMethod != "AES-128")
++        log("hls session-key method=%s (encrypted variants are refused)", playlist.sessionKeyMethod.c_str());
++
++    auto choice = FFmpegMediaPolicy::chooseVariant(playlist, policy);
++    for (size_t i = 0; i < playlist.variants.size(); ++i) {
++        auto& variant = playlist.variants[i];
++        auto& verdict = choice.verdicts[i];
++        bool eligible = verdict.eligibleAs == FFmpegMediaPolicy::VariantClass::HEVCMain || verdict.eligibleAs == FFmpegMediaPolicy::VariantClass::H264
++            || verdict.eligibleAs == FFmpegMediaPolicy::VariantClass::HEVCMain10 || verdict.eligibleAs == FFmpegMediaPolicy::VariantClass::Audio;
++        log("hls variant i=%zu bw=%llu res=%ux%u fps=%.3f codecs=%s range=%s eligible=%d class=%s reason=%s", i,
++            static_cast<unsigned long long>(variant.bandwidth), variant.width, variant.height, variant.fps,
++            variant.codecs.empty() ? "-" : variant.codecs.c_str(), variant.videoRange.empty() ? "-" : variant.videoRange.c_str(), eligible,
++            FFmpegMediaPolicy::variantClassName(verdict.eligibleAs), verdict.reason.c_str());
++    }
++    if (choice.variant < 0) {
++        log("error hls-master no-variants");
++        return false;
++    }
++    auto& variant = playlist.variants[choice.variant];
++    auto& verdict = choice.verdicts[choice.variant];
++    const FFmpegMediaPolicy::Rendition* audio = choice.audioRendition >= 0 ? &playlist.renditions[choice.audioRendition] : nullptr;
++    log("hls choose i=%d rule=%s audio=%s bw=%llu res=%ux%u codecs=%s", choice.variant, choice.rule.c_str(),
++        audio ? (audio->name.empty() ? audio->groupID.c_str() : audio->name.c_str()) : (variant.audioGroup.empty() ? "muxed" : "none"),
++        static_cast<unsigned long long>(variant.bandwidth), variant.width, variant.height, variant.codecs.empty() ? "-" : variant.codecs.c_str());
++
++    m_masterText = FFmpegMediaPolicy::synthesizeMaster(playlist, choice, resolveAgainst, &base);
++    m_mainPlaylistURL = fromStd(resolveAgainst(variant.uri, &base));
++    m_playlistURLs.add(m_mainPlaylistURL);
++    m_concurrentSegments = 1;
++    if (audio && !audio->uri.empty()) {
++        m_playlistURLs.add(fromStd(resolveAgainst(audio->uri, &base)));
++        m_concurrentSegments = 2;
++    }
++    char summary[256];
++    snprintf(summary, sizeof(summary), "variant=%d rule=%s vcodec=%s res=%ux%u bw=%llu", choice.variant, choice.rule.c_str(),
++        FFmpegMediaPolicy::codecKindName(verdict.video), variant.width, variant.height, static_cast<unsigned long long>(variant.bandwidth));
++    m_summary = summary;
++    return true;
++}
++
++/* --- the demuxer's context ----------------------------------------------------------------- */
++
++AVFormatContext* FFmpegHLSSession::open(int (*interrupt)(void*), void* opaque)
++{
++    AVFormatContext* format = avformat_alloc_context();
++    auto* buffer = static_cast<unsigned char*>(av_malloc(kMemoryIOBufferSize));
++    m_masterPosition = 0;
++    m_masterAVIO = buffer ? avio_alloc_context(buffer, kMemoryIOBufferSize, 0, this, readMaster, nullptr, nullptr) : nullptr;
++    if (!format || !m_masterAVIO) {
++        if (!m_masterAVIO)
++            av_free(buffer);
++        avformat_free_context(format);
++        closed();
++        return nullptr;
++    }
++    format->pb = m_masterAVIO;
++    format->flags |= AVFMT_FLAG_CUSTOM_IO;
++    format->opaque = this;
++    format->io_open = ioOpen;
++    format->io_close2 = ioClose;
++    format->interrupt_callback.callback = interrupt;
++    format->interrupt_callback.opaque = opaque;
++    format->probesize = kProbeBytes;
++    format->max_analyze_duration = kAnalyzeMicroseconds;
++    AVDictionary* options = nullptr;
++    // one request per playlist and per segment, the next segment only when the last one is read
++    av_dict_set(&options, "http_persistent", "0", 0);
++    av_dict_set(&options, "http_multiple", "0", 0);
++    av_dict_set(&options, "max_reload", kMaxReload, 0);
++    av_dict_set(&options, "seg_max_retry", "2", 0);
++    CString url = m_url.string().utf8();
++    int ret = avformat_open_input(&format, url.data(), av_find_input_format("hls"), &options);
++    av_dict_free(&options);
++    if (ret < 0) {
++        // avformat_open_input() freed the context (and hls.c closed its inputs)
++        if (!m_cancelled)
++            log("error hls-open rc=%d (%s)", ret, av_err2str(ret));
++        closed();
++        return nullptr;
++    }
++    return format;
++}
++
++void FFmpegHLSSession::closed()
++{
++    if (m_masterAVIO) {
++        av_freep(&m_masterAVIO->buffer);
++        avio_context_free(&m_masterAVIO);
++    }
++    // hls.c closes what it opened; anything left (a failed open) goes here
++    Vector<std::unique_ptr<Input>> left;
++    {
++        Locker locker { m_lock };
++        left = WTF::move(m_inputs);
++        m_inputs = { };
++        for (auto& input : left) {
++            if (input->stream)
++                m_closedReceived += input->stream->bytesReceived();
++        }
++    }
++    for (auto& input : left) {
++        if (input->stream)
++            input->stream->cancel();
++    }
++}
++
++void FFmpegHLSSession::cancel()
++{
++    m_cancelled = true;
++    Locker locker { m_lock };
++    for (auto& input : m_inputs) {
++        if (input->stream)
++            input->stream->cancel();
++    }
++}
++
++uint64_t FFmpegHLSSession::segmentAhead() const
++{
++    return m_maxAhead / std::max(1u, m_concurrentSegments.load());
++}
++
++void FFmpegHLSSession::setMaxAhead(uint64_t maxAhead)
++{
++    m_maxAhead = maxAhead;
++    uint64_t share = segmentAhead();
++    Locker locker { m_lock };
++    for (auto& input : m_inputs) {
++        if (input->segment && input->stream)
++            input->stream->setMaxAhead(share);
++    }
++}
++
++auto FFmpegHLSSession::stats() const -> Stats
++{
++    Stats stats;
++    Locker locker { m_lock };
++    stats.streams = m_inputs.size();
++    stats.received = m_closedReceived;
++    for (auto& input : m_inputs) {
++        if (input->stream) {
++            stats.bufferBytes += input->stream->memory().capacity;
++            stats.received += input->stream->bytesReceived();
++        }
++        stats.bufferBytes += input->memory.capacity() + input->cipher.capacity() + input->plain.capacity();
++    }
++    stats.segments = m_segments;
++    stats.playlistSegments = m_playlistSegments;
++    stats.reloads = m_reloads;
++    return stats;
++}
++
++bool FFmpegHLSSession::addInput(std::unique_ptr<Input>&& input)
++{
++    Locker locker { m_lock };
++    if (m_cancelled)
++        return false;
++    m_inputs.append(WTF::move(input));
++    return true;
++}
++
++void FFmpegHLSSession::removeInput(Input* input)
++{
++    std::unique_ptr<Input> removed;
++    {
++        Locker locker { m_lock };
++        for (size_t i = 0; i < m_inputs.size(); ++i) {
++            if (m_inputs[i].get() == input) {
++                removed = WTF::move(m_inputs[i]);
++                m_inputs.removeAt(i);
++                break;
++            }
++        }
++        if (removed && removed->stream)
++            m_closedReceived += removed->stream->bytesReceived();
++    }
++    if (removed && removed->stream)
++        removed->stream->cancel();
++}
++
++void FFmpegHLSSession::closeInput(AVIOContext* avio)
++{
++    Input* found = nullptr;
++    {
++        Locker locker { m_lock };
++        for (auto& input : m_inputs) {
++            if (input->avio == avio) {
++                found = input.get();
++                break;
++            }
++        }
++    }
++    if (found)
++        removeInput(found);
++}
++
++/* --- I/O callbacks ------------------------------------------------------------------------- */
++
++int FFmpegHLSSession::ioOpen(AVFormatContext* format, AVIOContext** pb, const char* url, int flags, AVDictionary** options)
++{
++    *pb = nullptr;
++    if (flags & AVIO_FLAG_WRITE)
++        return AVERROR(EPERM);
++    return static_cast<FFmpegHLSSession*>(format->opaque)->openURL(pb, url, options ? *options : nullptr);
++}
++
++int FFmpegHLSSession::ioClose(AVFormatContext* format, AVIOContext* pb)
++{
++    if (pb)
++        static_cast<FFmpegHLSSession*>(format->opaque)->closeInput(pb);
++    return 0;
++}
++
++int FFmpegHLSSession::readMaster(void* opaque, uint8_t* buffer, int size)
++{
++    auto* session = static_cast<FFmpegHLSSession*>(opaque);
++    size_t left = session->m_masterText.size() - session->m_masterPosition;
++    if (!left)
++        return AVERROR_EOF;
++    size_t n = std::min<size_t>(left, size);
++    memcpy(buffer, session->m_masterText.data() + session->m_masterPosition, n);
++    session->m_masterPosition += n;
++    return n;
++}
++
++int FFmpegHLSSession::readMemory(void* opaque, uint8_t* buffer, int size)
++{
++    auto* input = static_cast<Input*>(opaque);
++    size_t left = input->memory.size() - input->memoryPosition;
++    if (!left)
++        return AVERROR_EOF;
++    size_t n = std::min<size_t>(left, size);
++    memcpy(buffer, input->memory.data() + input->memoryPosition, n);
++    input->memoryPosition += n;
++    return n;
++}
++
++// AES-128-CBC over the stream: whole blocks are decrypted as they arrive, except the last one
++// seen, which may be the final (padded) block until the stream's end is known
++int FFmpegHLSSession::readDecrypted(void* opaque, uint8_t* buffer, int size)
++{
++    auto* input = static_cast<Input*>(opaque);
++    while (input->plainPosition == input->plain.size()) {
++        if (input->cipherEnd)
++            return AVERROR_EOF;
++        uint8_t chunk[16 * 1024];
++        int n = avio_read(input->stream->avioContext(), chunk, sizeof(chunk));
++        if (n == AVERROR_EOF || !n)
++            input->cipherEnd = true;
++        else if (n < 0)
++            return n;
++        else
++            input->cipher.append(std::span<const uint8_t> { chunk, static_cast<size_t>(n) });
++        size_t blocks = input->cipher.size() / 16;
++        if (input->cipherEnd) {
++            if (input->cipher.size() % 16) {
++                input->session->log("error hls-aes ciphertext of %zu bytes is not whole blocks", input->cipher.size());
++                return AVERROR_INVALIDDATA;
++            }
++        } else {
++            // keep the last whole block (and any part of the next) until more arrives
++            if (blocks < 2)
++                continue;
++            blocks--;
++        }
++        input->plain.resize(blocks * 16);
++        input->plainPosition = 0;
++        if (blocks) {
++            av_aes_crypt(input->aes, input->plain.mutableSpan().data(), input->cipher.span().data(), blocks, input->iv, 1);
++            input->cipher.removeAt(0, blocks * 16);
++        }
++        if (input->cipherEnd && !input->plain.isEmpty()) {
++            // PKCS#7 padding
++            unsigned pad = input->plain.last();
++            if (pad >= 1 && pad <= 16 && pad <= input->plain.size())
++                input->plain.shrink(input->plain.size() - pad);
++        }
++    }
++    size_t n = std::min<size_t>(size, input->plain.size() - input->plainPosition);
++    memcpy(buffer, input->plain.span().data() + input->plainPosition, n);
++    input->plainPosition += n;
++    return n;
++}
++
++int FFmpegHLSSession::openURL(AVIOContext** pb, const char* spec, AVDictionary* options)
++{
++    if (m_cancelled)
++        return AVERROR_EXIT;
++    // AES-128 segments come as "crypto+<url>" (or "crypto:<url>"), the key and IV as options
++    bool crypto = false;
++    if (!strncmp(spec, "crypto+", 7) || !strncmp(spec, "crypto:", 7)) {
++        spec += 7;
++        crypto = true;
++    }
++    URL url { String::fromUTF8(spec) };
++    if (!url.isValid()) {
++        log("error hls-url invalid url=%s", spec);
++        return AVERROR(EINVAL);
++    }
++    // the browser's loader serves http(s); a local playlist may name local files
++    if (!url.protocolIsInHTTPFamily() && !(url.protocolIsFile() && m_url.protocolIsFile())) {
++        log("error hls-url refused scheme url=%s", spec);
++        return AVERROR(EPERM);
++    }
++    if (!crypto && (m_playlistURLs.contains(url.string()) || isPlaylistPath(url)))
++        return openPlaylist(pb, url);
++    return openMedia(pb, url, options, crypto);
++}
++
++int FFmpegHLSSession::openPlaylist(AVIOContext** pb, const URL& url)
++{
++    CString urlUTF8 = url.string().utf8();
++    auto stream = FFmpegMediaStream::create(url, RefPtr { m_loader }, kPlaylistMax);
++    if (!stream) {
++        log("error hls-playlist open-failed url=%s", urlUTF8.data());
++        return AVERROR(EIO);
++    }
++    auto owned = makeUnique<Input>();
++    Input* input = owned.get();
++    input->session = this;
++    input->stream = stream;
++    if (!addInput(WTF::move(owned))) {
++        stream->cancel();
++        return AVERROR_EXIT;
++    }
++
++    // the whole playlist (the stream's read wakes on cancel())
++    Vector<uint8_t> bytes;
++    AVIOContext* avio = stream->avioContext();
++    int ret = avio ? 0 : AVERROR(ENOMEM);
++    while (!ret) {
++        uint8_t chunk[16 * 1024];
++        int n = avio_read(avio, chunk, sizeof(chunk));
++        if (n == AVERROR_EOF || !n)
++            break;
++        if (n < 0)
++            ret = n;
++        else if (bytes.size() + n > kPlaylistMax)
++            ret = AVERROR(E2BIG);
++        else
++            bytes.append(std::span<const uint8_t> { chunk, static_cast<size_t>(n) });
++    }
++    URL base = stream->responseURL();
++    if (ret < 0 || bytes.isEmpty()) {
++        if (!m_cancelled)
++            log("error hls-playlist read rc=%d (%s) bytes=%zu url=%s", ret, ret < 0 ? av_err2str(ret) : "empty", bytes.size(), urlUTF8.data());
++        removeInput(input);
++        return ret < 0 ? ret : AVERROR_INVALIDDATA;
++    }
++
++    // every URI absolute (against the URL after redirects): the demuxer then opens exactly the
++    // URLs listed here, and the key URLs below are the ones it will ask for
++    std::string_view text { reinterpret_cast<const char*>(bytes.span().data()), bytes.size() };
++    std::string resolved = FFmpegMediaPolicy::resolveMediaPlaylist(text, resolveAgainst, &base);
++    auto info = FFmpegMediaPolicy::parseMediaPlaylist(resolved);
++    unsigned& loads = m_playlistLoads.add(url.string(), 0).iterator->value;
++    loads++;
++    bool main = url.string() == m_mainPlaylistURL;
++    if (loads == 1) {
++        log("hls playlist url=%s main=%d bytes=%zu", urlUTF8.data(), main, bytes.size());
++        log("hls live=%d segments=%u target=%.1f duration=%.1f media-sequence=%lld discontinuities=%u byterange=%d init=%d aes128=%d",
++            !info.ended, info.segments, info.targetDuration, info.totalDuration, static_cast<long long>(info.mediaSequence),
++            info.discontinuities, info.byteRanges, info.initSection, info.aes128);
++    } else if (loads <= 20 || !(loads % 10))
++        log("hls reload n=%u main=%d live=%d segments=%u media-sequence=%lld url=%s", loads - 1, main, !info.ended, info.segments,
++            static_cast<long long>(info.mediaSequence), urlUTF8.data());
++    if (!info.refusedKey.empty()) {
++        log("error hls-encryption=%s unsupported (only AES-128 with the identity key format) url=%s", info.refusedKey.c_str(), urlUTF8.data());
++        removeInput(input);
++        return AVERROR(ENOSYS);
++    }
++    for (auto& uri : info.keyURIs)
++        m_keyURLs.add(fromStd(uri));
++    for (auto& uri : info.initURIs)
++        m_initURLs.add(fromStd(uri));
++    if (main)
++        m_live = !info.ended;
++
++    // the stream is done with: the demuxer reads the text from memory
++    auto* buffer = static_cast<unsigned char*>(av_malloc(kMemoryIOBufferSize));
++    AVIOContext* memory = buffer ? avio_alloc_context(buffer, kMemoryIOBufferSize, 0, input, readMemory, nullptr, nullptr) : nullptr;
++    if (!memory) {
++        av_free(buffer);
++        removeInput(input);
++        return AVERROR(ENOMEM);
++    }
++    RefPtr<FFmpegMediaStream> done;
++    {
++        Locker locker { m_lock };
++        if (main)
++            m_playlistSegments = info.segments;
++        if (loads > 1)
++            m_reloads++;
++        m_closedReceived += stream->bytesReceived();
++        done = WTF::move(input->stream);
++        input->memory = WTF::move(resolved);
++        input->avio = memory;
++        input->ownsAVIO = true;
++    }
++    done->cancel();
++    *pb = memory;
++    return 0;
++}
++
++int FFmpegHLSSession::openMedia(AVIOContext** pb, const URL& url, AVDictionary* options, bool crypto)
++{
++    bool key = m_keyURLs.contains(url.string());
++    bool init = m_initURLs.contains(url.string());
++    // a byte range (EXT-X-BYTERANGE) comes as offset/end_offset; hls.c passes a ranged segment's
++    // options to its key's request too, so a key URL takes none
++    std::optional<FFmpegMediaStream::Range> range;
++    if (!key) {
++        AVDictionaryEntry* offset = av_dict_get(options, "offset", nullptr, 0);
++        AVDictionaryEntry* end = av_dict_get(options, "end_offset", nullptr, 0);
++        if (offset && end) {
++            long long start = atoll(offset->value), stop = atoll(end->value);
++            if (start >= 0 && stop > start)
++                range = FFmpegMediaStream::Range { static_cast<uint64_t>(start), static_cast<uint64_t>(stop) };
++        }
++    }
++    CString urlUTF8 = url.string().utf8();
++    unsigned opens;
++    {
++        Locker locker { m_lock };
++        if (!key && !init)
++            m_segments++;
++        opens = ++m_openLogs;
++    }
++    if (opens <= kOpenLogs || !(opens % 50)) {
++        log("hls open n=%u url=%s range=%lld-%lld crypto=%d kind=%s", opens, urlUTF8.data(), range ? static_cast<long long>(range->start) : 0LL,
++            range ? static_cast<long long>(range->end) : -1LL, crypto, key ? "key" : init ? "init" : "segment");
++    }
++
++    auto stream = FFmpegMediaStream::create(url, RefPtr { m_loader }, key ? kKeyMaxAhead : segmentAhead(), range);
++    if (!stream) {
++        log("error hls-open-failed url=%s", urlUTF8.data());
++        return AVERROR(EIO);
++    }
++    auto input = makeUnique<Input>();
++    input->session = this;
++    input->stream = stream;
++    input->segment = !key;
++    if (crypto) {
++        uint8_t keyBytes[16];
++        AVDictionaryEntry* keyOption = av_dict_get(options, "key", nullptr, 0);
++        AVDictionaryEntry* ivOption = av_dict_get(options, "iv", nullptr, 0);
++        if (!parseHex16(keyOption ? keyOption->value : nullptr, keyBytes) || !parseHex16(ivOption ? ivOption->value : nullptr, input->iv)) {
++            log("error hls-aes no key or iv url=%s", urlUTF8.data());
++            stream->cancel();
++            return AVERROR(EINVAL);
++        }
++        input->aes = av_aes_alloc();
++        auto* buffer = static_cast<unsigned char*>(av_malloc(kIOBufferSize));
++        if (input->aes)
++            av_aes_init(input->aes, keyBytes, 128, 1);
++        input->avio = input->aes && buffer ? avio_alloc_context(buffer, kIOBufferSize, 0, input.get(), readDecrypted, nullptr, nullptr) : nullptr;
++        if (!input->avio)
++            av_free(buffer);
++        input->ownsAVIO = true;
++    } else
++        input->avio = stream->avioContext();
++    if (!input->avio) {
++        stream->cancel();
++        return AVERROR(ENOMEM);
++    }
++    AVIOContext* avio = input->avio;
++    if (!addInput(WTF::move(input))) {
++        stream->cancel();
++        return AVERROR_EXIT;
++    }
++    *pb = avio;
++    return 0;
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegHLSSession.h b/Source/WebCore/platform/graphics/ffmpeg/FFmpegHLSSession.h
+new file mode 100644
+index 00000000..7466344a
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegHLSSession.h
+@@ -0,0 +1,153 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#pragma once
++
++#if ENABLE(VIDEO) && USE(FFMPEG)
++
++#include <atomic>
++#include <memory>
++#include <span>
++#include <string>
++#include <wtf/HashMap.h>
++#include <wtf/HashSet.h>
++#include <wtf/Lock.h>
++#include <wtf/ThreadSafeRefCounted.h>
++#include <wtf/URL.h>
++#include <wtf/Vector.h>
++#include <wtf/text/WTFString.h>
++
++struct AVDictionary;
++struct AVFormatContext;
++struct AVIOContext;
++
++namespace WebCore {
++
++class FFmpegMediaStream;
++class PlatformMediaResourceLoader;
++
++// Native HLS for MediaPlayerPrivateFFmpeg (<video src=*.m3u8>, the way Safari plays HLS):
++// FFmpeg's hls demuxer parses the playlists and demuxes the segments, but never touches the
++// network. Every URL it opens -- media playlists (also each live reload), init sections,
++// segments, AES keys -- comes back to this session through the context's io_open and becomes
++// an FFmpegMediaStream, i.e. a request of WebKit's media resource loader: cookies, TLS, CORS
++// and the HTTP cache stay the browser's (FFmpeg is built with --disable-network; the
++// video_player port's hls.c hunk lets it name http(s) URLs under custom I/O).
++//
++// The variant is ours to choose (FFmpegMediaPolicy: HEVC 8-bit up to 1080p30 for the rpivid
++// block, else H.264 up to 720p30, else HEVC Main10): the demuxer gets a master with that one
++// variant and its audio rendition, so it fetches nothing else (given the real master it would
++// open and probe every rendition). Media playlists are read whole (1 MiB at most), their URIs
++// made absolute against the response URL (redirects), refused when encrypted with anything but
++// AES-128 (SAMPLE-AES and DRM key formats), and handed to the demuxer from memory; AES-128
++// segments ("crypto+" URLs) are decrypted here (AES-CBC, PKCS#7). Segment streams share the
++// player's read-ahead budget.
++class FFmpegHLSSession final : public ThreadSafeRefCounted<FFmpegHLSSession> {
++public:
++    // Main thread. `url`: the media element's URL (the top-level playlist).
++    static Ref<FFmpegHLSSession> create(unsigned playerID, const URL&, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead);
++    ~FFmpegHLSSession();
++
++    // The demux thread: the top-level playlist's bytes and the URL they came from -> the
++    // variant choice and the text the demuxer will read. False: nothing to play (logged).
++    bool prepare(std::span<const uint8_t> playlist, const URL& responseURL);
++
++    // The demux thread: the hls demuxer opened on a new context whose I/O is this session's;
++    // nullptr on a failure (logged). `interrupt(opaque)` aborts a blocked open or live reload.
++    AVFormatContext* open(int (*interrupt)(void*), void* opaque);
++    // After avformat_close_input() of the context open() made (or its failed open).
++    void closed();
++
++    // Any thread: wakes every blocked read; every later open fails. For teardown.
++    void cancel();
++    // Any thread: the player's read-ahead budget (shared by the segments being read).
++    void setMaxAhead(uint64_t);
++
++    // After prepare(): no end list in the main media playlist (a live stream: not seekable).
++    bool isLive() const { return m_live; }
++    // After prepare(): the chosen variant for the stat line (variant= codec= res= bw=).
++    String summary() const;
++
++    struct Stats {
++        unsigned streams { 0 };       // open inputs (segments, keys, playlists held in memory)
++        uint64_t bufferBytes { 0 };   // their buffers' capacity
++        uint64_t received { 0 };      // bytes received, closed inputs included
++        unsigned segments { 0 };      // segments opened
++        unsigned playlistSegments { 0 }; // segments in the main media playlist (its last load)
++        unsigned reloads { 0 };       // media playlist loads after the first
++    };
++    Stats stats() const;
++
++private:
++    struct Input;
++
++    FFmpegHLSSession(unsigned playerID, const URL&, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead);
++
++    static int ioOpen(AVFormatContext*, AVIOContext**, const char* url, int flags, AVDictionary** options);
++    static int ioClose(AVFormatContext*, AVIOContext*);
++    static int readMaster(void*, uint8_t*, int);
++    static int readMemory(void*, uint8_t*, int);
++    static int readDecrypted(void*, uint8_t*, int);
++
++    int openURL(AVIOContext**, const char* url, AVDictionary* options);
++    int openPlaylist(AVIOContext**, const URL&);
++    int openMedia(AVIOContext**, const URL&, AVDictionary* options, bool crypto);
++    void closeInput(AVIOContext*);
++    bool addInput(std::unique_ptr<Input>&&);
++    void removeInput(Input*);
++    uint64_t segmentAhead() const;
++    void log(const char* format, ...) const WTF_ATTRIBUTE_PRINTF(2, 3);
++
++    const unsigned m_id;
++    const URL m_url;
++    const RefPtr<PlatformMediaResourceLoader> m_loader;
++    std::atomic<uint64_t> m_maxAhead;
++    std::atomic<bool> m_cancelled { false };
++    std::atomic<bool> m_live { false };
++
++    // the demux thread
++    std::string m_masterText;
++    size_t m_masterPosition { 0 };
++    AVIOContext* m_masterAVIO { nullptr };
++    String m_mainPlaylistURL;
++    HashSet<String> m_playlistURLs;
++    HashSet<String> m_keyURLs;
++    HashSet<String> m_initURLs;
++    HashMap<String, unsigned> m_playlistLoads;
++    std::atomic<unsigned> m_concurrentSegments { 1 };
++    unsigned m_openLogs { 0 };
++    std::string m_summary;
++
++    mutable Lock m_lock;
++    Vector<std::unique_ptr<Input>> m_inputs WTF_GUARDED_BY_LOCK(m_lock);
++    uint64_t m_closedReceived WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    unsigned m_segments WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    unsigned m_playlistSegments WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++    unsigned m_reloads WTF_GUARDED_BY_LOCK(m_lock) { 0 };
++};
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaPolicy.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaPolicy.cpp
+new file mode 100644
+index 00000000..72cfd4a0
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaPolicy.cpp
+@@ -0,0 +1,719 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "FFmpegMediaPolicy.h"
++
++#include <algorithm>
++#include <cstdlib>
++
++namespace WebCore {
++namespace FFmpegMediaPolicy {
++
++/* --- helpers ------------------------------------------------------------------------------ */
++
++static bool isSpace(char c)
++{
++    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
++}
++
++static std::string_view trim(std::string_view s)
++{
++    while (!s.empty() && isSpace(s.front()))
++        s.remove_prefix(1);
++    while (!s.empty() && isSpace(s.back()))
++        s.remove_suffix(1);
++    return s;
++}
++
++static char lower(char c)
++{
++    return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
++}
++
++static bool startsWithIgnoringCase(std::string_view s, std::string_view prefix)
++{
++    if (s.size() < prefix.size())
++        return false;
++    for (size_t i = 0; i < prefix.size(); ++i) {
++        if (lower(s[i]) != lower(prefix[i]))
++            return false;
++    }
++    return true;
++}
++
++static bool equalIgnoringCase(std::string_view a, std::string_view b)
++{
++    return a.size() == b.size() && startsWithIgnoringCase(a, b);
++}
++
++static bool startsWith(std::string_view s, std::string_view prefix)
++{
++    return s.substr(0, prefix.size()) == prefix;
++}
++
++static uint64_t toUnsigned(std::string_view s)
++{
++    std::string copy { trim(s) };
++    return strtoull(copy.c_str(), nullptr, 10);
++}
++
++static double toDouble(std::string_view s)
++{
++    std::string copy { trim(s) };
++    return strtod(copy.c_str(), nullptr);
++}
++
++// the lines of a playlist, without line ends, surrounding blanks and a leading byte order mark
++static std::vector<std::string_view> splitLines(std::string_view text)
++{
++    if (startsWith(text, "\xEF\xBB\xBF"))
++        text.remove_prefix(3);
++    std::vector<std::string_view> lines;
++    while (!text.empty()) {
++        size_t end = text.find('\n');
++        std::string_view line = text.substr(0, end);
++        lines.push_back(trim(line));
++        if (end == std::string_view::npos)
++            break;
++        text.remove_prefix(end + 1);
++    }
++    return lines;
++}
++
++// the part after "#TAG:" if the line is that tag
++static bool tagValue(std::string_view line, std::string_view tag, std::string_view& value)
++{
++    if (!startsWith(line, tag))
++        return false;
++    value = line.substr(tag.size());
++    return true;
++}
++
++/* --- codecs ------------------------------------------------------------------------------- */
++
++// "hvc1.2.4.L120.B0" -> "2"; "vp09.00.10.08" -> "00"
++static std::string_view codecField(std::string_view codec, size_t index)
++{
++    for (size_t i = 0; i < index; ++i) {
++        size_t dot = codec.find('.');
++        if (dot == std::string_view::npos)
++            return { };
++        codec.remove_prefix(dot + 1);
++    }
++    return codec.substr(0, codec.find('.'));
++}
++
++CodecKind classifyCodec(std::string_view codec)
++{
++    codec = trim(codec);
++    if (startsWithIgnoringCase(codec, "avc1") || startsWithIgnoringCase(codec, "avc3"))
++        return CodecKind::H264;
++    if (startsWithIgnoringCase(codec, "hvc1") || startsWithIgnoringCase(codec, "hev1")) {
++        // general_profile_space (A-C) then general_profile_idc
++        std::string_view profile = codecField(codec, 1);
++        if (!profile.empty() && lower(profile.front()) >= 'a' && lower(profile.front()) <= 'c')
++            profile.remove_prefix(1);
++        if (profile.empty())
++            return CodecKind::HEVCMain;
++        switch (toUnsigned(profile)) {
++        case 1: // Main
++        case 3: // Main Still Picture
++            return CodecKind::HEVCMain;
++        case 2:
++            return CodecKind::HEVCMain10;
++        default:
++            return CodecKind::HEVCOther;
++        }
++    }
++    for (auto prefix : { "dvh1", "dvhe", "dva1", "dvav" }) {
++        if (startsWithIgnoringCase(codec, prefix))
++            return CodecKind::DolbyVision;
++    }
++    if (startsWithIgnoringCase(codec, "av01"))
++        return CodecKind::AV1;
++    if (startsWithIgnoringCase(codec, "vp09")) {
++        std::string_view profile = codecField(codec, 1);
++        return profile.empty() || !toUnsigned(profile) ? CodecKind::VP9Profile0 : CodecKind::VP9Other;
++    }
++    if (equalIgnoringCase(codec, "vp9") || equalIgnoringCase(codec, "vp9.0"))
++        return CodecKind::VP9Profile0;
++    if (equalIgnoringCase(codec, "vp8") || equalIgnoringCase(codec, "vp8.0") || startsWithIgnoringCase(codec, "vp08"))
++        return CodecKind::VP8;
++    if (startsWithIgnoringCase(codec, "mp4v"))
++        return CodecKind::MPEG4Visual;
++    if (startsWithIgnoringCase(codec, "mp4a")) {
++        // the MPEG-4 object type: 40 MPEG-4 audio, 66-68 MPEG-2 AAC, 69/6B MP3, A5 AC-3, A6 E-AC-3
++        std::string_view type = codecField(codec, 1);
++        if (type.empty())
++            return CodecKind::AAC;
++        for (auto aac : { "40", "66", "67", "68" }) {
++            if (equalIgnoringCase(type, aac))
++                return CodecKind::AAC;
++        }
++        if (equalIgnoringCase(type, "69") || equalIgnoringCase(type, "6b"))
++            return CodecKind::MP3;
++        if (equalIgnoringCase(type, "a5"))
++            return CodecKind::AC3;
++        if (equalIgnoringCase(type, "a6"))
++            return CodecKind::EAC3;
++        return CodecKind::UnsupportedAudio;
++    }
++    if (equalIgnoringCase(codec, "opus"))
++        return CodecKind::Opus;
++    if (equalIgnoringCase(codec, "vorbis"))
++        return CodecKind::Vorbis;
++    if (equalIgnoringCase(codec, "flac"))
++        return CodecKind::FLAC;
++    if (equalIgnoringCase(codec, "mp3"))
++        return CodecKind::MP3;
++    if (equalIgnoringCase(codec, "ac-3"))
++        return CodecKind::AC3;
++    if (equalIgnoringCase(codec, "ec-3"))
++        return CodecKind::EAC3;
++    for (auto prefix : { "ac-4", "mha1", "mhm1", "dts", "alac", "ipcm", "fpcm", "lpcm" }) {
++        if (startsWithIgnoringCase(codec, prefix))
++            return CodecKind::UnsupportedAudio;
++    }
++    return CodecKind::Unknown;
++}
++
++const char* codecKindName(CodecKind kind)
++{
++    switch (kind) {
++    case CodecKind::Unknown: return "unknown";
++    case CodecKind::H264: return "h264";
++    case CodecKind::HEVCMain: return "hevc8";
++    case CodecKind::HEVCMain10: return "hevc10";
++    case CodecKind::HEVCOther: return "hevc-other";
++    case CodecKind::VP8: return "vp8";
++    case CodecKind::VP9Profile0: return "vp9";
++    case CodecKind::VP9Other: return "vp9-other";
++    case CodecKind::AV1: return "av1";
++    case CodecKind::DolbyVision: return "dolby-vision";
++    case CodecKind::MPEG4Visual: return "mpeg4";
++    case CodecKind::AAC: return "aac";
++    case CodecKind::MP3: return "mp3";
++    case CodecKind::Opus: return "opus";
++    case CodecKind::Vorbis: return "vorbis";
++    case CodecKind::FLAC: return "flac";
++    case CodecKind::AC3: return "ac3";
++    case CodecKind::EAC3: return "eac3";
++    case CodecKind::UnsupportedAudio: return "audio-other";
++    }
++    return "?";
++}
++
++bool isVideoCodec(CodecKind kind)
++{
++    return kind >= CodecKind::H264 && kind <= CodecKind::MPEG4Visual;
++}
++
++bool isAudioCodec(CodecKind kind)
++{
++    return kind >= CodecKind::AAC && kind <= CodecKind::UnsupportedAudio;
++}
++
++bool canDecode(CodecKind kind)
++{
++    switch (kind) {
++    case CodecKind::H264:
++    case CodecKind::HEVCMain:
++    case CodecKind::HEVCMain10:
++    case CodecKind::VP8:
++    case CodecKind::VP9Profile0:
++    case CodecKind::MPEG4Visual:
++    case CodecKind::AAC:
++    case CodecKind::MP3:
++    case CodecKind::Opus:
++    case CodecKind::Vorbis:
++    case CodecKind::FLAC:
++    case CodecKind::AC3:
++    case CodecKind::EAC3:
++        return true;
++    default:
++        return false;
++    }
++}
++
++// width x height within maxWidth x maxHeight in either orientation (0: not given, within)
++static bool within(unsigned width, unsigned height, unsigned maxWidth, unsigned maxHeight)
++{
++    if (!width || !height)
++        return true;
++    return std::max(width, height) <= std::max(maxWidth, maxHeight) && std::min(width, height) <= std::min(maxWidth, maxHeight);
++}
++
++Capability videoCapability(CodecKind kind, unsigned width, unsigned height, double fps)
++{
++    bool fps30 = fps <= 30.5;
++    bool fps60 = fps <= 60.5;
++    switch (kind) {
++    case CodecKind::HEVCMain:
++        // the rpivid block: 1080p30 measured; up to 4096 on a side it decodes, slower
++        if (within(width, height, 1920, 1080) && fps30)
++            return { true, true, true };
++        if (within(width, height, 4096, 4096) && fps60)
++            return { true, false, true };
++        return { };
++    case CodecKind::HEVCMain10:
++        // the block decodes it, the 10 -> 8-bit conversion runs on the CPU
++        if (within(width, height, 1920, 1080) && fps60)
++            return { true, false, false };
++        return { };
++    case CodecKind::H264:
++        // software only: 720p30 is real time beside the page, 1080p30 is not reliably
++        if (within(width, height, 1280, 720) && fps30)
++            return { true, true, false };
++        return { true, false, false };
++    case CodecKind::VP8:
++    case CodecKind::VP9Profile0:
++        if (within(width, height, 640, 360) && fps30)
++            return { true, true, false };
++        return { };
++    case CodecKind::MPEG4Visual:
++        return { true, within(width, height, 1280, 720) && fps30, false };
++    default:
++        return { };
++    }
++}
++
++Capability audioCapability(CodecKind kind)
++{
++    if (isAudioCodec(kind) && canDecode(kind))
++        return { true, true, true };
++    return { };
++}
++
++/* --- playlists ---------------------------------------------------------------------------- */
++
++Attributes parseAttributes(std::string_view text)
++{
++    Attributes attributes;
++    size_t i = 0;
++    while (i < text.size()) {
++        while (i < text.size() && (text[i] == ',' || isSpace(text[i])))
++            ++i;
++        size_t nameStart = i;
++        while (i < text.size() && text[i] != '=' && text[i] != ',')
++            ++i;
++        Attribute attribute;
++        attribute.name = std::string { trim(text.substr(nameStart, i - nameStart)) };
++        if (i < text.size() && text[i] == '=') {
++            ++i;
++            if (i < text.size() && text[i] == '"') {
++                size_t end = text.find('"', i + 1);
++                if (end == std::string_view::npos)
++                    end = text.size();
++                attribute.value = std::string { text.substr(i + 1, end - i - 1) };
++                attribute.quoted = true;
++                i = std::min(end + 1, text.size());
++            } else {
++                size_t end = text.find(',', i);
++                if (end == std::string_view::npos)
++                    end = text.size();
++                attribute.value = std::string { trim(text.substr(i, end - i)) };
++                i = end;
++            }
++        }
++        if (!attribute.name.empty())
++            attributes.push_back(std::move(attribute));
++    }
++    return attributes;
++}
++
++const std::string* findAttribute(const Attributes& attributes, std::string_view name)
++{
++    for (auto& attribute : attributes) {
++        if (attribute.name == name)
++            return &attribute.value;
++    }
++    return nullptr;
++}
++
++static std::string attributeOr(const Attributes& attributes, std::string_view name)
++{
++    auto* value = findAttribute(attributes, name);
++    return value ? *value : std::string { };
++}
++
++Playlist parsePlaylist(std::string_view text)
++{
++    Playlist playlist;
++    auto lines = splitLines(text);
++    size_t first = 0;
++    while (first < lines.size() && lines[first].empty())
++        ++first;
++    playlist.valid = first < lines.size() && lines[first] == "#EXTM3U";
++    bool pending = false;
++    Variant variant;
++    for (size_t i = first; i < lines.size(); ++i) {
++        std::string_view line = lines[i], value;
++        if (line.empty())
++            continue;
++        if (tagValue(line, "#EXT-X-STREAM-INF:", value)) {
++            variant = { };
++            variant.attributes = parseAttributes(value);
++            auto& a = variant.attributes;
++            variant.bandwidth = toUnsigned(attributeOr(a, "BANDWIDTH"));
++            if (auto* resolution = findAttribute(a, "RESOLUTION")) {
++                size_t x = resolution->find_first_of("xX");
++                if (x != std::string::npos) {
++                    variant.width = static_cast<unsigned>(toUnsigned(std::string_view { *resolution }.substr(0, x)));
++                    variant.height = static_cast<unsigned>(toUnsigned(std::string_view { *resolution }.substr(x + 1)));
++                }
++            }
++            variant.fps = toDouble(attributeOr(a, "FRAME-RATE"));
++            variant.codecs = attributeOr(a, "CODECS");
++            variant.audioGroup = attributeOr(a, "AUDIO");
++            variant.videoRange = attributeOr(a, "VIDEO-RANGE");
++            pending = true;
++        } else if (tagValue(line, "#EXT-X-MEDIA:", value)) {
++            Rendition rendition;
++            rendition.attributes = parseAttributes(value);
++            auto& a = rendition.attributes;
++            rendition.type = attributeOr(a, "TYPE");
++            rendition.groupID = attributeOr(a, "GROUP-ID");
++            rendition.name = attributeOr(a, "NAME");
++            rendition.uri = attributeOr(a, "URI");
++            rendition.codecs = attributeOr(a, "CODECS");
++            rendition.isDefault = attributeOr(a, "DEFAULT") == "YES";
++            rendition.autoselect = attributeOr(a, "AUTOSELECT") == "YES";
++            playlist.renditions.push_back(std::move(rendition));
++        } else if (startsWith(line, "#EXTINF") || startsWith(line, "#EXT-X-TARGETDURATION")) {
++            playlist.isMediaPlaylist = true;
++        } else if (startsWith(line, "#EXT-X-VERSION:") || line == "#EXT-X-INDEPENDENT-SEGMENTS" || startsWith(line, "#EXT-X-START:")) {
++            playlist.sessionTags.emplace_back(line);
++        } else if (tagValue(line, "#EXT-X-SESSION-KEY:", value)) {
++            playlist.sessionKeyMethod = attributeOr(parseAttributes(value), "METHOD");
++        } else if (line.front() != '#' && pending) {
++            variant.uri = std::string { line };
++            playlist.variants.push_back(std::move(variant));
++            variant = { };
++            pending = false;
++        }
++    }
++    return playlist;
++}
++
++MediaPlaylistInfo parseMediaPlaylist(std::string_view text)
++{
++    MediaPlaylistInfo info;
++    for (std::string_view line : splitLines(text)) {
++        std::string_view value;
++        if (tagValue(line, "#EXTINF:", value)) {
++            info.segments++;
++            info.totalDuration += toDouble(value.substr(0, value.find(',')));
++        } else if (tagValue(line, "#EXT-X-TARGETDURATION:", value))
++            info.targetDuration = toDouble(value);
++        else if (tagValue(line, "#EXT-X-MEDIA-SEQUENCE:", value))
++            info.mediaSequence = static_cast<int64_t>(toUnsigned(value));
++        else if (line == "#EXT-X-DISCONTINUITY")
++            info.discontinuities++;
++        else if (line == "#EXT-X-ENDLIST")
++            info.ended = true;
++        else if (tagValue(line, "#EXT-X-PLAYLIST-TYPE:", value))
++            info.ended |= trim(value) == "VOD";
++        else if (startsWith(line, "#EXT-X-BYTERANGE"))
++            info.byteRanges = true;
++        else if (tagValue(line, "#EXT-X-MAP:", value)) {
++            info.initSection = true;
++            auto attributes = parseAttributes(value);
++            if (auto* uri = findAttribute(attributes, "URI"))
++                info.initURIs.push_back(*uri);
++        }
++        else if (tagValue(line, "#EXT-X-KEY:", value)) {
++            auto attributes = parseAttributes(value);
++            std::string method = attributeOr(attributes, "METHOD");
++            std::string keyFormat = attributeOr(attributes, "KEYFORMAT");
++            if (method == "NONE")
++                continue;
++            if (method == "AES-128" && (keyFormat.empty() || keyFormat == "identity")) {
++                info.aes128 = true;
++                if (auto* uri = findAttribute(attributes, "URI"))
++                    info.keyURIs.push_back(*uri);
++                continue;
++            }
++            if (info.refusedKey.empty())
++                info.refusedKey = keyFormat.empty() ? method : method + "/" + keyFormat;
++        }
++    }
++    return info;
++}
++
++const char* variantClassName(VariantClass variantClass)
++{
++    switch (variantClass) {
++    case VariantClass::None: return "none";
++    case VariantClass::Fallback: return "fallback";
++    case VariantClass::Audio: return "audio";
++    case VariantClass::HEVCMain10: return "main10";
++    case VariantClass::H264: return "h264";
++    case VariantClass::HEVCMain: return "hevc8";
++    }
++    return "?";
++}
++
++static VariantVerdict judgeVariant(const Variant& variant, const Policy& policy)
++{
++    VariantVerdict verdict;
++    bool audioOK = true;
++    std::string badAudio, otherCodec;
++    std::string_view codecs = variant.codecs;
++    while (!trim(codecs).empty()) {
++        size_t comma = codecs.find(',');
++        std::string_view codec = trim(codecs.substr(0, comma));
++        CodecKind kind = classifyCodec(codec);
++        if (isVideoCodec(kind)) {
++            if (verdict.video == CodecKind::Unknown)
++                verdict.video = kind;
++        } else if (isAudioCodec(kind)) {
++            if (verdict.audio == CodecKind::Unknown)
++                verdict.audio = kind;
++            if (!canDecode(kind) && audioOK) {
++                audioOK = false;
++                badAudio = std::string { codec };
++            }
++        } else if (otherCodec.empty())
++            otherCodec = std::string { codec };
++        if (comma == std::string_view::npos)
++            break;
++        codecs.remove_prefix(comma + 1);
++    }
++    bool hasCodecs = !trim(variant.codecs).empty();
++    bool audioOnly = hasCodecs && verdict.video == CodecKind::Unknown && verdict.audio != CodecKind::Unknown;
++    // no CODECS (allowed): taken as H.264 and capped by its RESOLUTION
++    if (!hasCodecs)
++        verdict.video = CodecKind::H264;
++
++    if (variant.videoRange == "PQ" || variant.videoRange == "HLG") {
++        verdict.reason = "hdr video-range=" + variant.videoRange;
++        return verdict;
++    }
++    if (!audioOK) {
++        verdict.reason = "audio-codec=" + badAudio;
++        return verdict;
++    }
++    if (audioOnly) {
++        verdict.decodable = true;
++        verdict.eligibleAs = VariantClass::Audio;
++        verdict.reason = "audio-only";
++        return verdict;
++    }
++    if (verdict.video == CodecKind::Unknown) {
++        verdict.reason = "codec=" + (otherCodec.empty() ? std::string { "none" } : otherCodec);
++        return verdict;
++    }
++    verdict.decodable = canDecode(verdict.video);
++    bool hevcSize = within(variant.width, variant.height, policy.hevcMaxWidth, policy.hevcMaxHeight) && variant.fps <= policy.hevcMaxFps + 0.5;
++    bool h264Size = within(variant.width, variant.height, policy.h264MaxWidth, policy.h264MaxHeight) && variant.fps <= policy.h264MaxFps + 0.5;
++    switch (verdict.video) {
++    case CodecKind::HEVCMain:
++        verdict.eligibleAs = hevcSize ? VariantClass::HEVCMain : VariantClass::Fallback;
++        verdict.reason = hevcSize ? "hevc8" : "hevc8 above the cap";
++        break;
++    case CodecKind::H264:
++        verdict.eligibleAs = h264Size ? VariantClass::H264 : VariantClass::Fallback;
++        verdict.reason = h264Size ? (hasCodecs ? "h264" : "h264 (no CODECS)") : "h264 above the cap";
++        break;
++    case CodecKind::HEVCMain10:
++        verdict.eligibleAs = hevcSize ? VariantClass::HEVCMain10 : VariantClass::Fallback;
++        verdict.reason = hevcSize ? "main10 (CPU 10->8-bit conversion)" : "main10 above the cap";
++        break;
++    default:
++        verdict.eligibleAs = verdict.decodable ? VariantClass::Fallback : VariantClass::None;
++        verdict.reason = std::string { "codec=" } + codecKindName(verdict.video) + (verdict.decodable ? " not preferred" : " no decoder");
++        break;
++    }
++    return verdict;
++}
++
++// a better than b, both of the same class
++static bool better(const Variant& a, const Variant& b, VariantClass variantClass, const Policy& policy)
++{
++    if (variantClass == VariantClass::Fallback)
++        return a.bandwidth < b.bandwidth;
++    if (variantClass == VariantClass::Audio)
++        return a.bandwidth > b.bandwidth;
++    uint64_t pixelsA = static_cast<uint64_t>(a.width) * a.height, pixelsB = static_cast<uint64_t>(b.width) * b.height;
++    if (pixelsA != pixelsB)
++        return pixelsA > pixelsB;
++    if (!pixelsA) {
++        // no RESOLUTION: the highest BANDWIDTH up to the policy's limit, else the lowest
++        bool aUnder = a.bandwidth <= policy.unknownSizeMaxBandwidth, bUnder = b.bandwidth <= policy.unknownSizeMaxBandwidth;
++        if (aUnder != bUnder)
++            return aUnder;
++        return aUnder ? a.bandwidth > b.bandwidth : a.bandwidth < b.bandwidth;
++    }
++    return a.bandwidth < b.bandwidth;
++}
++
++static int chooseAudioRendition(const Playlist& playlist, const Variant& variant)
++{
++    if (variant.audioGroup.empty())
++        return -1;
++    int chosen = -1, chosenScore = -1;
++    for (size_t i = 0; i < playlist.renditions.size(); ++i) {
++        auto& rendition = playlist.renditions[i];
++        if (rendition.type != "AUDIO" || rendition.groupID != variant.audioGroup)
++            continue;
++        if (!rendition.codecs.empty() && !canDecode(classifyCodec(rendition.codecs)))
++            continue;
++        int score = rendition.isDefault ? 2 : rendition.autoselect ? 1 : 0;
++        if (score > chosenScore) {
++            chosen = static_cast<int>(i);
++            chosenScore = score;
++        }
++    }
++    return chosen;
++}
++
++Choice chooseVariant(const Playlist& playlist, const Policy& policy)
++{
++    Choice choice;
++    for (auto& variant : playlist.variants)
++        choice.verdicts.push_back(judgeVariant(variant, policy));
++    int count = static_cast<int>(playlist.variants.size());
++    if (!count) {
++        choice.rule = "none";
++        return choice;
++    }
++
++    if (policy.forcedVariant >= 0 && policy.forcedVariant < count) {
++        choice.variant = policy.forcedVariant;
++        choice.rule = "forced";
++    } else if (policy.mode != Policy::Mode::Default) {
++        bool lowest = policy.mode == Policy::Mode::Lowest;
++        choice.variant = 0;
++        for (int i = 1; i < count; ++i) {
++            uint64_t bandwidth = playlist.variants[i].bandwidth, chosen = playlist.variants[choice.variant].bandwidth;
++            if (lowest ? bandwidth < chosen : bandwidth > chosen)
++                choice.variant = i;
++        }
++        choice.rule = lowest ? "lowest" : "highest";
++    } else {
++        // the class order is the preference: HEVC 8-bit, H.264, HEVC Main10, any other decodable
++        // video (lowest bandwidth), audio only
++        for (auto variantClass : { VariantClass::HEVCMain, VariantClass::H264, VariantClass::HEVCMain10, VariantClass::Fallback, VariantClass::Audio }) {
++            for (int i = 0; i < count; ++i) {
++                if (choice.verdicts[i].eligibleAs != variantClass)
++                    continue;
++                if (choice.variant < 0 || better(playlist.variants[i], playlist.variants[choice.variant], variantClass, policy))
++                    choice.variant = i;
++            }
++            if (choice.variant >= 0) {
++                choice.rule = variantClassName(variantClass);
++                break;
++            }
++        }
++        if (choice.variant < 0) {
++            // nothing this player decodes: the lowest bandwidth, to fail with a reason in the log
++            choice.variant = 0;
++            for (int i = 1; i < count; ++i) {
++                if (playlist.variants[i].bandwidth < playlist.variants[choice.variant].bandwidth)
++                    choice.variant = i;
++            }
++            choice.rule = "undecodable";
++        }
++    }
++    choice.audioRendition = chooseAudioRendition(playlist, playlist.variants[choice.variant]);
++    return choice;
++}
++
++static std::string resolved(const std::string& uri, Resolver resolve, void* context)
++{
++    std::string absolute = resolve(uri, context);
++    return absolute.empty() ? uri : absolute;
++}
++
++static std::string serializeAttributes(const Attributes& attributes, Resolver resolve, void* context, std::initializer_list<std::string_view> skip)
++{
++    std::string out;
++    for (auto& attribute : attributes) {
++        if (std::find(skip.begin(), skip.end(), attribute.name) != skip.end())
++            continue;
++        if (!out.empty())
++            out += ',';
++        out += attribute.name;
++        out += '=';
++        std::string value = attribute.name == "URI" ? resolved(attribute.value, resolve, context) : attribute.value;
++        if (attribute.quoted)
++            out += '"' + value + '"';
++        else
++            out += value;
++    }
++    return out;
++}
++
++std::string synthesizeMaster(const Playlist& playlist, const Choice& choice, Resolver resolve, void* context)
++{
++    std::string out = "#EXTM3U\n";
++    for (auto& tag : playlist.sessionTags)
++        out += tag + '\n';
++    if (choice.variant < 0 || choice.variant >= static_cast<int>(playlist.variants.size()))
++        return out;
++    auto& variant = playlist.variants[choice.variant];
++    if (choice.audioRendition >= 0)
++        out += "#EXT-X-MEDIA:" + serializeAttributes(playlist.renditions[choice.audioRendition].attributes, resolve, context, { }) + '\n';
++    out += "#EXT-X-STREAM-INF:" + serializeAttributes(variant.attributes, resolve, context, { "SUBTITLES", "VIDEO" }) + '\n';
++    out += resolved(variant.uri, resolve, context) + '\n';
++    return out;
++}
++
++std::string resolveMediaPlaylist(std::string_view text, Resolver resolve, void* context)
++{
++    std::string out;
++    out.reserve(text.size() + text.size() / 2);
++    for (std::string_view line : splitLines(text)) {
++        if (line.empty()) {
++            out += '\n';
++            continue;
++        }
++        if (line.front() != '#') {
++            out += resolved(std::string { line }, resolve, context) + '\n';
++            continue;
++        }
++        size_t uri = line.find("URI=\"");
++        if (uri == std::string_view::npos) {
++            out.append(line);
++            out += '\n';
++            continue;
++        }
++        size_t start = uri + 5, end = line.find('"', start);
++        if (end == std::string_view::npos) {
++            out.append(line);
++            out += '\n';
++            continue;
++        }
++        out.append(line.substr(0, start));
++        out += resolved(std::string { line.substr(start, end - start) }, resolve, context);
++        out.append(line.substr(end));
++        out += '\n';
++    }
++    return out;
++}
++
++} // namespace FFmpegMediaPolicy
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaPolicy.h b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaPolicy.h
+new file mode 100644
+index 00000000..e1d6151b
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaPolicy.h
+@@ -0,0 +1,207 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#pragma once
++
++// What the FFmpeg media player decodes well on this device, and the HLS playlist work that
++// follows from it. Plain C++ (no WTF, no FFmpeg): the same file builds into WebCore and into
++// a host test program.
++//
++//   codecs        RFC 6381 codec strings -> a kind; the decoding table (supported, smooth,
++//                 power-efficient) that canPlayType, MediaCapabilities and the variant choice
++//                 all use: HEVC 8-bit up to 1080p30 on the rpivid block, H.264 up to 720p30
++//                 on the CPU, never AV1, Dolby Vision, VP9 above 8 bit or HDR
++//   playlists     an HLS master or media playlist parsed; one variant chosen (HEVC 8-bit
++//                 first, then H.264, then HEVC Main10); a master with only that variant and
++//                 its audio rendition written for FFmpeg's hls demuxer (which would otherwise
++//                 open every variant); a media playlist's URIs made absolute
++
++#include <cstdint>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace WebCore {
++namespace FFmpegMediaPolicy {
++
++/* --- codecs ------------------------------------------------------------------------------- */
++
++enum class CodecKind : uint8_t {
++    Unknown,
++    // video
++    H264,
++    HEVCMain,         // Main and Main Still Picture: 8-bit 4:2:0 (the rpivid block)
++    HEVCMain10,       // 10-bit: decodes, converted to 8-bit on the CPU
++    HEVCOther,        // range extensions and the rest: not offered
++    VP8,
++    VP9Profile0,
++    VP9Other,         // profiles 1-3 (4:4:4, 10/12-bit): not offered
++    AV1,              // no decoder in this build
++    DolbyVision,      // dvh1/dvhe/dva1/dvav: HDR, no output for it
++    MPEG4Visual,
++    // audio
++    AAC,
++    MP3,
++    Opus,
++    Vorbis,
++    FLAC,
++    AC3,
++    EAC3,
++    UnsupportedAudio, // ac-4, mha1, ...
++};
++
++CodecKind classifyCodec(std::string_view);
++const char* codecKindName(CodecKind);
++bool isVideoCodec(CodecKind);
++bool isAudioCodec(CodecKind);
++// the build has a decoder for it and it is worth offering (canPlayType "probably")
++bool canDecode(CodecKind);
++
++struct Capability {
++    bool supported { false };
++    bool smooth { false };
++    bool powerEfficient { false };
++};
++
++// The decoding table (MSE-DESIGN.md §6.7); width/height 0 or fps 0: not given (taken as within
++// the caps), the caps apply to either orientation.
++Capability videoCapability(CodecKind, unsigned width, unsigned height, double fps);
++Capability audioCapability(CodecKind);
++
++/* --- playlists ---------------------------------------------------------------------------- */
++
++struct Attribute {
++    std::string name;
++    std::string value;
++    bool quoted { false };
++};
++using Attributes = std::vector<Attribute>;
++
++// an attribute list (RFC 8216 §4.2): NAME=value,NAME="quoted, value"
++Attributes parseAttributes(std::string_view);
++const std::string* findAttribute(const Attributes&, std::string_view name);
++
++struct Variant {
++    Attributes attributes;
++    std::string uri;
++    uint64_t bandwidth { 0 };
++    unsigned width { 0 };
++    unsigned height { 0 };
++    double fps { 0 };
++    std::string codecs;
++    std::string audioGroup;
++    std::string videoRange;
++};
++
++struct Rendition {
++    Attributes attributes;
++    std::string type;
++    std::string groupID;
++    std::string name;
++    std::string uri;
++    std::string codecs;
++    bool isDefault { false };
++    bool autoselect { false };
++};
++
++struct Playlist {
++    // #EXTINF / #EXT-X-TARGETDURATION seen: a media playlist (nothing to choose)
++    bool isMediaPlaylist { false };
++    bool valid { false }; // starts with #EXTM3U
++    std::vector<Variant> variants;
++    std::vector<Rendition> renditions;
++    // master tags that apply to the whole presentation, copied into the synthesized master
++    std::vector<std::string> sessionTags;
++    // #EXT-X-SESSION-KEY METHOD (empty: none)
++    std::string sessionKeyMethod;
++};
++
++Playlist parsePlaylist(std::string_view);
++
++struct MediaPlaylistInfo {
++    unsigned segments { 0 };
++    double totalDuration { 0 };
++    double targetDuration { 0 };
++    int64_t mediaSequence { 0 };
++    unsigned discontinuities { 0 };
++    bool ended { false };        // #EXT-X-ENDLIST or PLAYLIST-TYPE:VOD
++    bool byteRanges { false };
++    bool initSection { false };  // #EXT-X-MAP
++    bool aes128 { false };
++    // an encryption the player cannot decrypt (SAMPLE-AES, a DRM key format): "METHOD[/KEYFORMAT]"
++    std::string refusedKey;
++    std::vector<std::string> keyURIs;
++    std::vector<std::string> initURIs;
++};
++
++MediaPlaylistInfo parseMediaPlaylist(std::string_view);
++
++struct Policy {
++    unsigned hevcMaxWidth { 1920 };
++    unsigned hevcMaxHeight { 1080 };
++    double hevcMaxFps { 30 };
++    unsigned h264MaxWidth { 1280 };
++    unsigned h264MaxHeight { 720 };
++    double h264MaxFps { 30 };
++    // variants without RESOLUTION (and so without a size to cap): the highest BANDWIDTH up to this
++    uint64_t unknownSizeMaxBandwidth { 3000000 };
++    enum class Mode : uint8_t { Default, Lowest, Highest };
++    Mode mode { Mode::Default };
++    int forcedVariant { -1 };
++};
++
++enum class VariantClass : uint8_t { None, Fallback, Audio, HEVCMain10, H264, HEVCMain };
++const char* variantClassName(VariantClass);
++
++struct VariantVerdict {
++    VariantClass eligibleAs { VariantClass::None };
++    CodecKind video { CodecKind::Unknown };
++    CodecKind audio { CodecKind::Unknown };
++    bool decodable { false };
++    std::string reason;
++};
++
++struct Choice {
++    int variant { -1 };
++    // hevc8 | h264 | main10 | audio | fallback | lowest | highest | forced | none
++    std::string rule;
++    int audioRendition { -1 };
++    std::vector<VariantVerdict> verdicts;
++};
++
++Choice chooseVariant(const Playlist&, const Policy&);
++
++using Resolver = std::string (*)(const std::string& uri, void* context);
++
++// The master FFmpeg's hls demuxer gets: the session tags, the chosen variant's audio rendition
++// and the variant (without SUBTITLES / VIDEO groups), every URI through `resolve`.
++std::string synthesizeMaster(const Playlist&, const Choice&, Resolver, void* context);
++
++// A media playlist with every URI (segment lines, URI="..." attributes) through `resolve`, and
++// without a byte order mark.
++std::string resolveMediaPlaylist(std::string_view, Resolver, void* context);
++
++} // namespace FFmpegMediaPolicy
++} // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.cpp
+index 5de1207b..4b2761eb 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.cpp
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.cpp
+@@ -55,6 +55,10 @@ static constexpr size_t kIOBufferSize = 64 * 1024;
+ // the window behind, which on Phoenix stay resident (mimalloc cannot decommit there).
+ static constexpr uint64_t kCompactStep = 4 * 1024 * 1024;
+ static constexpr uint64_t kKeepBehind = 1024 * 1024;
++// A resource of known size gets a buffer of its size when that is less than the window (an HLS
++// segment of 1 MB, a playlist of 2 kB); one of unknown size starts with this much and gets the
++// whole window only when it outgrows it.
++static constexpr uint64_t kUnknownSizeFirst = 256 * 1024;
+ 
+ class FFmpegMediaStreamClient final : public PlatformMediaResourceClient {
+ public:
+@@ -86,9 +90,10 @@ private:
+     unsigned m_request;
+ };
+ 
+-RefPtr<FFmpegMediaStream> FFmpegMediaStream::create(const URL& url, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead)
++RefPtr<FFmpegMediaStream> FFmpegMediaStream::create(const URL& url, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead, std::optional<Range> range)
+ {
+-    ASSERT(isMainThread());
++    if (range && range->end <= range->start)
++        return nullptr;
+     int fd = -1;
+     if (url.protocolIsFile()) {
+         fd = open(url.fileSystemPath().utf8().data(), O_RDONLY);
+@@ -96,26 +101,35 @@ RefPtr<FFmpegMediaStream> FFmpegMediaStream::create(const URL& url, RefPtr<Platf
+             return nullptr;
+     } else if (!loader)
+         return nullptr;
+-    return adoptRef(*new FFmpegMediaStream(url, fd, WTF::move(loader), maxAhead));
++    return adoptRef(*new FFmpegMediaStream(url, fd, WTF::move(loader), maxAhead, range));
+ }
+ 
+-FFmpegMediaStream::FFmpegMediaStream(const URL& url, int fd, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead)
+-    : m_url(url)
++FFmpegMediaStream::FFmpegMediaStream(const URL& url, int fd, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead, std::optional<Range> range)
++    : m_url(url.isolatedCopy())
+     , m_fd(fd)
++    , m_range(range)
+     , m_loader(WTF::move(loader))
+     , m_maxAhead(std::max<uint64_t>(maxAhead, kIOBufferSize))
+ {
++    Locker locker { m_lock };
++    m_responseURL = m_url.isolatedCopy();
+     if (m_fd >= 0) {
+         struct stat st;
+         if (!fstat(m_fd, &st) && st.st_size > 0) {
+-            Locker locker { m_lock };
+             m_size = st.st_size;
+             m_received = st.st_size;
+         }
++        if (m_range) {
++            m_size = m_size ? std::min(*m_size, m_range->end) : m_range->end;
++            m_position = m_range->start;
++        }
+         return;
+     }
+-    Locker locker { m_lock };
+-    startRequestLocked(0);
++    if (m_range) {
++        m_size = m_range->end;
++        m_position = m_bufferStart = m_range->start;
++    }
++    startRequestLocked(m_position);
+ }
+ 
+ FFmpegMediaStream::~FFmpegMediaStream()
+@@ -210,6 +224,25 @@ void FFmpegMediaStream::setMaxAhead(uint64_t maxAhead)
+         startRequestLocked(end);
+ }
+ 
++size_t FFmpegMediaStream::peek(std::span<uint8_t> out)
++{
++    size_t total = 0;
++    while (total < out.size()) {
++        int n = read(out.subspan(total));
++        if (n <= 0)
++            break;
++        total += n;
++    }
++    seek(m_range ? m_range->start : 0, SEEK_SET);
++    return total;
++}
++
++URL FFmpegMediaStream::responseURL() const
++{
++    Locker locker { m_lock };
++    return m_responseURL.isolatedCopy();
++}
++
+ int FFmpegMediaStream::readPacket(void* opaque, uint8_t* data, int size)
+ {
+     return static_cast<FFmpegMediaStream*>(opaque)->read({ data, static_cast<size_t>(size) });
+@@ -307,6 +340,14 @@ int64_t FFmpegMediaStream::seek(int64_t offset, int whence)
+ void FFmpegMediaStream::startRequestLocked(uint64_t position)
+ {
+     ASSERT(m_fd < 0);
++    if (m_range && position >= m_range->end) {
++        // the whole range is here (or was read): nothing to ask for
++        m_requestActive = false;
++        m_requestDone = true;
++        m_failed = false;
++        m_condition.notifyAll();
++        return;
++    }
+     unsigned request = ++m_request;
+     m_requestActive = true;
+     m_requestDone = false;
+@@ -325,7 +366,9 @@ void FFmpegMediaStream::startRequestLocked(uint64_t position)
+         }
+         ResourceRequest resourceRequest(URL { protectedThis->m_url });
+         resourceRequest.setAllowCookies(true);
+-        if (position)
++        if (auto& range = protectedThis->m_range)
++            resourceRequest.setHTTPHeaderField(HTTPHeaderName::Range, makeString("bytes="_s, position, '-', range->end - 1));
++        else if (position)
+             resourceRequest.setHTTPHeaderField(HTTPHeaderName::Range, makeString("bytes="_s, position, '-'));
+ #if USE(SOUP)
+         // the Content-Length must be the bytes we get
+@@ -357,6 +400,8 @@ void FFmpegMediaStream::didReceiveResponse(unsigned request, const ResourceRespo
+     if (request != m_request)
+         return;
+     bool partial = response.httpStatusCode() == httpStatus206PartialContent;
++    if (!response.url().isEmpty())
++        m_responseURL = response.url().isolatedCopy();
+     uint64_t length = response.httpHeaderFields().contains(HTTPHeaderName::ContentEncoding) ? 0 : response.expectedContentLength();
+     if (m_bufferStart && !partial) {
+         // the server ignored the Range header: the body starts at 0
+@@ -377,13 +422,30 @@ void FFmpegMediaStream::didReceiveData(unsigned request, std::span<const uint8_t
+         m_discard -= skip;
+         data = data.subspan(skip);
+     }
++    if (m_range) {
++        // a server that ignored the Range header sends on past the range's end
++        uint64_t end = m_bufferStart + m_buffer.size();
++        data = data.first(std::min<uint64_t>(data.size(), *m_size > end ? *m_size - end : 0));
++    }
+     if (data.empty())
+         return;
+-    if (m_buffer.size() + data.size() > m_buffer.capacity())
+-        m_buffer.reserveCapacity(std::max<size_t>(m_buffer.size() + data.size(), m_maxAhead + kCompactStep + kKeepBehind + kIOBufferSize));
++    if (m_buffer.size() + data.size() > m_buffer.capacity()) {
++        uint64_t window = m_maxAhead + kCompactStep + kKeepBehind + kIOBufferSize;
++        if (m_size && *m_size > m_bufferStart)
++            window = std::min(window, *m_size - m_bufferStart);
++        else if (!m_size && m_buffer.capacity() < kUnknownSizeFirst)
++            window = std::min(window, kUnknownSizeFirst);
++        m_buffer.reserveCapacity(std::max<size_t>(m_buffer.size() + data.size(), window));
++    }
+     m_buffer.append(data);
+     m_received += data.size();
+     m_condition.notifyAll();
++    if (m_range && m_bufferStart + m_buffer.size() >= *m_size) {
++        // the range is complete: no more of that response
++        stopRequestLocked();
++        m_requestDone = true;
++        return;
++    }
+     if (m_bufferStart + m_buffer.size() - std::max(m_position, m_bufferStart) > m_maxAhead)
+         stopRequestLocked();
+ }
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.h b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.h
+index 4a9bfb2f..9d91f54a 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.h
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.h
+@@ -28,6 +28,7 @@
+ #if ENABLE(VIDEO) && USE(FFMPEG)
+ 
+ #include <optional>
++#include <span>
+ #include <wtf/Condition.h>
+ #include <wtf/Lock.h>
+ #include <wtf/ThreadSafeRefCounted.h>
+@@ -48,10 +49,21 @@ class ResourceResponse;
+ // webkitwebsrc does: a seek outside the bytes already here is a new request with a Range
+ // header, and a request is stopped while more than the read-ahead limit waits unread (and
+ // started again below a quarter of it).
++//
++// A stream may also be a byte range of the resource ([start, end): an HLS segment named by
++// EXT-X-BYTERANGE): its positions stay the resource's, it starts at `start` (the first request
++// asks for "bytes=start-(end-1)") and ends at `end`.
+ class FFmpegMediaStream final : public ThreadSafeRefCounted<FFmpegMediaStream> {
+ public:
+-    // Main thread. nullptr if a local file cannot be opened. maxAhead: the read-ahead limit.
+-    static RefPtr<FFmpegMediaStream> create(const URL&, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead);
++    struct Range {
++        uint64_t start { 0 };
++        uint64_t end { 0 };
++    };
++
++    // Any thread (the HLS demuxer opens its segments from the demux thread; requests are always
++    // made on the main thread). nullptr if a local file cannot be opened. maxAhead: the
++    // read-ahead limit.
++    static RefPtr<FFmpegMediaStream> create(const URL&, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead, std::optional<Range> = std::nullopt);
+     ~FFmpegMediaStream();
+ 
+     // The demux thread. The context is owned by the stream.
+@@ -64,6 +76,13 @@ public:
+     // A request stopped by the old limit starts again at once if the new one leaves room.
+     void setMaxAhead(uint64_t);
+ 
++    // The demux thread: up to out.size() bytes from the resource's start, without consuming them
++    // (the next read starts at the start again). The number of bytes, 0 on an error or no data.
++    size_t peek(std::span<uint8_t> out);
++
++    // Any thread: the URL of the last response (after redirects; the request's URL before one).
++    URL responseURL() const;
++
+     bool isLocalFile() const { return m_fd >= 0; }
+     uint64_t bytesReceived() const;
+     std::optional<uint64_t> size() const;
+@@ -84,7 +103,7 @@ public:
+     void didFinish(unsigned request, bool failed);
+ 
+ private:
+-    FFmpegMediaStream(const URL&, int fd, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead);
++    FFmpegMediaStream(const URL&, int fd, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead, std::optional<Range>);
+ 
+     static int readPacket(void*, uint8_t*, int);
+     static int64_t seekPacket(void*, int64_t, int);
+@@ -96,6 +115,8 @@ private:
+ 
+     const URL m_url;
+     const int m_fd { -1 };
++    // a byte range: where reading starts and the Range header's end (m_size is the range's end)
++    const std::optional<Range> m_range;
+     RefPtr<PlatformMediaResourceLoader> m_loader;
+     AVIOContext* m_avio { nullptr };
+ 
+@@ -108,6 +129,7 @@ private:
+     uint64_t m_received WTF_GUARDED_BY_LOCK(m_lock) { 0 };
+     std::optional<uint64_t> m_size WTF_GUARDED_BY_LOCK(m_lock);
+     uint64_t m_maxAhead WTF_GUARDED_BY_LOCK(m_lock);
++    URL m_responseURL WTF_GUARDED_BY_LOCK(m_lock);
+     // bytes to drop at the head of a response that ignored the Range header (status 200)
+     uint64_t m_discard WTF_GUARDED_BY_LOCK(m_lock) { 0 };
+     unsigned m_request WTF_GUARDED_BY_LOCK(m_lock) { 0 };
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
+index d5120cf5..a20a8afc 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
+@@ -31,10 +31,14 @@
+ #include "CoordinatedPlatformLayerBufferFFmpeg.h"
+ #include "CoordinatedPlatformLayerBufferProxy.h"
+ #include "DestinationColorSpace.h"
++#include "FFmpegHLSSession.h"
++#include "FFmpegMediaPolicy.h"
+ #include "FFmpegMediaStream.h"
++#include "MIMETypeRegistry.h"
+ #include "MediaPlayer.h"
+ #include "PlatformMediaResourceLoader.h"
+ #include "PlatformTimeRanges.h"
++#include <cmath>
+ #include <cstdarg>
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -69,6 +73,12 @@ static constexpr double kAudioChunk = 0.01;  // silence is written in chunks of
+ static constexpr double kAudioLate = 0.05;   // a sound frame heard later than this is dropped
+ static constexpr double kAudioEarly = 0.02;  // ... earlier than this waits behind silence
+ static constexpr double kLateDrop = 0.10;    // a picture later than this is dropped
++// HLS: no picture this long after the last one's time while playing: a rebuffer (the clock
++// holds); a timestamp jump larger than this between pictures or sounds: a discontinuity
++static constexpr double kStallAfter = 0.25;
++static constexpr double kDiscontinuity = 1.0;
++// HLS: the top-level playlist is read whole, up to this
++static constexpr size_t kPlaylistMax = 1024 * 1024;
+ static constexpr size_t kQueueMaxPackets = 256;
+ static const char* const kAudioDevice = "/dev/audio0";
+ // one writer of the device in the whole system: a process-owned record lock (dropped at exit)
+@@ -216,21 +226,58 @@ static const HashSet<String>& mimeTypeCache()
+         for (auto type : { "video/mp4"_s, "audio/mp4"_s, "video/x-m4v"_s, "audio/x-m4a"_s, "video/quicktime"_s, "video/webm"_s,
+             "audio/webm"_s, "video/x-matroska"_s, "audio/x-matroska"_s, "video/mp2t"_s, "audio/mpeg"_s, "audio/mp3"_s,
+             "audio/aac"_s, "audio/ogg"_s, "video/ogg"_s, "application/ogg"_s, "audio/flac"_s, "audio/x-flac"_s, "audio/wav"_s,
+-            "audio/x-wav"_s, "audio/wave"_s })
++            "audio/x-wav"_s, "audio/wave"_s,
++            // HLS (FFmpeg's hls demuxer, the playlists and segments fetched by WebKit's loader)
++            "application/vnd.apple.mpegurl"_s, "application/x-mpegurl"_s, "application/mpegurl"_s, "audio/mpegurl"_s, "audio/x-mpegurl"_s })
+             types.add(type);
+         return types;
+     }();
+     return cache;
+ }
+ 
++// RFC 6381 names (mp4/webm/HLS) and the bare names some pages use: what this build decodes and
++// is worth offering (FFmpegMediaPolicy: not AV1, Dolby Vision, VP9 above profile 0, HEVC range
++// extensions)
+ static bool codecIsSupported(const String& codec)
+ {
+-    // RFC 6381 names (mp4/webm) and the bare names some pages use
+-    for (auto prefix : { "avc1"_s, "avc3"_s, "hvc1"_s, "hev1"_s, "vp09"_s, "vp9"_s, "vp8"_s, "mp4a"_s, "mp4v"_s, "opus"_s,
+-        "vorbis"_s, "flac"_s, "fLaC"_s, "mp3"_s, "Opus"_s, "theora"_s })
+-        if (codec.startsWith(prefix))
+-            return true;
+-    return false;
++    return FFmpegMediaPolicy::canDecode(FFmpegMediaPolicy::classifyCodec(codec.utf8().data()));
++}
++
++static bool isHLSType(const String& type)
++{
++    return MIMETypeRegistry::isTextMediaPlaylistMIMEType(type);
++}
++
++static bool isPlaylistPath(const URL& url)
++{
++    auto path = url.path();
++    return path.endsWithIgnoringASCIICase(".m3u8"_s) || path.endsWithIgnoringASCIICase(".m3u"_s);
++}
++
++static const char* supportsTypeName(MediaPlayer::SupportsType answer)
++{
++    switch (answer) {
++    case MediaPlayer::SupportsType::IsSupported:
++        return "probably";
++    case MediaPlayer::SupportsType::MayBeSupported:
++        return "maybe";
++    case MediaPlayer::SupportsType::IsNotSupported:
++        break;
++    }
++    return "";
++}
++
++static const char* decodingTypeName(PlatformMediaDecodingType type)
++{
++    switch (type) {
++    case PlatformMediaDecodingType::FileOrHLS:
++        return "file";
++    case PlatformMediaDecodingType::MediaSource:
++        return "media-source";
++    case PlatformMediaDecodingType::MediaStream:
++        return "media-stream";
++    }
++    return "?";
+ }
+ 
+ void MediaPlayerPrivateFFmpeg::getSupportedTypes(HashSet<String>& types)
+@@ -242,13 +289,13 @@ void MediaPlayerPrivateFFmpeg::getSupportedTypes(HashSet<String>& types)
+     types = mimeTypeCache();
+ }
+ 
+-MediaPlayer::SupportsType MediaPlayerPrivateFFmpeg::supportsType(const MediaEngineSupportParameters& parameters)
++static MediaPlayer::SupportsType answerSupportsType(const MediaEngineSupportParameters& parameters)
+ {
+     if (mediaDisabled())
+         return MediaPlayer::SupportsType::IsNotSupported;
+     if (parameters.platformType != PlatformMediaDecodingType::FileOrHLS)
+         return MediaPlayer::SupportsType::IsNotSupported;
+-    auto containerType = parameters.type.containerType();
++    auto containerType = parameters.type.containerType().convertToASCIILowercase();
+     if (containerType.isEmpty() || !mimeTypeCache().contains(containerType))
+         return MediaPlayer::SupportsType::IsNotSupported;
+     auto codecs = parameters.type.codecs();
+@@ -262,6 +309,18 @@ MediaPlayer::SupportsType MediaPlayerPrivateFFmpeg::supportsType(const MediaEngi
+     return MediaPlayer::SupportsType::IsSupported;
+ }
+ 
++MediaPlayer::SupportsType MediaPlayerPrivateFFmpeg::supportsType(const MediaEngineSupportParameters& parameters)
++{
++    auto answer = answerSupportsType(parameters);
++    // canPlayType() and the engine choice of every load ask here; the first 200 per process
++    static std::atomic<unsigned> logged { 0 };
++    if (logged++ < 200) {
++        fprintf(stderr, "WPEB-MEDIA mono=%llu canplaytype type=%s platform=%s answer=%s\n", static_cast<unsigned long long>(monotonicMs()),
++            parameters.type.raw().utf8().data(), decodingTypeName(parameters.platformType), supportsTypeName(answer));
++    }
++    return answer;
++}
++
+ class MediaPlayerFactoryFFmpeg final : public MediaPlayerFactory {
+     WTF_MAKE_TZONE_ALLOCATED(MediaPlayerFactoryFFmpeg);
+     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(MediaPlayerFactoryFFmpeg);
+@@ -437,10 +496,23 @@ void MediaPlayerPrivateFFmpeg::commitLoad()
+     RefPtr<PlatformMediaResourceLoader> loader;
+     if (!url.protocolIsFile())
+         loader = player->mediaResourceLoader();
+-    m_stream = FFmpegMediaStream::create(url, WTF::move(loader), m_hasPlayed ? mediaAheadBytes() : mediaIdleAheadBytes());
++    size_t ahead = m_hasPlayed ? mediaAheadBytes() : mediaIdleAheadBytes();
++    // HLS by type or by name here; by content (#EXTM3U) on the demux thread
++    m_isHLS = isHLSType(player->contentMIMEType()) || isPlaylistPath(url);
++    m_hls = FFmpegHLSSession::create(m_id, url, RefPtr { loader }, ahead);
++    m_playRequested = !m_paused;
++    m_hlsIdle = false;
++    m_preloadAuto = m_preload == MediaPlayer::Preload::Auto;
++    m_rebuffers = 0;
++    m_hlsBufferedStart = m_hlsBufferedEnd = 0;
++    m_firstFrameShown = false;
++    m_hlsLive = false;
++    m_hlsSummary = { };
++    m_stream = FFmpegMediaStream::create(url, WTF::move(loader), ahead);
+     updateReadAhead();
+-    log("load uri=%s local=%d mime=%s preload=%s ahead_kb=%zu stack_kb=%zu", url.string().utf8().data(), url.protocolIsFile(),
+-        player->contentMIMEType().utf8().data(), preloadName(m_preload), static_cast<size_t>(m_queueMaxBytes.load() / 1024), mediaThreadStack() / 1024);
++    log("load uri=%s local=%d mime=%s preload=%s ahead_kb=%zu stack_kb=%zu hls=%d", url.string().utf8().data(), url.protocolIsFile(),
++        player->contentMIMEType().utf8().data(), preloadName(m_preload), static_cast<size_t>(m_queueMaxBytes.load() / 1024), mediaThreadStack() / 1024,
++        m_isHLS.load());
+     if (!m_stream) {
+         log("error open-failed uri=%s errno=%d", url.string().utf8().data(), errno);
+         setNetworkState(MediaPlayer::NetworkState::NetworkError);
+@@ -458,6 +530,7 @@ void MediaPlayerPrivateFFmpeg::commitLoad()
+ void MediaPlayerPrivateFFmpeg::setPreload(MediaPlayer::Preload preload)
+ {
+     m_preload = preload;
++    m_preloadAuto = preload == MediaPlayer::Preload::Auto;
+     if (m_isDelayingLoad && preload != MediaPlayer::Preload::None)
+         commitLoad();
+ }
+@@ -466,6 +539,7 @@ void MediaPlayerPrivateFFmpeg::setPreload(MediaPlayer::Preload preload)
+ void MediaPlayerPrivateFFmpeg::prepareToPlay()
+ {
+     m_preload = MediaPlayer::Preload::Auto;
++    m_preloadAuto = true;
+     if (m_isDelayingLoad)
+         commitLoad();
+ }
+@@ -478,6 +552,8 @@ void MediaPlayerPrivateFFmpeg::updateReadAhead()
+     m_queueMaxBytes = ahead;
+     if (m_stream)
+         m_stream->setMaxAhead(ahead);
++    if (m_hls)
++        m_hls->setMaxAhead(ahead);
+ }
+ 
+ #if ENABLE(MEDIA_SOURCE)
+@@ -510,6 +586,8 @@ void MediaPlayerPrivateFFmpeg::stop()
+     m_isDelayingLoad = false;
+     if (m_stream)
+         m_stream->cancel();
++    if (m_hls)
++        m_hls->cancel();
+     queueAbort(m_videoQueue);
+     queueAbort(m_audioQueue);
+     for (auto* thread : { &m_demuxThread, &m_videoThread, &m_audioThread }) {
+@@ -524,10 +602,17 @@ void MediaPlayerPrivateFFmpeg::stop()
+     avcodec_free_context(&m_videoDecoder);
+     avcodec_free_context(&m_audioDecoder);
+     if (m_format) {
+-        // the AVIOContext is the stream's
++        // the AVIOContext is the stream's (HLS: the session's)
+         m_format->pb = nullptr;
+         avformat_close_input(&m_format);
+     }
++    if (m_hls) {
++        m_hls->closed();
++        m_hls = nullptr;
++    }
++    m_isHLS = false;
++    m_hlsIdle = false;
++    m_playRequested = false;
+     if (m_audioFd >= 0) {
+         // the ring replays what it holds after close: leave it full of silence
+         audioSilence(0.25);
+@@ -561,7 +646,8 @@ AVCodecContext* MediaPlayerPrivateFFmpeg::openDecoder(int index)
+         return nullptr;
+     avcodec_parameters_to_context(context, stream->codecpar);
+     context->pkt_timebase = stream->time_base;
+-    context->thread_count = envNumber("WPE_PHOENIX_MEDIA_THREADS", 0);
++    // HLS: H.264 (720p30) needs less than three cores; the page and the compositor share them
++    context->thread_count = envNumber("WPE_PHOENIX_MEDIA_THREADS", m_isHLS && codec->id == AV_CODEC_ID_H264 ? 3 : 0);
+     context->opaque = &m_hardwareState;
+     if (avcodec_open2(context, codec, nullptr) < 0) {
+         log("error decoder-open codec=%s", codec->name);
+@@ -577,6 +663,19 @@ AVCodecContext* MediaPlayerPrivateFFmpeg::openDecoder(int index)
+ 
+ bool MediaPlayerPrivateFFmpeg::openContainer()
+ {
++    if (!m_isHLS) {
++        // an HLS playlist under another name or type
++        uint8_t head[10];
++        size_t n = m_stream->peek(head);
++        size_t bom = n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF ? 3 : 0;
++        if (n >= bom + 7 && !memcmp(head + bom, "#EXTM3U", 7)) {
++            log("hls sniffed #EXTM3U");
++            m_isHLS = true;
++        }
++    }
++    if (m_isHLS)
++        return openHLS();
++
+     AVIOContext* avio = m_stream->avioContext();
+     m_format = avformat_alloc_context();
+     if (!avio || !m_format)
+@@ -595,6 +694,11 @@ bool MediaPlayerPrivateFFmpeg::openContainer()
+     m_containerDuration = m_format->duration != AV_NOPTS_VALUE ? m_format->duration / static_cast<double>(AV_TIME_BASE) : 0;
+     m_videoStream = av_find_best_stream(m_format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+     m_audioStream = av_find_best_stream(m_format, AVMEDIA_TYPE_AUDIO, -1, m_videoStream, nullptr, 0);
++    return openDecoders();
++}
++
++bool MediaPlayerPrivateFFmpeg::openDecoders()
++{
+     if (m_videoStream >= 0 && !(m_videoDecoder = openDecoder(m_videoStream)))
+         m_videoStream = -1;
+     if (m_audioStream >= 0 && !(m_audioDecoder = openDecoder(m_audioStream)))
+@@ -602,6 +706,123 @@ bool MediaPlayerPrivateFFmpeg::openContainer()
+     return m_videoStream >= 0 || m_audioStream >= 0;
+ }
+ 
++/* --- HLS (the demux thread) ----------------------------------------------------------------- */
++
++int MediaPlayerPrivateFFmpeg::interruptCallback(void* opaque)
++{
++    return static_cast<MediaPlayerPrivateFFmpeg*>(opaque)->m_quit.load();
++}
++
++// The top-level playlist from the element's own stream, then the session's choice of a variant
++// and the hls demuxer over it.
++bool MediaPlayerPrivateFFmpeg::openHLS()
++{
++    AVIOContext* avio = m_stream->avioContext();
++    if (!avio)
++        return false;
++    Vector<uint8_t> playlist;
++    while (!m_quit) {
++        uint8_t chunk[16 * 1024];
++        int n = avio_read(avio, chunk, sizeof(chunk));
++        if (n == AVERROR_EOF || !n)
++            break;
++        if (n < 0) {
++            log("error hls-playlist read rc=%d (%s)", n, av_err2str(n));
++            return false;
++        }
++        if (playlist.size() + n > kPlaylistMax) {
++            log("error hls-playlist larger than %zu bytes", kPlaylistMax);
++            return false;
++        }
++        playlist.append(std::span<const uint8_t> { chunk, static_cast<size_t>(n) });
++    }
++    URL responseURL = m_stream->responseURL();
++    // all of it is here: the request is done with
++    m_stream->cancel();
++    if (m_quit || !m_hls->prepare(playlist.span(), responseURL))
++        return false;
++    return openHLSContainer();
++}
++
++bool MediaPlayerPrivateFFmpeg::openHLSContainer()
++{
++    m_format = m_hls->open(interruptCallback, this);
++    if (!m_format || m_quit)
++        return false;
++    // the stream probe decodes a picture when the demuxer did not say enough: on the CPU, so that
++    // a player that may never play does not take the rpivid block (one owner system-wide)
++    unsigned count = m_format->nb_streams;
++    Vector<AVDictionary*> options;
++    options.fill(nullptr, count);
++    for (auto& option : options)
++        av_dict_set(&option, "rpivid", "0", 0);
++    int ret = avformat_find_stream_info(m_format, count ? options.mutableSpan().data() : nullptr);
++    for (auto& option : options)
++        av_dict_free(&option);
++    if (m_quit)
++        return false;
++    m_containerDuration = m_format->duration != AV_NOPTS_VALUE ? m_format->duration / static_cast<double>(AV_TIME_BASE) : 0;
++    m_videoStream = av_find_best_stream(m_format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
++    m_audioStream = av_find_best_stream(m_format, AVMEDIA_TYPE_AUDIO, -1, m_videoStream, nullptr, 0);
++    // the demuxer stops fetching a playlist none of whose streams is wanted
++    for (unsigned i = 0; i < m_format->nb_streams; ++i) {
++        if (static_cast<int>(i) != m_videoStream && static_cast<int>(i) != m_audioStream)
++            m_format->streams[i]->discard = AVDISCARD_ALL;
++    }
++    log("hls opened streams=%u video=%d audio=%d probe-rc=%d live=%d duration=%.2f", m_format->nb_streams, m_videoStream, m_audioStream, ret,
++        m_hls->isLive(), m_containerDuration);
++    return m_videoStream >= 0 || m_audioStream >= 0;
++}
++
++// While parked (never played), the container's streams are closed below preload="auto"
++void MediaPlayerPrivateFFmpeg::closeHLSContainer()
++{
++    if (!m_format)
++        return;
++    m_format->pb = nullptr;
++    avformat_close_input(&m_format);
++    m_hls->closed();
++    m_videoStream = m_audioStream = -1;
++}
++
++// After the metadata: an HLS player waits for play() before it opens its decoders. False: quit
++// or the container could not be opened again.
++bool MediaPlayerPrivateFFmpeg::waitForPlay()
++{
++    if (m_playRequested)
++        return true;
++    bool close = !m_preloadAuto;
++    if (close)
++        closeHLSContainer();
++    m_hlsIdle = true;
++    log("hls idle container=%s (decoders open at play)", close ? "closed" : "open");
++    callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, close] {
++        if (RefPtr protectedThis = weakThis.get())
++            protectedThis->didIdleHLS(close);
++    });
++    while (!m_quit && !m_playRequested)
++        usleep(20000);
++    m_hlsIdle = false;
++    if (m_quit)
++        return false;
++    if (close) {
++        callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }] {
++            if (RefPtr protectedThis = weakThis.get())
++                protectedThis->setNetworkState(MediaPlayer::NetworkState::Loading);
++        });
++        if (!openHLSContainer()) {
++            if (!m_quit) {
++                callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }] {
++                    if (RefPtr protectedThis = weakThis.get())
++                        protectedThis->didFail(MediaPlayer::NetworkState::NetworkError);
++                });
++            }
++            return false;
++        }
++    }
++    return true;
++}
++
+ void MediaPlayerPrivateFFmpeg::demuxThread()
+ {
+     if (!openContainer()) {
+@@ -615,25 +836,55 @@ void MediaPlayerPrivateFFmpeg::demuxThread()
+         return;
+     }
+ 
++    // (HLS: no decoder yet; the stream parameters say the same)
+     FloatSize size;
+     double fps = 0;
+-    if (m_videoStream >= 0) {
++    AVCodecParameters* video = m_videoStream >= 0 ? m_format->streams[m_videoStream]->codecpar : nullptr;
++    AVCodecParameters* audio = m_audioStream >= 0 ? m_format->streams[m_audioStream]->codecpar : nullptr;
++    int width = m_videoDecoder ? m_videoDecoder->width : video ? video->width : 0;
++    int height = m_videoDecoder ? m_videoDecoder->height : video ? video->height : 0;
++    if (video) {
+         AVStream* stream = m_format->streams[m_videoStream];
+         AVRational sar = av_guess_sample_aspect_ratio(m_format, stream, nullptr);
+         double aspect = sar.num > 0 && sar.den > 0 ? av_q2d(sar) : 1;
+-        size = FloatSize(m_videoDecoder->width * aspect, m_videoDecoder->height);
++        size = FloatSize(width * aspect, height);
+         fps = av_q2d(av_guess_frame_rate(m_format, stream, nullptr));
+     }
+     log("open container=%s duration=%.2f video=%s %dx%d fps=%.2f audio=%s %d Hz %d ch", m_format->iformat->name, m_containerDuration,
+-        m_videoStream >= 0 ? avcodec_get_name(m_videoDecoder->codec_id) : "none", m_videoStream >= 0 ? m_videoDecoder->width : 0,
+-        m_videoStream >= 0 ? m_videoDecoder->height : 0, fps, m_audioStream >= 0 ? avcodec_get_name(m_audioDecoder->codec_id) : "none",
+-        m_audioStream >= 0 ? m_audioDecoder->sample_rate : 0, m_audioStream >= 0 ? m_audioDecoder->ch_layout.nb_channels : 0);
+-    MediaTime duration = m_containerDuration > 0 ? MediaTime::createWithDouble(m_containerDuration) : MediaTime::positiveInfiniteTime();
++        video ? avcodec_get_name(video->codec_id) : "none", width, height, fps, audio ? avcodec_get_name(audio->codec_id) : "none",
++        m_audioDecoder ? m_audioDecoder->sample_rate : audio ? audio->sample_rate : 0,
++        m_audioDecoder ? m_audioDecoder->ch_layout.nb_channels : audio ? audio->ch_layout.nb_channels : 0);
++    bool live = m_isHLS && m_hls->isLive();
++    if (m_isHLS) {
++        callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, live, summary = m_hls->summary().isolatedCopy()] {
++            if (RefPtr protectedThis = weakThis.get())
++                protectedThis->didLoadHLS(live, summary);
++        });
++    }
++    MediaTime duration = m_containerDuration > 0 && !live ? MediaTime::createWithDouble(m_containerDuration) : MediaTime::positiveInfiniteTime();
+     callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }, duration, size, video = m_videoStream >= 0, audio = m_audioStream >= 0] {
+         if (RefPtr protectedThis = weakThis.get())
+             protectedThis->didLoadMetadata(duration, size, video, audio);
+     });
+ 
++    // HLS: the decoders open at the first play()
++    if (m_isHLS) {
++        if (!waitForPlay())
++            return;
++        if (!openDecoders()) {
++            if (!m_quit) {
++                callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }] {
++                    if (RefPtr protectedThis = weakThis.get())
++                        protectedThis->didFail(MediaPlayer::NetworkState::DecodeError);
++                });
++            }
++            return;
++        }
++        // (a stream whose decoder did not open is not fetched either)
++        for (unsigned i = 0; i < m_format->nb_streams; ++i)
++            m_format->streams[i]->discard = static_cast<int>(i) == m_videoStream || static_cast<int>(i) == m_audioStream ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
++    }
++
+     if (m_videoStream >= 0) {
+         m_videoThread = Thread::create("FFmpegVideo"_s, [this] { videoThread(); }, ThreadType::Graphics, Thread::QOS::UserInteractive,
+             Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(mediaThreadStack()));
+@@ -647,7 +898,7 @@ void MediaPlayerPrivateFFmpeg::demuxThread()
+     // thread starts a pass (flushes the queues to a new serial), so it can tell whether both
+     // decoding threads drained the current pass without racing a seek.
+     AVPacket* packet = av_packet_alloc();
+-    bool eof = false, endPosted = false;
++    bool eof = false, endPosted = false, loadedPosted = false;
+     unsigned generation = 0;
+     uint64_t videoPackets = 0, audioPackets = 0;
+     while (!m_quit) {
+@@ -667,6 +918,7 @@ void MediaPlayerPrivateFFmpeg::demuxThread()
+             int ret = avformat_seek_file(m_format, -1, INT64_MIN, ts, ts, 0);
+             log("seek target=%.3f rc=%d", target, ret);
+             eof = endPosted = false;
++            m_hlsBufferedStart = m_hlsBufferedEnd = target;
+             videoPackets = audioPackets = 0;
+             queueFlush(m_videoQueue);
+             queueFlush(m_audioQueue);
+@@ -697,10 +949,24 @@ void MediaPlayerPrivateFFmpeg::demuxThread()
+                 log("read-error rc=%d (%s)", ret, av_err2str(ret));
+             log("eof packets video=%llu audio=%llu", static_cast<unsigned long long>(videoPackets), static_cast<unsigned long long>(audioPackets));
+             eof = true;
++            if (m_isHLS && !live && !loadedPosted) {
++                // every segment of a VOD presentation arrived
++                loadedPosted = true;
++                callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }] {
++                    if (RefPtr protectedThis = weakThis.get())
++                        protectedThis->setNetworkState(MediaPlayer::NetworkState::Loaded);
++                });
++            }
+             queueSetEnd(m_videoQueue);
+             queueSetEnd(m_audioQueue);
+             continue;
+         }
++        if (m_isHLS && packet->pts != AV_NOPTS_VALUE && (packet->stream_index == m_videoStream || packet->stream_index == m_audioStream)) {
++            double t = packet->pts * av_q2d(m_format->streams[packet->stream_index]->time_base)
++                - (m_format->start_time != AV_NOPTS_VALUE ? m_format->start_time / static_cast<double>(AV_TIME_BASE) : 0);
++            if (t > m_hlsBufferedEnd)
++                m_hlsBufferedEnd = t;
++        }
+         if (packet->stream_index == m_videoStream) {
+             videoPackets++;
+             queuePut(m_videoQueue, packet);
+@@ -775,6 +1041,9 @@ void MediaPlayerPrivateFFmpeg::videoThread()
+     double lastPts = 0;
+     MonotonicTime lastShown;
+     uint64_t heldFrames = 0;
++    // HLS: the pictures ran dry while playing; the clock holds until the next one
++    bool stalled = false;
++    MonotonicTime stallStart;
+ 
+     while (!m_quit) {
+         auto got = queueGet(m_videoQueue, packet, serial, drained, queueSerialNow, 20_ms);
+@@ -785,6 +1054,18 @@ void MediaPlayerPrivateFFmpeg::videoThread()
+             serial = queueSerialNow;
+             drained = false;
+             first = true;
++            stalled = false;
++        }
++        if (got == Get::Empty && m_isHLS && !first && !stalled && !drained && clockRunning() && clockNow() > lastPts + kStallAfter) {
++            double held = clockNow();
++            clockSet(held, true);
++            stalled = true;
++            stallStart = MonotonicTime::now();
++            log("rebuffer start clock=%.3f last-pts=%.3f n=%u", held, lastPts, ++m_rebuffers);
++            callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }] {
++                if (RefPtr protectedThis = weakThis.get())
++                    protectedThis->didRebuffer(true);
++            });
+         }
+         if (got == Get::Empty || (got == Get::End && drained))
+             continue;
+@@ -829,6 +1110,26 @@ void MediaPlayerPrivateFFmpeg::videoThread()
+                 av_frame_unref(frame);
+                 continue;
+             }
++            if (m_isHLS && (stalled || pts < lastPts - kDiscontinuity || pts > lastPts + kDiscontinuity)) {
++                // after a rebuffer the clock resumes at this picture; after a timestamp jump
++                // (EXT-X-DISCONTINUITY: a new timeline) it moves to it
++                if (stalled)
++                    log("rebuffer end after_ms=%.0f pts=%.3f", (MonotonicTime::now() - stallStart).milliseconds(), pts);
++                else
++                    log("discontinuity pts=%.3f->%.3f", lastPts, pts);
++                presentFrame(*frame);
++                clockSet(pts, false);
++                lastPts = pts;
++                lastShown = MonotonicTime::now();
++                if (std::exchange(stalled, false)) {
++                    callOnMainThread([weakThis = ThreadSafeWeakPtr { *this }] {
++                        if (RefPtr protectedThis = weakThis.get())
++                            protectedThis->didRebuffer(false);
++                    });
++                }
++                av_frame_unref(frame);
++                continue;
++            }
+             // wait for its time (the clock stands still while paused)
+             double wait = 0;
+             while (!m_quit && queueSerial(m_videoQueue) == serial) {
+@@ -1008,6 +1309,11 @@ void MediaPlayerPrivateFFmpeg::audioThread()
+                 if (frame->pts != AV_NOPTS_VALUE) {
+                     pts = frame->pts * timeBase - startTime;
+                     duration = static_cast<double>(frame->nb_samples) / frame->sample_rate;
++                    if (m_isHLS && m_videoStream < 0 && clockRunning() && std::fabs(pts - (clockNow() + audioFill())) > kDiscontinuity) {
++                        // no pictures: a timestamp jump (EXT-X-DISCONTINUITY) moves the clock
++                        log("discontinuity audio pts=%.3f clock=%.3f", pts, clockNow());
++                        clockSet(pts - audioFill(), false);
++                    }
+                     if (!resampler) {
+                         if (frame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC)
+                             av_channel_layout_default(&frame->ch_layout, frame->ch_layout.nb_channels);
+@@ -1114,7 +1420,7 @@ void MediaPlayerPrivateFFmpeg::didLoadMetadata(MediaTime duration, FloatSize siz
+     m_naturalSize = size;
+     m_hasVideo = hasVideo;
+     m_hasAudio = hasAudio;
+-    m_buffered = m_stream && m_stream->isComplete() && duration.isFinite() ? PlatformTimeRanges(MediaTime::zeroTime(), duration) : PlatformTimeRanges();
++    m_buffered = !m_isHLS && m_stream && m_stream->isComplete() && duration.isFinite() ? PlatformTimeRanges(MediaTime::zeroTime(), duration) : PlatformTimeRanges();
+     RefPtr player = m_player.get();
+     if (!player)
+         return;
+@@ -1122,10 +1428,35 @@ void MediaPlayerPrivateFFmpeg::didLoadMetadata(MediaTime duration, FloatSize siz
+     player->sizeChanged();
+     player->characteristicChanged();
+     setReadyState(MediaPlayer::ReadyState::HaveMetadata);
+-    if (m_stream && m_stream->isLocalFile())
++    if (m_stream && m_stream->isLocalFile() && !m_isHLS)
+         setNetworkState(MediaPlayer::NetworkState::Loaded);
+ }
+ 
++void MediaPlayerPrivateFFmpeg::didLoadHLS(bool live, const String& summary)
++{
++    m_hlsLive = live;
++    m_hlsSummary = summary;
++}
++
++// An HLS player waits for play() with its metadata: it can play (autoplay starts on
++// HaveEnoughData); a closed container is a suspended load
++void MediaPlayerPrivateFFmpeg::didIdleHLS(bool closed)
++{
++    if (m_readyState < MediaPlayer::ReadyState::HaveEnoughData)
++        setReadyState(MediaPlayer::ReadyState::HaveEnoughData);
++    if (closed)
++        setNetworkState(MediaPlayer::NetworkState::Idle);
++}
++
++void MediaPlayerPrivateFFmpeg::didRebuffer(bool started)
++{
++    if (started) {
++        if (m_readyState > MediaPlayer::ReadyState::HaveCurrentData)
++            setReadyState(MediaPlayer::ReadyState::HaveCurrentData);
++    } else
++        setReadyState(MediaPlayer::ReadyState::HaveEnoughData);
++}
++
+ void MediaPlayerPrivateFFmpeg::didFail(MediaPlayer::NetworkState state)
+ {
+     log("error state=%s", convertEnumerationToString(state).utf8().data());
+@@ -1135,12 +1466,13 @@ void MediaPlayerPrivateFFmpeg::didFail(MediaPlayer::NetworkState state)
+ void MediaPlayerPrivateFFmpeg::didShowFirstFrame(double pts)
+ {
+     if (RefPtr player = m_player.get()) {
+-        if (m_readyState < MediaPlayer::ReadyState::HaveEnoughData) {
++        if (m_readyState < MediaPlayer::ReadyState::HaveEnoughData)
+             setReadyState(MediaPlayer::ReadyState::HaveEnoughData);
+-            if (m_hasVideo)
+-                player->firstVideoFrameAvailable();
+-        }
++        // (an HLS player reached HaveEnoughData before its first picture)
++        if (!m_firstFrameShown && m_hasVideo)
++            player->firstVideoFrameAvailable();
+     }
++    m_firstFrameShown = true;
+     if (auto seekPromise = std::exchange(m_seekPromise, std::nullopt)) {
+         log("seek done pts=%.3f", pts);
+         seekPromise->resolve(MediaTime::createWithDouble(pts));
+@@ -1171,6 +1503,7 @@ void MediaPlayerPrivateFFmpeg::didEnd(unsigned seekGeneration)
+ 
+ void MediaPlayerPrivateFFmpeg::play()
+ {
++    m_playRequested = true;
+     if (!m_hasPlayed) {
+         m_hasPlayed = true;
+         updateReadAhead();
+@@ -1216,6 +1549,8 @@ MediaTime MediaPlayerPrivateFFmpeg::currentTime() const
+ 
+ MediaTime MediaPlayerPrivateFFmpeg::maxTimeSeekable() const
+ {
++    if (m_isHLS)
++        return !m_hlsLive && m_duration.isFinite() ? m_duration : MediaTime::zeroTime();
+     if (!m_stream || !m_stream->size() || !m_duration.isFinite())
+         return MediaTime::zeroTime();
+     return m_duration;
+@@ -1228,11 +1563,28 @@ Ref<MediaTimePromise> MediaPlayerPrivateFFmpeg::seekToTarget(const SeekTarget& t
+     // before the metadata the demux thread still opens the container
+     if (m_readyState < MediaPlayer::ReadyState::HaveMetadata || m_quit)
+         return MediaTimePromise::createAndReject(PlatformMediaError::Cancelled);
++    if (m_isHLS && m_hlsLive) {
++        // a live presentation is not seekable (hls.c cannot seek in a sliding window)
++        log("seek refused live target=%.3f", target.time.toDouble());
++        return MediaTimePromise::createAndResolve(currentTime());
++    }
+     double time = std::max(0.0, target.time.toDouble());
+     if (m_duration.isFinite())
+         time = std::min(time, m_duration.toDouble());
+     m_ended = false;
+     clockSetPaused(m_paused);
++    if (m_hlsIdle) {
++        // nothing is decoded before play(): the position is taken now, the demuxer seeks at play
++        {
++            Locker locker { m_seekLock };
++            m_seekTarget = time;
++            m_seekRequested = true;
++            m_seekGeneration++;
++        }
++        clockSet(time, true);
++        log("seek target=%.3f idle (applied at play)", time);
++        return MediaTimePromise::createAndResolve(MediaTime::createWithDouble(time));
++    }
+     m_seekPromise.emplace(PlatformMediaError::Cancelled);
+     Ref promise = m_seekPromise->promise();
+     {
+@@ -1257,6 +1609,14 @@ void MediaPlayerPrivateFFmpeg::setMuted(bool muted)
+ 
+ const PlatformTimeRanges& MediaPlayerPrivateFFmpeg::buffered() const
+ {
++    if (m_isHLS) {
++        // what the demuxer queued since the start or the last seek
++        double start = m_hlsBufferedStart, end = m_hlsBufferedEnd;
++        if (m_duration.isFinite())
++            end = std::min(end, m_duration.toDouble());
++        m_buffered = end > start ? PlatformTimeRanges(MediaTime::createWithDouble(start), MediaTime::createWithDouble(end)) : PlatformTimeRanges();
++        return m_buffered;
++    }
+     if (!m_stream || !m_duration.isFinite())
+         return PlatformTimeRanges::emptyRanges();
+     if (m_stream->isComplete())
+@@ -1272,7 +1632,7 @@ const PlatformTimeRanges& MediaPlayerPrivateFFmpeg::buffered() const
+ 
+ bool MediaPlayerPrivateFFmpeg::didLoadingProgress() const
+ {
+-    uint64_t bytes = m_stream ? m_stream->bytesReceived() : 0;
++    uint64_t bytes = m_isHLS && m_hls ? m_hls->stats().received : m_stream ? m_stream->bytesReceived() : 0;
+     bool progress = bytes != m_lastProgressBytes;
+     m_lastProgressBytes = bytes;
+     return progress;
+@@ -1280,11 +1640,18 @@ bool MediaPlayerPrivateFFmpeg::didLoadingProgress() const
+ 
+ unsigned long long MediaPlayerPrivateFFmpeg::totalBytes() const
+ {
+-    if (!m_stream)
++    if (!m_stream || m_isHLS)
+         return 0;
+     return m_stream->size().value_or(0);
+ }
+ 
++MediaPlayer::MovieLoadType MediaPlayerPrivateFFmpeg::movieLoadType() const
++{
++    if (m_isHLS)
++        return m_hlsLive ? MediaPlayer::MovieLoadType::LiveStream : MediaPlayer::MovieLoadType::HttpLiveStream;
++    return MediaPlayer::MovieLoadType::Download;
++}
++
+ DestinationColorSpace MediaPlayerPrivateFFmpeg::colorSpace()
+ {
+     return DestinationColorSpace::SRGB();
+@@ -1292,7 +1659,7 @@ DestinationColorSpace MediaPlayerPrivateFFmpeg::colorSpace()
+ 
+ void MediaPlayerPrivateFFmpeg::statTimerFired()
+ {
+-    if (m_stream && !m_stream->isLocalFile() && m_stream->isComplete())
++    if (m_stream && !m_stream->isLocalFile() && m_stream->isComplete() && !m_isHLS)
+         setNetworkState(MediaPlayer::NetworkState::Loaded);
+     auto now = MonotonicTime::now();
+     uint64_t presented = m_presented;
+@@ -1305,14 +1672,24 @@ void MediaPlayerPrivateFFmpeg::statTimerFired()
+     int hardware = m_hardwareState;
+     // memory: the stream's unread bytes and buffer capacity, the packet queues' bytes
+     auto memory = m_stream ? m_stream->memory() : FFmpegMediaStream::Memory { };
++    uint64_t bytes = m_stream ? m_stream->bytesReceived() : 0;
++    // HLS: the chosen variant, the segments, rebuffers and what the session's inputs hold
++    char hls[384] = "";
++    if (m_isHLS && m_hls) {
++        auto stats = m_hls->stats();
++        bytes = stats.received;
++        snprintf(hls, sizeof(hls), " hls=1 %s live=%d segments=%u/%u reloads=%u rebuffers=%u hls_streams=%u hls_kb=%llu idle=%d",
++            m_hlsSummary.utf8().data(), m_hlsLive, stats.segments, stats.playlistSegments, stats.reloads, m_rebuffers.load(), stats.streams,
++            static_cast<unsigned long long>(stats.bufferBytes / 1024), m_hlsIdle.load());
++    }
+     log("stat clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu fps=%.1f av_ms=%d vq=%zu aq=%zu paused=%d hw=%s upload_ms=%.2f bytes=%llu"
+-        " ahead_kb=%llu buf_kb=%zu q_kb=%zu preload=%s played=%d players=%u",
++        " ahead_kb=%llu buf_kb=%zu q_kb=%zu preload=%s played=%d players=%u%s",
+         clockNow(), static_cast<unsigned long long>(m_decoded.load()), static_cast<unsigned long long>(presented),
+         static_cast<unsigned long long>(painted), static_cast<unsigned long long>(m_dropped.load()), fps, m_avDriftMs.load(),
+         queueLength(m_videoQueue), queueLength(m_audioQueue), m_paused, hardware < 0 ? "-" : hardware ? "1" : "0",
+-        painted ? uploadUs / 1000.0 / painted : 0.0, static_cast<unsigned long long>(m_stream ? m_stream->bytesReceived() : 0),
++        painted ? uploadUs / 1000.0 / painted : 0.0, static_cast<unsigned long long>(bytes),
+         static_cast<unsigned long long>(memory.unread / 1024), memory.capacity / 1024,
+-        (queueBytes(m_videoQueue) + queueBytes(m_audioQueue)) / 1024, preloadName(m_preload), m_hasPlayed, livePlayers.load());
++        (queueBytes(m_videoQueue) + queueBytes(m_audioQueue)) / 1024, preloadName(m_preload), m_hasPlayed, livePlayers.load(), hls);
+ }
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
+index cf52dd05..40af53e9 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
+@@ -47,6 +47,7 @@ struct SwsContext;
+ namespace WebCore {
+ 
+ class CoordinatedPlatformLayerBufferProxy;
++class FFmpegHLSSession;
+ class FFmpegMediaStream;
+ struct FFmpegFrameCounters;
+ 
+@@ -78,6 +79,17 @@ struct FFmpegFrameCounters;
+ // queues); its threads get WPE_PHOENIX_MEDIA_STACK_KB of stack (default 2048). For measurements:
+ // WPE_PHOENIX_MEDIA_PRELOAD=0 ignores the preload attribute, WPE_PHOENIX_MEDIA_DISABLE=1 makes the
+ // engine support no type at all (every <video>/<audio> fails as unsupported).
++//
++// HLS (an .m3u8 URL, an HLS MIME type, or a body starting #EXTM3U): FFmpeg's hls demuxer over
++// FFmpegHLSSession, which fetches every playlist, segment and key through WebKit's loader and
++// chooses the variant (HEVC 8-bit <= 1080p30 for the rpivid block, else H.264 <= 720p30, else
++// HEVC Main10; WPE_PHOENIX_HLS_* knobs). VOD seeks; live (no end list) plays from near the live
++// edge, unseekable, with duration +Infinity. The decoders open at the first play(), not at the
++// metadata: an HLS player that never plays holds no decoder and never takes the rpivid block;
++// until then its readyState is HaveEnoughData (autoplay and 'canplay' work) and, below
++// preload="auto", its demuxer is closed again after the metadata (no segment stays open).
++// A picture stream that runs dry while playing holds the clock ('waiting', a "rebuffer"),
++// a timestamp jump of more than a second (EXT-X-DISCONTINUITY) moves the clock with it.
+ class MediaPlayerPrivateFFmpeg final
+     : public MediaPlayerPrivateInterface
+     , public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<MediaPlayerPrivateFFmpeg, WTF::DestructionThread::Main> {
+@@ -133,7 +145,7 @@ public:
+     const PlatformTimeRanges& buffered() const final;
+     bool didLoadingProgress() const final;
+     unsigned long long totalBytes() const final;
+-    MediaPlayer::MovieLoadType movieLoadType() const final { return MediaPlayer::MovieLoadType::Download; }
++    MediaPlayer::MovieLoadType movieLoadType() const final;
+ 
+     void paint(GraphicsContext&, const FloatRect&) final { }
+     DestinationColorSpace colorSpace() final;
+@@ -172,7 +184,14 @@ private:
+     void updateReadAhead();
+     void demuxThread();
+     bool openContainer();
++    bool openDecoders();
+     AVCodecContext* openDecoder(int stream);
++    // HLS (the demux thread)
++    bool openHLS();
++    bool openHLSContainer();
++    void closeHLSContainer();
++    bool waitForPlay();
++    static int interruptCallback(void*);
+     void videoThread();
+     void audioThread();
+     bool presentFrame(AVFrame&);
+@@ -187,6 +206,9 @@ private:
+     void didFail(MediaPlayer::NetworkState);
+     void didShowFirstFrame(double pts);
+     void didEnd(unsigned seekGeneration);
++    void didLoadHLS(bool live, const String& summary);
++    void didIdleHLS(bool closed);
++    void didRebuffer(bool started);
+     void setReadyState(MediaPlayer::ReadyState);
+     void setNetworkState(MediaPlayer::NetworkState);
+     void statTimerFired();
+@@ -219,9 +241,26 @@ private:
+     String m_pendingURL;
+     // play() was called once: the full read-ahead from then on
+     bool m_hasPlayed { false };
++    bool m_firstFrameShown { false };
++    bool m_hlsLive { false };
++    String m_hlsSummary;
+     // the demux thread's packet queue limit (bytes), from updateReadAhead()
+     std::atomic<size_t> m_queueMaxBytes { 16 * 1024 * 1024 };
+ 
++    // HLS: the session (main thread sets and clears it, around the demux thread's life), the
++    // mode (set before the demux thread starts, or by it when the body sniffs as a playlist)
++    RefPtr<FFmpegHLSSession> m_hls;
++    std::atomic<bool> m_isHLS { false };
++    // play() was called: the HLS demux thread opens the decoders
++    std::atomic<bool> m_playRequested { false };
++    // the HLS demux thread waits for play() (seeks then complete at once and apply at play)
++    std::atomic<bool> m_hlsIdle { false };
++    std::atomic<bool> m_preloadAuto { true };
++    std::atomic<unsigned> m_rebuffers { 0 };
++    // what the demuxer queued: [start (the last seek target), the latest packet's time]
++    std::atomic<double> m_hlsBufferedStart { 0 };
++    std::atomic<double> m_hlsBufferedEnd { 0 };
++
+     // the threads
+     RefPtr<Thread> m_demuxThread;
+     RefPtr<Thread> m_videoThread;
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp
+new file mode 100644
+index 00000000..9db20439
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.cpp
+@@ -0,0 +1,127 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "PlatformMediaEngineConfigurationFactoryFFmpeg.h"
++
++#if ENABLE(VIDEO) && USE(FFMPEG)
++#include "ContentType.h"
++#include "FFmpegMediaPolicy.h"
++#include "MediaPlayerPrivateFFmpeg.h"
++#include "PlatformMediaCapabilitiesDecodingInfo.h"
++#include "PlatformMediaDecodingConfiguration.h"
++#include <atomic>
++#include <cstdio>
++#include <time.h>
++#include <wtf/HashSet.h>
++#include <wtf/text/CString.h>
++
++namespace WebCore {
++
++static const char* configurationTypeName(PlatformMediaDecodingType type)
++{
++    switch (type) {
++    case PlatformMediaDecodingType::FileOrHLS:
++        return "file";
++    case PlatformMediaDecodingType::MediaSource:
++        return "media-source";
++    case PlatformMediaDecodingType::MediaStream:
++        return "media-stream";
++    }
++    return "?";
++}
++
++void createMediaPlayerDecodingConfigurationFFmpeg(PlatformMediaDecodingConfiguration&& configuration, Function<void(PlatformMediaCapabilitiesDecodingInfo&&)>&& callback)
++{
++    // the engine's types (empty with WPE_PHOENIX_MEDIA_DISABLE=1)
++    HashSet<String> types;
++    MediaPlayerPrivateFFmpeg::getSupportedTypes(types);
++    bool typeSupported = configuration.type == PlatformMediaDecodingType::FileOrHLS;
++#if ENABLE(MEDIA_SOURCE)
++    typeSupported |= configuration.type == PlatformMediaDecodingType::MediaSource;
++#endif
++    FFmpegMediaPolicy::Capability result { typeSupported && !types.isEmpty() && (configuration.video || configuration.audio), true, true };
++    auto combine = [&](FFmpegMediaPolicy::Capability capability) {
++        result.supported &= capability.supported;
++        result.smooth &= capability.smooth;
++        result.powerEfficient &= capability.powerEfficient;
++    };
++    auto containerSupported = [&](const ContentType& type) {
++        return types.contains(type.containerType().convertToASCIILowercase());
++    };
++
++    String videoCodec = "-"_s, audioCodec = "-"_s;
++    if (auto& video = configuration.video) {
++        ContentType type { video->contentType };
++        auto codecs = type.codecs();
++        if (!containerSupported(type) || codecs.size() != 1)
++            combine({ });
++        else {
++            videoCodec = codecs[0];
++            auto kind = FFmpegMediaPolicy::classifyCodec(videoCodec.utf8().data());
++            auto capability = FFmpegMediaPolicy::isVideoCodec(kind) ? FFmpegMediaPolicy::videoCapability(kind, video->width, video->height, video->framerate)
++                : FFmpegMediaPolicy::Capability { };
++            // no HDR output
++            if ((video->transferFunction && *video->transferFunction != PlatformMediaCapabilitiesTransferFunction::SRGB) || video->hdrMetadataType)
++                capability = { };
++            combine(capability);
++        }
++    }
++    if (auto& audio = configuration.audio) {
++        ContentType type { audio->contentType };
++        auto codecs = type.codecs();
++        if (!containerSupported(type) || codecs.size() > 1)
++            combine({ });
++        else if (!codecs.isEmpty()) {
++            audioCodec = codecs[0];
++            combine(FFmpegMediaPolicy::audioCapability(FFmpegMediaPolicy::classifyCodec(audioCodec.utf8().data())));
++        }
++        // (a single-codec container without codecs: audio/mpeg, audio/flac, ...: as the container)
++        if (audio->spatialRendering.value_or(false))
++            combine({ }); // everything is mixed down to stereo
++    }
++
++    PlatformMediaCapabilitiesDecodingInfo info;
++    info.supported = result.supported;
++    info.smooth = result.supported && result.smooth;
++    info.powerEfficient = result.supported && result.powerEfficient;
++
++    static std::atomic<unsigned> logged { 0 };
++    if (logged++ < 200) {
++        struct timespec ts;
++        clock_gettime(CLOCK_MONOTONIC, &ts);
++        fprintf(stderr, "WPEB-MEDIA mono=%llu capabilities type=%s codec=%s %ux%u@%.0f audio=%s supported=%d smooth=%d efficient=%d\n",
++            static_cast<unsigned long long>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000, configurationTypeName(configuration.type), videoCodec.utf8().data(),
++            configuration.video ? configuration.video->width : 0, configuration.video ? configuration.video->height : 0,
++            configuration.video ? configuration.video->framerate : 0, audioCodec.utf8().data(), info.supported, info.smooth, info.powerEfficient);
++    }
++
++    info.configuration = WTF::move(configuration);
++    callback(WTF::move(info));
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.h
+new file mode 100644
+index 00000000..9e39ba61
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/ffmpeg/PlatformMediaEngineConfigurationFactoryFFmpeg.h
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (C) 2026 Phoenix Systems
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#pragma once
++
++#if ENABLE(VIDEO) && USE(FFMPEG)
++
++#include <wtf/Function.h>
++
++namespace WebCore {
++
++struct PlatformMediaCapabilitiesDecodingInfo;
++struct PlatformMediaDecodingConfiguration;
++
++// MediaCapabilities.decodingInfo() for the FFmpeg media player: FFmpegMediaPolicy's table
++// (HEVC 8-bit up to 1080p30 supported, smooth and power-efficient on the rpivid block; H.264
++// up to 720p30 supported and smooth; Main10, larger H.264 supported but not smooth; AV1, Dolby
++// Vision, HDR transfer functions, VP9 above 360p not supported). Media Source configurations
++// only with ENABLE(MEDIA_SOURCE).
++void createMediaPlayerDecodingConfigurationFFmpeg(PlatformMediaDecodingConfiguration&&, Function<void(PlatformMediaCapabilitiesDecodingInfo&&)>&&);
++
++} // namespace WebCore
++
++#endif // ENABLE(VIDEO) && USE(FFMPEG)
+diff --git a/Source/WebCore/platform/mediacapabilities/PlatformMediaEngineConfigurationFactory.cpp b/Source/WebCore/platform/mediacapabilities/PlatformMediaEngineConfigurationFactory.cpp
+index 351b4f92..cfe43f38 100644
+--- a/Source/WebCore/platform/mediacapabilities/PlatformMediaEngineConfigurationFactory.cpp
++++ b/Source/WebCore/platform/mediacapabilities/PlatformMediaEngineConfigurationFactory.cpp
+@@ -46,6 +46,10 @@
+ #include "PlatformMediaEngineConfigurationFactoryGStreamer.h"
+ #endif
+ 
++#if USE(FFMPEG)
++#include "PlatformMediaEngineConfigurationFactoryFFmpeg.h"
++#endif
++
+ namespace WebCore {
+ 
+ static bool& NODELETE mockEnabled()
+@@ -63,6 +67,9 @@ static MediaEngineFactoryVector defaultFactories()
+ #endif
+ #if USE(GSTREAMER)
+     factories.append({ &createMediaPlayerDecodingConfigurationGStreamer, &createMediaPlayerEncodingConfigurationGStreamer });
++#endif
++#if USE(FFMPEG)
++    factories.append({ &createMediaPlayerDecodingConfigurationFFmpeg, nullptr });
+ #endif
+     return factories;
+ }
