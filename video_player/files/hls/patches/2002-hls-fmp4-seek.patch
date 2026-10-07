@@ -1,0 +1,91 @@
+Subject: hls: seeking in fMP4 (mov) playlists; half a second of slack at the target segment
+
+Two faults of FFmpeg 6.1's hls_read_seek(), found by a host harness before the Pi (WebKit's
+native HLS seeks through it):
+
+1. fMP4 segments never resume after a seek. The seek resets each playlist's byte position to
+   0 (for mpegts' sake) and re-sends the init section, but the mov demuxer indexes the
+   fragments it has read by byte position: the target segment's moof lands on a position it
+   already holds and is skipped, segment after segment, to the end (av_read_frame: EOF with
+   no packet; the same with the file protocol, so not a custom-I/O matter). A playlist whose
+   sub-demuxer is mov now gets a new one after the reset, opened on the same AVIOContext; it
+   reads the init section and the target segment.
+
+2. The keyframe that opens the target segment is dropped. The seek filter keeps packets from
+   seek_timestamp on, which for a backward video seek is the segment's start as a sum of
+   EXTINF durations; its dts, rounded down, comes out a microsecond or a few frames earlier
+   (decode order, encoder delay), so playback resumed a whole segment later. The filter now
+   compares the presentation time (dts without one) with half a second of slack; only the
+   target segment's packets reach it.
+
+MPEG-TS playlists keep their demuxer; everything else is unchanged.
+
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -2349,9 +2349,14 @@
+                     }
+ 
+                     tb = get_timebase(pls);
+-                    ts_diff = av_rescale_rnd(pls->pkt->dts, AV_TIME_BASE,
++                    /* The presentation time, and half a second of slack: the
++                     * segment start is a sum of EXTINF durations (rounded), and
++                     * the keyframe opening the target segment may be stamped a
++                     * few frames before it (decode order, encoder delay). Only
++                     * the target segment's packets come here. */
++                    ts_diff = av_rescale_rnd(pls->pkt->pts != AV_NOPTS_VALUE ? pls->pkt->pts : pls->pkt->dts, AV_TIME_BASE,
+                                             tb.den, AV_ROUND_DOWN) -
+-                            pls->seek_timestamp;
++                            pls->seek_timestamp + AV_TIME_BASE / 2;
+                     if (ts_diff >= 0 && (pls->seek_flags  & AVSEEK_FLAG_ANY ||
+                                         pls->pkt->flags & AV_PKT_FLAG_KEY)) {
+                         pls->seek_timestamp = AV_NOPTS_VALUE;
+@@ -2526,6 +2531,47 @@
+         }
+     }
+ 
++    /* The mov demuxer (fMP4 segments) indexes the fragments it has read by
++     * their byte position, which the reset above started again at 0: the
++     * fragments after the seek land on positions it already holds and are
++     * skipped, so it would return nothing. Give those playlists a new mov
++     * demuxer; it reads the init section and the target segment now. */
++    for (i = 0; i < c->n_playlists; i++) {
++        struct playlist *pls = c->playlists[i];
++        const AVInputFormat *in_fmt;
++        AVDictionary *options = NULL;
++        int ret;
++
++        if (!pls->ctx || !pls->ctx->iformat || !strstr(pls->ctx->iformat->name, "mov") ||
++            !pls->n_segments || !pls->needed)
++            continue;
++        in_fmt = pls->ctx->iformat;
++        avformat_close_input(&pls->ctx);
++        if (!(pls->ctx = avformat_alloc_context()))
++            return AVERROR(ENOMEM);
++        pls->ctx->probesize = s->probesize > 0 ? s->probesize : 1024 * 4;
++        pls->ctx->max_analyze_duration = s->max_analyze_duration > 0 ? s->max_analyze_duration : 4 * AV_TIME_BASE;
++        pls->ctx->interrupt_callback = s->interrupt_callback;
++        pls->ctx->pb       = &pls->pb.pub;
++        pls->ctx->io_open  = nested_io_open;
++        pls->ctx->flags   |= s->flags & ~AVFMT_FLAG_CUSTOM_IO;
++        if ((ret = ff_copy_whiteblacklists(pls->ctx, s)) < 0)
++            return ret;
++        av_dict_copy(&options, c->seg_format_opts, 0);
++        ret = avformat_open_input(&pls->ctx, pls->segments[0]->url, in_fmt, &options);
++        av_dict_free(&options);
++        if (ret < 0) {
++            /* avformat_open_input() freed the context: an empty one for the close */
++            pls->ctx = avformat_alloc_context();
++            pls->broken = 1;
++            pls->needed = 0;
++            if (!pls->ctx)
++                return AVERROR(ENOMEM);
++            av_log(s, AV_LOG_ERROR, "Failed to reopen the demuxer of playlist %d after a seek\n", i);
++            return ret;
++        }
++    }
++
+     c->cur_timestamp = seek_timestamp;
+ 
+     return 0;

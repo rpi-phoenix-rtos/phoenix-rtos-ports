@@ -69,7 +69,9 @@
 # and the HLS demuxer's custom-I/O hunk (files/hls/patches, port-only): 2001 lets hls.c open
 #   http(s) segment, key and init-section URLs through a caller's io_open in this
 #   --disable-network build (WebKit's media player, webkit_wpe USE video: its loader fetches
-#   every playlist and segment); unchanged without AVFMT_FLAG_CUSTOM_IO.
+#   every playlist and segment); unchanged without AVFMT_FLAG_CUSTOM_IO. 2002: seeking in fMP4
+#   playlists (6.1 never resumed after a seek: the mov demuxer's fragment index is keyed by byte
+#   position, which the seek restarts at 0) and the target segment's keyframe kept.
 # Knobs: FFMPEG_RPIVID=0 (CPU only) | 1 (default: the verified tool set) | 2 (all tools,
 # unverified), or the decoder option -rpivid N; ffplay -vcodec hevc = the plain CPU decoder.
 #
