@@ -109,10 +109,16 @@ summary() {  # summary <arm> [log]: the grading line from the page's lines (defa
 arm() {  # arm <name> <clip> <seconds> [page query suffix] [env...]
 	local name=$1 clip=$2 secs=$3 extra=$4 rc tee i
 	shift 4
-	if [ ! -f "${clip}" ]; then
-		echo "B8 arm=${name} SKIP clip ${clip} missing"
-		return
-	fi
+	# a clip is a local file, or an http(s) URL played straight from the network (B8_HEVC_CLIP=
+	# https://... : a video-sharing site's file served unchanged, e.g. docs/browser/HEVC-PLATFORMS.md)
+	local src="file://${clip}"
+	case "${clip}" in
+		http://* | https://*) src="${clip}" ;;
+		*) if [ ! -f "${clip}" ]; then
+			echo "B8 arm=${name} SKIP clip ${clip} missing"
+			return
+		fi ;;
+	esac
 	echo "B8 arm=${name} start clip=${clip} secs=${secs} env=${*:-none} t=${SECONDS}"
 	rm -f "${EVENTS}" "${PIDFILE}" "${RCFILE}"
 	# The browser's lines go to the console as before and, through tee, to ${EVENTS} for the
@@ -120,7 +126,7 @@ arm() {  # arm <name> <clip> <seconds> [page query suffix] [env...]
 	# browser's pid and exit status: in a pipeline only the last command's status reaches us.
 	(
 		[ "$#" = 0 ] || export "$@"
-		"${BROWSER}" --cpu-rendering --autoplay=allow --size=1000x620 "${PAGE}?src=file://${clip}${extra}" 2>&1 &
+		"${BROWSER}" --cpu-rendering --autoplay=allow --size=1000x620 "${PAGE}?src=${src}${extra}" 2>&1 &
 		echo "$!" > "${PIDFILE}"
 		wait "$!"
 		echo "$?" > "${RCFILE}"
