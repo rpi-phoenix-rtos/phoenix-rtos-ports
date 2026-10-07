@@ -48,6 +48,9 @@
 	#                             of 500 ms or more, its thread and return addresses) and the web
 	#                             process's display refreshes in the frame watch (kind no-refresh),
 	#                             to name the ~4 s requestAnimationFrame pauses of build 36's B7
+	#   patches/webkit/0023       WPEPlatform Wayland: a buffer rendered from inside buffer-rendered
+	#                             keeps its frame callback (with 0019 the view stalled for good
+	#                             once a frame was held: GPU raster + <video>, build 42)
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
 	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).

@@ -1,0 +1,39 @@
+Subject: WPEPlatform Wayland: a buffer rendered from inside buffer-rendered keeps its frame callback
+
+WPEViewWayland's wl_surface.frame listener emitted buffer-rendered for priv->buffer and cleared
+priv->buffer after the signal returned. A handler that renders the next buffer from inside the
+signal -- wpe_view_render_buffer() stores that buffer in priv->buffer and asks for a new frame
+callback -- lost it to that clear: the new frame callback then emitted buffer-rendered with NULL
+("wpe_view_buffer_rendered: assertion 'WPE_IS_BUFFER(buffer)' failed"), the signal never
+reached the handler, and the view waited for ever for a frame callback that had already come.
+The DRM and headless views commit the buffer before they emit and touch nothing after it; the
+Wayland view now does the same (the buffer is taken out of priv->buffer before the signal).
+
+Upstream's AcceleratedBackingStore never renders from inside buffer-rendered, so this only
+shows with patch 0019 (WPE_PHOENIX_FRAME_AHEAD=1), whose bufferRendered() commits a frame held
+meanwhile at once, and only when one is held, i.e. when the web process delivers the next frame
+before the compositor's frame callback for the last one: with GPU raster on the Pi 4 that
+happened within a second of a <video> starting (b42-video, arm both-ahead): the UI process
+committed 4 frames but saw 3 frame callbacks, held the 5th for ever, the web process's
+compositor waited for its FrameDone for ever (frame watch: rendered=4 buffer_rendered=3 /
+frames_sent=5 frames_done=4, state scheduled-while-in-progress), nothing was composited again
+and the player's frames were never painted (painted=0, shown_fps=0) while it presented 30 fps.
+
+diff --git a/Source/WebKit/WPEPlatform/wpe/wayland/WPEViewWayland.cpp b/Source/WebKit/WPEPlatform/wpe/wayland/WPEViewWayland.cpp
+--- a/Source/WebKit/WPEPlatform/wpe/wayland/WPEViewWayland.cpp
++++ b/Source/WebKit/WPEPlatform/wpe/wayland/WPEViewWayland.cpp
+@@ -398,8 +398,12 @@
+         RELEASE_ASSERT(!priv->frameCallback || priv->frameCallback == callback);
+         g_clear_pointer(&priv->frameCallback, wl_callback_destroy);
+ 
+-        wpe_view_buffer_rendered(view, priv->buffer.get());
+-        priv->buffer = nullptr;
++        // Taken before the signal: a buffer-rendered handler may render the next buffer from
++        // within it, which stores that buffer in priv->buffer with its own frame callback.
++        // Clearing priv->buffer after the signal lost that buffer, and its frame callback then
++        // had none to report (WPE_IS_BUFFER failed, no buffer-rendered: the view stalled).
++        auto buffer = std::exchange(priv->buffer, nullptr);
++        wpe_view_buffer_rendered(view, buffer.get());
+     }
+ };
+ 
