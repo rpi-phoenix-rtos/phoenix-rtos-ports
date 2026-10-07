@@ -180,7 +180,9 @@ static RPIVIDBuf *pool_get(RPIVIDPool *p)
 	if (b == NULL) {
 		return NULL;
 	}
-	if ((rpivid_dma_alloc(&b->y, p->g.luma_size) < 0) || (rpivid_dma_alloc(&b->c, p->g.chroma_size) < 0) ||
+	/* the pictures are read by the CPU (SAND->planar) and cached: uncached reads of a
+	 * 1080p picture took ~8 ms of one core */
+	if ((rpivid_dma_alloc_cached(&b->y, p->g.luma_size) < 0) || (rpivid_dma_alloc_cached(&b->c, p->g.chroma_size) < 0) ||
 			(p->with_mv && (rpivid_dma_alloc(&b->mv, p->g.colmv_size) < 0))) {
 		buf_free(b);
 		return NULL;
@@ -1074,6 +1076,8 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	}
 
 	/* the planar frame, also from a failed decode: what the block wrote beats a stale buffer */
+	rpivid_dma_sync_for_cpu(&cur->buf->y, g->luma_size);
+	rpivid_dma_sync_for_cpu(&cur->buf->c, g->chroma_size);
 	if (sps->bit_depth == 8) {
 		rpivid_sand8_to_planar(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
 			cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);

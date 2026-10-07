@@ -3,9 +3,8 @@
  *
  * BCM2711 rpivid HEVC decoder: SAND (column 128) output to planar YUV 4:2:0
  *
- * The source is uncached memory, so it is read once, front to back: column by column,
- * each column's rows in address order, in 64-byte loads; only the destination (cached)
- * is written with a stride. Partial columns at the right edge go through a stack
+ * The source is read once, front to back: column by column, each column's rows in
+ * address order, in 64-byte loads; only the destination is written with a stride. Partial columns at the right edge go through a stack
  * buffer so nothing is written past the picture width.
  *
  * Copyright 2026 Phoenix Systems
