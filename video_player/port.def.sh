@@ -21,8 +21,8 @@
 	# FFmpeg configured without --enable-gpl / --enable-nonfree (fftools/ffplay.c,
 	# cmdutils.c, opt_common.c and every enabled component: LGPL-2.1-or-later); files/
 	# (the glue, gtk-video, the launcher, the clip generator, configuration, the rpivid
-	# decoder sources and hevc-rpivid-check): BSD-3-Clause; files/rpivid/patches (FFmpeg
-	# integration hunks): LGPL-2.1-or-later as the files they change.
+	# decoder sources and hevc-rpivid-check): BSD-3-Clause; files/rpivid/patches and
+	# files/hls/patches (FFmpeg hunks): LGPL-2.1-or-later as the files they change.
 	license="LGPL-2.1-or-later AND BSD-3-Clause"
 	license_file="COPYING.LGPLv2.1"
 
@@ -66,6 +66,12 @@
 #   check/       hevc-rpivid-check: hardware vs CPU decode of a file, every frame's md5, timing
 #   hosttest/    run.sh: the hwaccel's register programming against the reference player on
 #                a register-level mock (host, ASan); not part of the build
+# and the HLS demuxer's custom-I/O hunk (files/hls/patches, port-only): 2001 lets hls.c open
+#   http(s) segment, key and init-section URLs through a caller's io_open in this
+#   --disable-network build (WebKit's media player, webkit_wpe USE video: its loader fetches
+#   every playlist and segment); unchanged without AVFMT_FLAG_CUSTOM_IO. 2002: seeking in fMP4
+#   playlists (6.1 never resumed after a seek: the mov demuxer's fragment index is keyed by byte
+#   position, which the seek restarts at 0) and the target segment's keyframe kept.
 # Knobs: FFMPEG_RPIVID=0 (CPU only) | 1 (default: the verified tool set) | 2 (all tools,
 # unverified), or the decoder option -rpivid N; ffplay -vcodec hevc = the plain CPU decoder.
 #
@@ -97,6 +103,8 @@ p_prepare() {
 	# the rpivid decoder: its FFmpeg hunks (kept apart from patches/, which mirrors
 	# tools/gpu-lane/video-player/patches) and its sources
 	PREFIX_PORT_PATCHES="${PREFIX_PORT}/files/rpivid/patches" b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
+	# the hls demuxer's http(s) URLs over a caller's io_open (WebKit's media player)
+	PREFIX_PORT_PATCHES="${PREFIX_PORT}/files/hls/patches" b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
 	local f
 	for f in "${PREFIX_PORT}"/files/rpivid/src/*.[ch]; do
 		cmp -s "${f}" "${PREFIX_PORT_WORKDIR%/}/libavcodec/${f##*/}" || cp "${f}" "${PREFIX_PORT_WORKDIR%/}/libavcodec/"
@@ -255,13 +263,18 @@ p_build() {
 	for d in HAVE_PTHREADS HAVE_NEON CONFIG_AVFILTER CONFIG_SWSCALE CONFIG_SWRESAMPLE CONFIG_HEVC_DECODER CONFIG_H264_DECODER \
 			CONFIG_AAC_DECODER CONFIG_MOV_DEMUXER CONFIG_SCALE_FILTER CONFIG_ARESAMPLE_FILTER CONFIG_ZLIB \
 			CONFIG_MPEG2VIDEO_DECODER CONFIG_AC3_DECODER CONFIG_DCA_DECODER CONFIG_MPEGPS_DEMUXER CONFIG_YADIF_FILTER \
-			CONFIG_HEVC_RPIVID_DECODER; do
+			CONFIG_HEVC_RPIVID_DECODER CONFIG_HLS_DEMUXER; do
 		cat "${VP_FS}/config.h" "${VP_FS}/config_components.h" | grep -qE "^#define ${d} 1$" ||
 			b_die "video_player: config: ${d} is not 1"
 	done
 	for d in CONFIG_GPL CONFIG_NONFREE CONFIG_SDL2; do
 		grep -qE "^#define ${d} 0$" "${VP_FS}/config.h" || b_die "video_player: config.h: ${d} is not 0"
 	done
+	# HLS without FFmpeg's network: the hunk's caller opens the URLs (no second HTTP/TLS stack)
+	for d in CONFIG_HTTP_PROTOCOL CONFIG_HTTPS_PROTOCOL CONFIG_TLS_PROTOCOL; do
+		grep -qE "^#define ${d} 0$" "${VP_FS}/config_components.h" || b_die "video_player: config_components.h: ${d} is not 0"
+	done
+	grep -q 'a web browser' "${VP_FS}/libavformat/hls.c" || b_die "video_player: libavformat/hls.c lacks the files/hls hunk"
 
 	# --- 2. the libraries, the glue --------------------------------------------------------
 	make -C "${VP_FS}" -j"$(nproc)" >"${VP_OUT}/ff-make.log" 2>&1 ||
@@ -285,6 +298,7 @@ p_build() {
 		[ -f "${FFD}/lib/lib${a}.a" ] && [ -f "${FFD}/lib/pkgconfig/lib${a}.pc" ] || b_die "video_player: ffmpeg/: lib${a} incomplete"
 	done
 	grep -q 'ff_hevc_rpivid_decoder' < <("${NL_NM}" "${FFD}/lib/libavcodec.a") || b_die "video_player: ffmpeg/: libavcodec has no hevc_rpivid"
+	grep -q 'ff_hls_demuxer' < <("${NL_NM}" "${FFD}/lib/libavformat.a") || b_die "video_player: ffmpeg/: libavformat has no hls demuxer"
 
 	VP_GLUE_O="${VP_OUT}/ffplay_phoenix_glue.o"
 	"${NL_CC}" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${F}/ffplay_phoenix_glue.c" -o "${VP_GLUE_O}"

@@ -7,6 +7,9 @@
 # and ALAC audio, FLV and IVF, and two deinterlacers (yadif, bwdif: -vf yadif) for
 # interlaced MPEG-2/H.264. zlib: Matroska's compressed tracks and MOV's compressed
 # 'cmov' header need it (configure turns it off under --disable-autodetect).
+# HLS (the hls demuxer, over mov and mpegts): local .m3u8 files here; WebKit's media
+# player opens its http(s) URLs itself (the video_player port's files/hls patch), so
+# the build stays --disable-network.
 #
 # Copyright 2026 Phoenix Systems
 #
@@ -14,7 +17,7 @@
 #
 # %LICENSE%
 FF_DECODERS=h264,hevc,vp8,vp9,mpeg4,mpeg2video,mpeg1video,mjpeg,rawvideo,aac,aac_latm,mp3,mp3float,opus,vorbis,flac,ac3,eac3,dca,alac,pcm_s16le,pcm_s24le,pcm_f32le
-FF_DEMUXERS=mov,matroska,mpegts,mpegps,avi,flv,ivf,h264,hevc,m4v,mjpeg,wav,ogg,mp3,aac,flac
+FF_DEMUXERS=mov,matroska,mpegts,mpegps,avi,flv,ivf,h264,hevc,m4v,mjpeg,wav,ogg,mp3,aac,flac,hls
 FF_PARSERS=h264,hevc,vp8,vp9,mpeg4video,mpegvideo,mjpeg,aac,aac_latm,mpegaudio,opus,vorbis,flac,ac3,dca
 FF_BSFS=h264_mp4toannexb,hevc_mp4toannexb,vp9_superframe_split,aac_adtstoasc
 FF_FILTERS=buffer,buffersink,abuffer,abuffersink,format,aformat,null,anull,scale,aresample,crop,transpose,hflip,vflip,rotate,setpts,asetpts,yadif,bwdif

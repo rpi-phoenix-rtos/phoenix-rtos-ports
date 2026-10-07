@@ -705,10 +705,13 @@ check_program() {
 	# avcodec_find_decoder() before FFmpeg's own), FFmpeg's threads on the 8 MiB wrapper; none of
 	# it in a build without video
 	if [ "${video}" = 1 ]; then
-		for s in ff_hevc_rpivid_decoder ff_h264_decoder ff_aac_decoder ff_mov_demuxer avformat_open_input swr_convert phx_ffmpeg_pthread_create; do
+		for s in ff_hevc_rpivid_decoder ff_h264_decoder ff_aac_decoder ff_mov_demuxer ff_hls_demuxer avformat_open_input swr_convert phx_ffmpeg_pthread_create av_aes_crypt; do
 			grep -qE " [TtWDdRr] ${s}\$" <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no ${s}" >&2; exit 1; }
 		done
 		grep -qE ' [Tt] _ZN7WebCore24MediaPlayerPrivateFFmpeg' <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no MediaPlayerPrivateFFmpeg" >&2; exit 1; }
+		# native HLS (patch 0031) and the MediaCapabilities factory
+		grep -qE ' [Tt] _ZN7WebCore16FFmpegHLSSession' <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no FFmpegHLSSession" >&2; exit 1; }
+		grep -qE ' [Tt] _ZN7WebCore44createMediaPlayerDecodingConfigurationFFmpeg' <<< "${syms}" || { echo "build-wpe.sh: wpe-browser (video) has no MediaCapabilities factory" >&2; exit 1; }
 		grep -qF 'WPEB-MEDIA mono=%llu id=%u %s' < <(strings "${out}/wpe-browser") || { echo "build-wpe.sh: wpe-browser (video) lacks the WPEB-MEDIA log" >&2; exit 1; }
 	elif grep -qE ' [Tt] _ZN7WebCore24MediaPlayerPrivateFFmpeg' <<< "${syms}"; then
 		echo "build-wpe.sh: wpe-browser has the FFmpeg media player in a build without PHX_WPE_VIDEO" >&2
