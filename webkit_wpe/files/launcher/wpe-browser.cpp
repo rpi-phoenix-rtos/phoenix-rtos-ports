@@ -1488,6 +1488,28 @@ static void chromeMessage(WebKitUserContentManager*, JSCValue* value, gpointer)
         chromeAction(message, "ui");
 }
 
+#if ENABLE_MEDIA_SOURCE
+/* --mse as the pages see it: at every top-frame load a script in a world of its own reports
+ * typeof MediaSource and typeof ManagedMediaSource ("media mse-check ... result=ok|MISMATCH").
+ * Build 59's --mse=off logged its setting and still gave pages a MediaSource (WebCore reset the
+ * preference at each load; patch 0032 fixes that): the setting is checked where it matters. */
+static const char* mseMode = "on";
+static constexpr const char* mediaCheckWorld = "wpe-browser-media-check";
+
+static void mediaCheckMessage(WebKitUserContentManager*, JSCValue* value, gpointer)
+{
+    g_autofree char* message = jsc_value_to_string(value);
+    char mediaSource[32] = "", managed[32] = "";
+    if (!message || sscanf(message, "%31s %31s", mediaSource, managed) != 2)
+        return;
+    bool hasMediaSource = strcmp(mediaSource, "undefined");
+    bool hasManaged = strcmp(managed, "undefined");
+    bool ok = hasMediaSource == !!strcmp(mseMode, "off") && hasManaged == !strcmp(mseMode, "managed");
+    LOG("media mse-check mse=%s MediaSource=%s ManagedMediaSource=%s result=%s uri=%s", mseMode, hasMediaSource ? "present" : "absent",
+        hasManaged ? "present" : "absent", ok ? "ok" : "MISMATCH", webView ? webkit_web_view_get_uri(webView) : "-");
+}
+#endif
+
 /* The address line editor: every key while editing stays in the UI process. */
 static void editAddress(guint keyval, WPEModifiers modifiers, const char* source)
 {
@@ -2368,6 +2390,7 @@ static int uiMain(int argc, char** argv)
         fprintf(stderr, "wpe-browser: --mse wants on, managed or off\n");
         return 1;
     }
+    mseMode = mse;
 #endif
     WebKitSettings* settings = webkit_settings_new_with_settings(
         "enable-webgl", static_cast<gboolean>(ENABLE_WEBGL && optWebGL),
@@ -2422,6 +2445,18 @@ static int uiMain(int argc, char** argv)
             LOG("chrome-error the script message handler is not registered");
         LOG("chrome on world=%s search=%s home=%s", chromeWorld, optSearch ? optSearch : defaultSearch, homeURI);
     }
+#if ENABLE_MEDIA_SOURCE
+    {
+        WebKitUserScript* script = webkit_user_script_new_for_world(
+            "window.webkit.messageHandlers.mediaCheck.postMessage(typeof MediaSource + ' ' + typeof ManagedMediaSource);",
+            WEBKIT_USER_CONTENT_INJECT_TOP_FRAME, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, mediaCheckWorld, nullptr, nullptr);
+        webkit_user_content_manager_add_script(contentManager, script);
+        webkit_user_script_unref(script);
+        g_signal_connect(contentManager, "script-message-received::mediaCheck", G_CALLBACK(mediaCheckMessage), nullptr);
+        if (!webkit_user_content_manager_register_script_message_handler(contentManager, "mediaCheck", mediaCheckWorld))
+            LOG("media mse-check-error the script message handler is not registered");
+    }
+#endif
 
 #if ENABLE_VIDEO
     WebKitWebsitePolicies* policies = webkit_website_policies_new_with_policies("autoplay", autoplayPolicy, nullptr);

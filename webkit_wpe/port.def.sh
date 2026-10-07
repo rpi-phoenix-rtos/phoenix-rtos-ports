@@ -249,7 +249,7 @@ p_build() {
 		done
 	fi
 	if b_use mse; then
-		for s in 'mse append bytes=%zu samples=%u' 'mse init tracks=%zu video=%s' 'media mse=%s managed=%s'; do
+		for s in 'mse append bytes=%zu samples=%u' 'mse init tracks=%zu video=%s' 'media mse=%s managed=%s' 'media mse-check mse=%s'; do
 			grep -qaF "${s}" "${ST}/usr/bin/wpe-browser" || { echo "webkit_wpe: wpe-browser (USE mse) lacks '${s}'"; bad=1; }
 		done
 	fi
