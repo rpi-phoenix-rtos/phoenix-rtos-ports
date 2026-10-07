@@ -23,7 +23,7 @@
  *   -cpuref  compare with the CPU decoder even where a <file>.md5 reference exists
  *   -q     only this tool's lines and the decoder's rpivid lines (default with a
  *          directory or several files)
- *   -from  skip the files whose name sorts before this one (to go on after a stream that
+ *   -from  skip the files listed before the one of this name (to go on after a stream that
  *          left the block unusable for the rest of the process: "cpu_why=the block stopped
  *          responding")
  *
@@ -785,10 +785,11 @@ int main(int argc, char **argv)
 		int r;
 
 		base = (base != NULL) ? base + 1 : files[i];
-		if ((from != NULL) && (strcmp(base, from) < 0)) {
+		if ((from != NULL) && (strcmp(base, from) != 0)) {
 			av_free(files[i]);
 			continue;
 		}
+		from = NULL;
 		nchecked++;
 		r = check_file(files[i], &o);
 
