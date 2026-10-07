@@ -1,0 +1,91 @@
+Subject: WPE on Phoenix: zero-copy HEVC frames in the MSE engine too
+
+On top of 0032 and webkit-video/0033: FFmpegPlaybackEngine asks hevc_rpivid for its GPU
+buffers as frames (CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy) when it opens a video
+decoder, and MediaPlayerPrivateFFmpegMSE's stat line adds zc= and zc_painted= as 0033 does for
+the progressive/HLS player. WPE_PHOENIX_MEDIA_ZERO_COPY=0 turns it off.
+
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp
+index 2452c310..56644dc1 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.cpp
+@@ -482,14 +482,19 @@ AVCodecContext* FFmpegPlaybackEngine::openDecoder(const FFmpegCodecConfig& confi
+     // H.264 (720p30) needs less than three cores; the page and the compositor share them
+     context->thread_count = envNumber("WPE_PHOENIX_MEDIA_THREADS", codec->id == AV_CODEC_ID_H264 ? 3 : 0);
+     context->opaque = &m_hardwareState;
+-    if (avcodec_open2(context, codec, nullptr) < 0) {
++    // hevc_rpivid: the block's GPU buffers as the frames (zero copy; WPE_PHOENIX_MEDIA_ZERO_COPY=0: off)
++    AVDictionary* options = nullptr;
++    bool zeroCopy = config.isVideo() && CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy(*context, &options);
++    int opened = avcodec_open2(context, codec, &options);
++    av_dict_free(&options);
++    if (opened < 0) {
+         log("error decoder-open codec=%s", codec->name);
+         avcodec_free_context(&context);
+         return nullptr;
+     }
+     const char* rpivid = getenv("FFMPEG_RPIVID");
+-    log("decoder %s=%s codec=%s config=%s threads=%d FFMPEG_RPIVID=%s", config.isVideo() ? "video" : "audio", codec->name,
+-        avcodec_get_name(parameters.codec_id), config.codec().utf8().data(), context->thread_count, rpivid ? rpivid : "unset");
++    log("decoder %s=%s codec=%s config=%s threads=%d FFMPEG_RPIVID=%s zero_copy=%d", config.isVideo() ? "video" : "audio", codec->name,
++        avcodec_get_name(parameters.codec_id), config.codec().utf8().data(), context->thread_count, rpivid ? rpivid : "unset", zeroCopy);
+     return context;
+ }
+ 
+@@ -530,6 +535,7 @@ bool FFmpegPlaybackEngine::presentFrame(AVFrame& decoded)
+     auto buffer = CoordinatedPlatformLayerBufferFFmpeg::create(*frame, m_frameCounters.copyRef());
+     if (!buffer)
+         return false;
++    m_lastZeroCopy = CoordinatedPlatformLayerBufferFFmpeg::isZeroCopyFrame(*frame);
+     m_contentsBufferProxy->setDisplayBuffer(WTF::move(buffer));
+     m_presented++;
+     return true;
+@@ -942,6 +948,8 @@ auto FFmpegPlaybackEngine::counters() -> Counters
+     counters.painted = m_frameCounters->painted;
+     counters.dropped = m_dropped;
+     counters.uploadMicroseconds = m_frameCounters->uploadMicroseconds;
++    counters.zeroCopy = m_lastZeroCopy;
++    counters.zeroCopyPainted = m_frameCounters->zeroCopyPainted;
+     counters.avDriftMs = m_avDriftMs;
+     counters.hardware = m_hardwareState;
+     counters.stalls = m_stalls;
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.h b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.h
+index c0e154d1..1cc3424e 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.h
++++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegPlaybackEngine.h
+@@ -150,6 +150,8 @@ public:
+         uint64_t painted { 0 };
+         uint64_t dropped { 0 };
+         uint64_t uploadMicroseconds { 0 };
++        bool zeroCopy { false }; // the last picture presented was the decoder's GPU buffer
++        uint64_t zeroCopyPainted { 0 };
+         int avDriftMs { 0 };
+         int hardware { -1 }; // the rpivid verdict: -1 none yet, 0 the CPU, 1 the block
+         unsigned stalls { 0 };
+@@ -254,6 +256,7 @@ private:
+ 
+     std::atomic<uint64_t> m_decoded { 0 };
+     std::atomic<uint64_t> m_presented { 0 };
++    std::atomic<bool> m_lastZeroCopy { false };
+     std::atomic<uint64_t> m_dropped { 0 };
+     std::atomic<int> m_avDriftMs { 0 };
+     std::atomic<int> m_hardwareState { -1 };
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp
+index f1e22744..432a09f2 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpegMSE.cpp
+@@ -609,11 +609,12 @@ void MediaPlayerPrivateFFmpegMSE::statTimerFired()
+     m_lastStatTime = now;
+     auto stats = m_mediaSourcePrivate ? m_mediaSourcePrivate->stats() : MediaSourcePrivateFFmpeg::Stats { };
+     log("stat clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu fps=%.1f av_ms=%d vq=%zu aq=%zu paused=%d hw=%s upload_ms=%.2f"
+-        " ready=%d stalls=%u q_kb=%zu mse_sb=%u mse_kb=%llu mse_samples=%llu played=%d players=%u",
++        " zc=%d zc_painted=%llu ready=%d stalls=%u q_kb=%zu mse_sb=%u mse_kb=%llu mse_samples=%llu played=%d players=%u",
+         m_engine->currentTime(), static_cast<unsigned long long>(counters.decoded), static_cast<unsigned long long>(counters.presented),
+         static_cast<unsigned long long>(counters.painted), static_cast<unsigned long long>(counters.dropped), fps, counters.avDriftMs,
+         counters.videoPackets, counters.audioPackets, m_paused, counters.hardware < 0 ? "-" : counters.hardware ? "1" : "0",
+-        counters.painted ? counters.uploadMicroseconds / 1000.0 / counters.painted : 0.0, static_cast<int>(readyState()), counters.stalls,
++        counters.painted ? counters.uploadMicroseconds / 1000.0 / counters.painted : 0.0, counters.zeroCopy ? 1 : 0,
++        static_cast<unsigned long long>(counters.zeroCopyPainted), static_cast<int>(readyState()), counters.stalls,
+         counters.queuedBytes / 1024, stats.sourceBuffers, static_cast<unsigned long long>(stats.bufferedBytes / 1024),
+         static_cast<unsigned long long>(stats.samples), m_hasPlayed, livePlayers.load());
+ }

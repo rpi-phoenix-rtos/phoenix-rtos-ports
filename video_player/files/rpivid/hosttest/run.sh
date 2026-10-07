@@ -32,9 +32,10 @@
 # de-tiling 8/10 bit, cropping, frame order, 1 and N threads -- must be BIT-EXACT. Then the
 # same with zero-copy output (-zc: DRM_PRIME frames in the NV12_COL128 single-buffer layout,
 # read back on the CPU; 1 and N slice threads; frames held as a compositor holds them) --
-# every 8-bit clip BIT-EXACT too; and FFMPEG_RPIVID_REFUSE_AT=3 (the block refuses its 4th
-# picture: the CPU decoder continues), where -zc must give exactly the frames of planar output
-# (the pictures held move to system memory first).
+# every 8-bit clip BIT-EXACT too; and a forced CPU fallback (FFMPEG_RPIVID_REFUSE_AT=3: the
+# block refuses its 4th picture; MOCK_FAIL_AT=5: it fails its 6th): pictures are dropped up to
+# the next IRAP, then the CPU decoder goes on, and every frame emitted, in either output, must
+# equal the CPU decoder's frame of the same pts.
 #
 # Copyright 2026 Phoenix Systems
 #
@@ -199,24 +200,27 @@ if [ "${loop}" = 1 ]; then
 				n_loop_bad=$((n_loop_bad + 1))
 			fi
 		done
-		# a CPU fallback: the same frames as from system-memory output (not bit-exact against the
-		# CPU decoder: it lacks the block-decoded pictures' motion vectors, which TMVP reads)
-		for m in planar zc; do
-			FFMPEG_RPIVID_REFUSE_AT=3 MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_LOG=/dev/null \
-				"${work}/hevc-rpivid-check" -hw -md5 -l 2 -T 1 $([ "${m}" = zc ] && echo -zc) "${c}" >"${work}/${b}.refuse-${m}.out" 2>&1 || true
-			if grep -q 'ERROR: AddressSanitizer' "${work}/${b}.refuse-${m}.out"; then
-				echo "ASAN      ${b} refuse ${m}"; grep -A12 'ERROR: AddressSanitizer' "${work}/${b}.refuse-${m}.out" | head -20; exit 1
-			fi
-			awk '$1 == "MD5" { print $3, $4, $5 }' "${work}/${b}.refuse-${m}.out" >"${work}/${b}.refuse-${m}.md5"
+		# a CPU fallback -- the block refuses its 4th picture (FFMPEG_RPIVID_REFUSE_AT=3), or
+		# fails its 6th (MOCK_FAIL_AT=5) --: pictures are dropped up to the next IRAP, then the CPU
+		# decoder goes on; every frame that is emitted must be right (by pts against the CPU
+		# decoder), in both outputs
+		for k in refuse fail; do
+			for m in planar zc; do
+				if [ "${k}" = refuse ]; then env=(FFMPEG_RPIVID_REFUSE_AT=3); else env=(MOCK_FAIL_AT=5); fi
+				o="${work}/${b}.${k}-${m}.out"
+				env "${env[@]}" MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_LOG=/dev/null \
+					"${work}/hevc-rpivid-check" -cpuref -bypts -l 2 -T 1 $([ "${m}" = zc ] && echo -zc) "${c}" >"${o}" 2>&1 || true
+				if grep -q 'ERROR: AddressSanitizer' "${o}"; then
+					echo "ASAN      ${b} ${k} ${m}"; grep -A12 'ERROR: AddressSanitizer' "${o}" | head -20; exit 1
+				fi
+				v="$(grep -o 'bypts hw_frames=.*' "${o}" || echo 'bypts none')"
+				echo "LOOP-DROP ${b} ${k} ${m}: ${v}"
+				if ! grep -Eq 'matched=[0-9]+ wrong=0 unmatched=0 dropped=[1-9][0-9]* hw_used=1 hw_fallback=1' <<<"${v}" ||
+						! grep -q 'decoding again from POC' "${o}"; then
+					n_loop_bad=$((n_loop_bad + 1))
+				fi
+			done
 		done
-		n="$(wc -l <"${work}/${b}.refuse-zc.md5")"
-		if [ "${n}" -gt 0 ] && cmp -s "${work}/${b}.refuse-planar.md5" "${work}/${b}.refuse-zc.md5" &&
-				grep -q 'continuing on the CPU decoder' "${work}/${b}.refuse-zc.out" && grep -q 'held_bad=0$' "${work}/${b}.refuse-zc.out"; then
-			echo "LOOP-ZC   ${b} fallback: ${n} frames, the same as planar output"
-		else
-			echo "LOOP-ZC   ${b} fallback: DIFFERENT from planar output (${n} frames)"
-			n_loop_bad=$((n_loop_bad + 1))
-		fi
 	done
 	echo "RESULT loop_bad=${n_loop_bad}"
 fi

@@ -1,0 +1,621 @@
+Subject: WPE on Phoenix: zero-copy HEVC frames in the FFmpeg media player (rpivid's GPU buffers)
+
+On top of 0030/0031 (platform/graphics/ffmpeg/, BSD-2-Clause): with the video_player port's
+hevc_rpivid, the rpivid block decodes each picture into a V3D BO of the render server and the
+decoder returns that buffer as an AV_PIX_FMT_DRM_PRIME frame (libavcodec/rpivid_drm.h:
+DRM_FORMAT_NV12, DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT). The compositor imports each
+buffer once as an EGLImage (EGL_EXT_image_dma_buf_import_modifiers) and draws it with
+TextureMapper::drawTextureExternalOES: Mesa's v3d de-tiles it on the GPU and converts the
+colours (the frame's colour space and range as EGL hints). This replaces the CPU SAND->planar
+copy in the decoder (6.3 ms per 1080p picture on the Pi 4) and the three glTexImage2D uploads
+in the compositor (~5 ms, tiled by Mesa on the CPU). Coordination repo:
+docs/gpu-new-lane/M10b-video-zero-copy.md.
+
+  CoordinatedPlatformLayerBufferFFmpeg  requestZeroCopy(): before avcodec_open2 of hevc_rpivid,
+                                rpivid_out=drm_prime and slice (not frame) threads, once the
+                                render node's buffer operations are installed
+                                (rpivid_bo_drm_install(), librpivid_bo_drm.a) and the display
+                                has EGL_EXT_image_dma_buf_import_modifiers.
+                                A DRM_PRIME frame is drawn from a per-compositing-thread cache
+                                of EGLImages + GL_TEXTURE_EXTERNAL_OES textures, one per buffer
+                                (named by its dma-buf's st_dev/st_ino, the BO handle; entries
+                                idle for 3 s are dropped): a texture per picture would make Mesa
+                                allocate a ~3 MB tiled shadow every frame. The layer buffer
+                                holds the frame until the compositor drops it, which keeps the
+                                decoder from writing the buffer (it also waits for the GPU's last
+                                read). An import failure, or Skia painting (canvas, snapshots),
+                                takes the CPU readback (rpivid_drm_frame_to_planar). Ordinary
+                                frames take the upload path as before, frame by frame: after a
+                                block failure the decoder goes on with system-memory frames.
+  MediaPlayerPrivateFFmpeg      asks for it; "decoder ... zero_copy=0|1"; the stat line adds
+                                zc=<the last picture presented was a GPU buffer> and
+                                zc_painted=<pictures drawn that way>; upload_ms stays the
+                                compositor's CPU time per painted picture (zero copy: the cache
+                                lookup or the one-time import, and the draw)
+
+WPE_PHOENIX_MEDIA_ZERO_COPY=0 turns it off (A/B). Without hevc_rpivid's zero-copy API in the
+FFmpeg prefix (no libavcodec/rpivid_drm.h or rpivid_bo_drm.h) the code compiles to the old path.
+
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
+index 84a0ffb0..90e4b4e5 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
++++ b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
+@@ -30,7 +30,9 @@
+ #include "PlatformDisplay.h"
+ #include "TextureMapper.h"
+ #include "TextureMapperGLHeaders.h"
++#include <mutex>
+ #include <wtf/MonotonicTime.h>
++#include <wtf/Vector.h>
+ 
+ #if USE(SKIA)
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+@@ -44,10 +46,27 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+ #endif
+ 
+ extern "C" {
++#include <libavcodec/avcodec.h>
++#include <libavutil/dict.h>
+ #include <libavutil/frame.h>
+ #include <libavutil/pixfmt.h>
+ }
+ 
++// Phoenix-RTOS: hevc_rpivid's zero-copy output (the video_player port's FFmpeg) and its GPU
++// picture buffers (render-server BOs, librpivid_bo_drm.a)
++#if __has_include(<libavcodec/rpivid_drm.h>) && __has_include(<rpivid_bo_drm.h>)
++#define HAVE_RPIVID_ZERO_COPY 1
++#include <epoxy/egl.h>
++#include <sys/stat.h>
++extern "C" {
++#include <libavcodec/rpivid_drm.h>
++#include <libavutil/hwcontext_drm.h>
++#include <rpivid_bo_drm.h>
++}
++#else
++#define HAVE_RPIVID_ZERO_COPY 0
++#endif
++
+ namespace WebCore {
+ 
+ bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
+@@ -57,15 +76,79 @@ bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
+     case AV_PIX_FMT_YUVJ420P:
+     case AV_PIX_FMT_NV12:
+         return true;
++#if HAVE_RPIVID_ZERO_COPY
++    case AV_PIX_FMT_DRM_PRIME:
++        return true;
++#endif
+     default:
+         return false;
+     }
+ }
+ 
++bool CoordinatedPlatformLayerBufferFFmpeg::isZeroCopyFrame(const AVFrame& frame)
++{
++    return frame.format == AV_PIX_FMT_DRM_PRIME;
++}
++
++#if HAVE_RPIVID_ZERO_COPY
++// The one DRM_PRIME layout this buffer can show: hevc_rpivid's (rpivid_drm.h), one buffer
++// holding an NV12 layer of two planes
++static bool isRpividFrame(const AVFrame& frame)
++{
++    auto* descriptor = reinterpret_cast<const AVDRMFrameDescriptor*>(frame.data[0]);
++    static constexpr uint32_t nv12 = 'N' | ('V' << 8) | ('1' << 16) | ('2' << 24);
++    return descriptor && descriptor->nb_objects == 1 && descriptor->nb_layers == 1 && descriptor->layers[0].format == nv12
++        && descriptor->layers[0].nb_planes == 2;
++}
++#endif
++
++bool CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy(AVCodecContext& context, AVDictionary** options)
++{
++#if HAVE_RPIVID_ZERO_COPY
++    if (!context.codec || strcmp(context.codec->name, "hevc_rpivid"))
++        return false;
++    const char* knob = getenv("WPE_PHOENIX_MEDIA_ZERO_COPY");
++    if (knob && !strcmp(knob, "0"))
++        return false;
++    static std::once_flag once;
++    static bool available;
++    std::call_once(once, [] {
++        auto& extensions = PlatformDisplay::sharedDisplay().eglExtensions();
++        const char* why = nullptr;
++        int rc = 0;
++        if (!extensions.EXT_image_dma_buf_import || !extensions.EXT_image_dma_buf_import_modifiers)
++            why = "no EGL_EXT_image_dma_buf_import_modifiers";
++        else if ((rc = rpivid_bo_drm_install()) < 0)
++            why = "no render node for GPU picture buffers";
++        available = !why;
++        fprintf(stderr, "WPEB-MEDIA zero-copy %s%s%s (rc=%d)\n", available ? "available" : "unavailable", why ? ": " : "", why ? why : "", rc);
++    });
++    if (!available)
++        return false;
++    // the block's buffers as the frames (rpivid_drm.h); that output needs no frame threads
++    context.thread_type = FF_THREAD_SLICE;
++    av_dict_set(options, "rpivid_out", "drm_prime", 0);
++    return true;
++#else
++    UNUSED_PARAM(context);
++    UNUSED_PARAM(options);
++    return false;
++#endif
++}
++
+ std::unique_ptr<CoordinatedPlatformLayerBufferFFmpeg> CoordinatedPlatformLayerBufferFFmpeg::create(const AVFrame& frame, Ref<FFmpegFrameCounters>&& counters)
+ {
+     if (!supportsPixelFormat(frame.format) || frame.width < 2 || frame.height < 2)
+         return nullptr;
++#if HAVE_RPIVID_ZERO_COPY
++    if (isZeroCopyFrame(frame) && !isRpividFrame(frame)) {
++        static std::once_flag once;
++        std::call_once(once, [] {
++            fprintf(stderr, "WPEB-MEDIA zero-copy: a DRM_PRIME frame that is not hevc_rpivid's NV12: not shown\n");
++        });
++        return nullptr;
++    }
++#endif
+     AVFrame* reference = av_frame_clone(&frame);
+     if (!reference)
+         return nullptr;
+@@ -87,23 +170,230 @@ CoordinatedPlatformLayerBufferFFmpeg::~CoordinatedPlatformLayerBufferFFmpeg()
+     // ever drawn (on the player's thread) has none.
+     if (m_textures[0])
+         glDeleteTextures(m_textures.size(), m_textures.data());
++    av_frame_free(&m_readback);
+     av_frame_free(&m_frame);
+ }
+ 
+-bool CoordinatedPlatformLayerBufferFFmpeg::isNV12() const
++const AVFrame* CoordinatedPlatformLayerBufferFFmpeg::systemMemoryFrame()
+ {
+-    return m_frame->format == AV_PIX_FMT_NV12;
++    if (!isZeroCopyFrame(*m_frame))
++        return m_frame;
++#if HAVE_RPIVID_ZERO_COPY
++    if (!m_readback) {
++        m_readback = av_frame_alloc();
++        if (m_readback && rpivid_drm_frame_to_planar(m_readback, m_frame) < 0) {
++            av_frame_free(&m_readback);
++            static std::once_flag once;
++            std::call_once(once, [] {
++                fprintf(stderr, "WPEB-MEDIA zero-copy readback failed: a picture this build cannot show\n");
++            });
++        }
++    }
++    return m_readback;
++#else
++    return nullptr;
++#endif
+ }
+ 
+-void CoordinatedPlatformLayerBufferFFmpeg::countPaint(MonotonicTime uploadStart)
++void CoordinatedPlatformLayerBufferFFmpeg::countPaint(MonotonicTime uploadStart, bool zeroCopy)
+ {
+     if (m_painted)
+         return;
+     m_painted = true;
+     m_counters->painted++;
++    if (zeroCopy)
++        m_counters->zeroCopyPainted++;
++    // upload_ms: the compositor's CPU time to get the picture into a texture (zero copy: the
++    // buffer's texture looked up, or imported once, and drawn)
+     m_counters->uploadMicroseconds += static_cast<uint64_t>((MonotonicTime::now() - uploadStart).microseconds());
+ }
+ 
++#if HAVE_RPIVID_ZERO_COPY
++namespace {
++
++// The EGLImages of the decoders' picture buffers and their GL_TEXTURE_EXTERNAL_OES textures,
++// one per buffer: a texture made per picture would make Mesa allocate a new tiled shadow of
++// the picture (~3 MB at 1080p, through the render server) every frame. Per compositing
++// thread (each has its own GL context), touched only by it. A buffer is named by its dma-buf's
++// st_dev/st_ino (the render server's BO handle, never reused), so an entry cannot outlive its
++// buffer's identity; the import keeps the BO alive, so entries unused for a while (a decoder
++// closed, a video gone) are dropped.
++struct ZeroCopyImage {
++    dev_t dev { 0 };
++    ino_t ino { 0 };
++    int width { 0 };
++    int height { 0 };
++    int colorspace { 0 };
++    int range { 0 };
++    EGLImage image { EGL_NO_IMAGE };
++    GLuint texture { 0 };
++    MonotonicTime lastUse;
++};
++
++struct ZeroCopyCache {
++    Vector<ZeroCopyImage> entries;
++    bool importFailureLogged { false };
++};
++
++static constexpr size_t zeroCopyCacheMax = 48;
++static constexpr Seconds zeroCopyIdle = 3_s;
++
++static thread_local ZeroCopyCache* zeroCopyCache;
++
++static void releaseZeroCopyImage(ZeroCopyImage& entry)
++{
++    if (entry.texture)
++        glDeleteTextures(1, &entry.texture);
++    if (entry.image != EGL_NO_IMAGE)
++        PlatformDisplay::sharedDisplay().destroyEGLImage(entry.image);
++    entry.texture = 0;
++    entry.image = EGL_NO_IMAGE;
++}
++
++static EGLAttrib yuvColorSpaceHint(const AVFrame& frame)
++{
++    switch (frame.colorspace) {
++    case AVCOL_SPC_BT470BG:
++    case AVCOL_SPC_SMPTE170M:
++        return EGL_ITU_REC601_EXT;
++    case AVCOL_SPC_BT709:
++        return EGL_ITU_REC709_EXT;
++    case AVCOL_SPC_BT2020_NCL:
++    case AVCOL_SPC_BT2020_CL:
++        return EGL_ITU_REC2020_EXT;
++    default:
++        // unspecified: BT.709 for HD, BT.601 for SD (what players assume)
++        return frame.height >= 720 ? EGL_ITU_REC709_EXT : EGL_ITU_REC601_EXT;
++    }
++}
++
++// The texture of the frame's buffer, imported on first use; 0 when it cannot be imported
++static GLuint zeroCopyTexture(const AVFrame& frame)
++{
++    auto* descriptor = reinterpret_cast<const AVDRMFrameDescriptor*>(frame.data[0]);
++    if (!descriptor || descriptor->nb_objects != 1 || descriptor->nb_layers != 1 || descriptor->layers[0].nb_planes != 2
++        || descriptor->objects[0].fd < 0 || frame.crop_left || frame.crop_top)
++        return 0;
++    struct stat st;
++    if (fstat(descriptor->objects[0].fd, &st) < 0)
++        return 0;
++
++    if (!zeroCopyCache)
++        zeroCopyCache = new ZeroCopyCache;
++    auto& cache = *zeroCopyCache;
++    auto now = MonotonicTime::now();
++    int range = frame.color_range == AVCOL_RANGE_JPEG ? 1 : 0;
++    // drop what nothing drew for a while, and find this buffer
++    ZeroCopyImage* found = nullptr;
++    for (size_t i = cache.entries.size(); i-- > 0;) {
++        auto& entry = cache.entries[i];
++        if (entry.dev == st.st_dev && entry.ino == st.st_ino && entry.width == frame.width && entry.height == frame.height
++            && entry.colorspace == frame.colorspace && entry.range == range) {
++            found = &entry;
++            continue;
++        }
++        if (now - entry.lastUse > zeroCopyIdle) {
++            releaseZeroCopyImage(entry);
++            cache.entries.removeAt(i);
++            found = nullptr; // indices moved: look again below
++        }
++    }
++    if (!found) {
++        for (auto& entry : cache.entries) {
++            if (entry.dev == st.st_dev && entry.ino == st.st_ino && entry.width == frame.width && entry.height == frame.height
++                && entry.colorspace == frame.colorspace && entry.range == range) {
++                found = &entry;
++                break;
++            }
++        }
++    }
++    if (found) {
++        found->lastUse = now;
++        return found->texture;
++    }
++
++    const auto& layer = descriptor->layers[0];
++    uint64_t modifier = descriptor->objects[0].format_modifier;
++    Vector<EGLAttrib> attributes {
++        EGL_WIDTH, frame.width,
++        EGL_HEIGHT, frame.height,
++        EGL_LINUX_DRM_FOURCC_EXT, static_cast<EGLAttrib>(layer.format),
++        EGL_DMA_BUF_PLANE0_FD_EXT, descriptor->objects[layer.planes[0].object_index].fd,
++        EGL_DMA_BUF_PLANE0_OFFSET_EXT, static_cast<EGLAttrib>(layer.planes[0].offset),
++        EGL_DMA_BUF_PLANE0_PITCH_EXT, static_cast<EGLAttrib>(layer.planes[0].pitch),
++        EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, static_cast<EGLAttrib>(modifier & 0xffffffff),
++        EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, static_cast<EGLAttrib>(modifier >> 32),
++        EGL_DMA_BUF_PLANE1_FD_EXT, descriptor->objects[layer.planes[1].object_index].fd,
++        EGL_DMA_BUF_PLANE1_OFFSET_EXT, static_cast<EGLAttrib>(layer.planes[1].offset),
++        EGL_DMA_BUF_PLANE1_PITCH_EXT, static_cast<EGLAttrib>(layer.planes[1].pitch),
++        EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, static_cast<EGLAttrib>(modifier & 0xffffffff),
++        EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT, static_cast<EGLAttrib>(modifier >> 32),
++        EGL_YUV_COLOR_SPACE_HINT_EXT, yuvColorSpaceHint(frame),
++        EGL_SAMPLE_RANGE_HINT_EXT, range ? EGL_YUV_FULL_RANGE_EXT : EGL_YUV_NARROW_RANGE_EXT,
++        EGL_NONE
++    };
++    auto& display = PlatformDisplay::sharedDisplay();
++    EGLImage image = display.createEGLImage(EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attributes);
++    if (!image) {
++        if (!cache.importFailureLogged) {
++            cache.importFailureLogged = true;
++            fprintf(stderr, "WPEB-MEDIA zero-copy import failed (EGL 0x%x) %dx%d modifier=0x%016llx: CPU readback\n", eglGetError(),
++                frame.width, frame.height, static_cast<unsigned long long>(modifier));
++        }
++        return 0;
++    }
++    GLuint texture = 0;
++    glGenTextures(1, &texture);
++    glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    glEGLImageTargetTexture2DOES(GL_TEXTURE_EXTERNAL_OES, image);
++    GLenum error = glGetError();
++    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
++    if (error != GL_NO_ERROR) {
++        glDeleteTextures(1, &texture);
++        display.destroyEGLImage(image);
++        if (!cache.importFailureLogged) {
++            cache.importFailureLogged = true;
++            fprintf(stderr, "WPEB-MEDIA zero-copy texture failed (GL 0x%x): CPU readback\n", error);
++        }
++        return 0;
++    }
++    if (cache.entries.size() >= zeroCopyCacheMax) {
++        size_t oldest = 0;
++        for (size_t i = 1; i < cache.entries.size(); ++i) {
++            if (cache.entries[i].lastUse < cache.entries[oldest].lastUse)
++                oldest = i;
++        }
++        releaseZeroCopyImage(cache.entries[oldest]);
++        cache.entries.removeAt(oldest);
++    }
++    cache.entries.append({ st.st_dev, st.st_ino, frame.width, frame.height, frame.colorspace, range, image, texture, now });
++    return texture;
++}
++
++} // namespace
++#endif
++
++bool CoordinatedPlatformLayerBufferFFmpeg::paintZeroCopy(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity)
++{
++#if HAVE_RPIVID_ZERO_COPY
++    GLuint texture = zeroCopyTexture(*m_frame);
++    if (!texture)
++        return false;
++    textureMapper.drawTextureExternalOES(texture, m_flags, targetRect, modelViewMatrix, opacity);
++    return true;
++#else
++    UNUSED_PARAM(textureMapper);
++    UNUSED_PARAM(targetRect);
++    UNUSED_PARAM(modelViewMatrix);
++    UNUSED_PARAM(opacity);
++    return false;
++#endif
++}
++
+ // Limited-range ("TV") YCbCr to RGB, as CoordinatedPlatformLayerBufferYUV's matrices.
+ static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
+ {
+@@ -134,14 +424,22 @@ static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
+ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity)
+ {
+     auto start = MonotonicTime::now();
+-    unsigned planes = isNV12() ? 2 : 3;
++    if (isZeroCopyFrame(*m_frame) && !m_textures[0] && paintZeroCopy(textureMapper, targetRect, modelViewMatrix, opacity)) {
++        countPaint(start, true);
++        return;
++    }
++    // a system-memory picture, or the readback of a zero-copy one that could not be imported
++    const AVFrame* frame = systemMemoryFrame();
++    if (!frame)
++        return;
++    unsigned planes = frame->format == AV_PIX_FMT_NV12 ? 2 : 3;
+     if (!m_textures[0]) {
+         glGenTextures(planes, m_textures.data());
+         for (unsigned i = 0; i < planes; ++i) {
+             bool chroma = i > 0;
+-            int width = chroma ? (m_frame->width + 1) / 2 : m_frame->width;
+-            int height = chroma ? (m_frame->height + 1) / 2 : m_frame->height;
+-            bool interleaved = chroma && isNV12();
++            int width = chroma ? (frame->width + 1) / 2 : frame->width;
++            int height = chroma ? (frame->height + 1) / 2 : frame->height;
++            bool interleaved = chroma && planes == 2;
+             int bytesPerPixel = interleaved ? 2 : 1;
+             glBindTexture(GL_TEXTURE_2D, m_textures[i]);
+             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+@@ -149,8 +447,8 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
+             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+-            glPixelStorei(GL_UNPACK_ROW_LENGTH, m_frame->linesize[i] / bytesPerPixel);
+-            glTexImage2D(GL_TEXTURE_2D, 0, interleaved ? GL_RG8 : GL_R8, width, height, 0, interleaved ? GL_RG : GL_RED, GL_UNSIGNED_BYTE, m_frame->data[i]);
++            glPixelStorei(GL_UNPACK_ROW_LENGTH, frame->linesize[i] / bytesPerPixel);
++            glTexImage2D(GL_TEXTURE_2D, 0, interleaved ? GL_RG8 : GL_R8, width, height, 0, interleaved ? GL_RG : GL_RED, GL_UNSIGNED_BYTE, frame->data[i]);
+         }
+         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+@@ -159,10 +457,10 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
+ 
+     auto flags = m_flags;
+     if (planes == 2)
+-        textureMapper.drawTextureSemiPlanarYUV({ m_textures[0], m_textures[1] }, false, yuvToRgbMatrix(*m_frame), flags, targetRect, modelViewMatrix, opacity, TextureMapper::TransferFunction::Bt709);
++        textureMapper.drawTextureSemiPlanarYUV({ m_textures[0], m_textures[1] }, false, yuvToRgbMatrix(*frame), flags, targetRect, modelViewMatrix, opacity, TextureMapper::TransferFunction::Bt709);
+     else
+-        textureMapper.drawTexturePlanarYUV({ m_textures[0], m_textures[1], m_textures[2] }, yuvToRgbMatrix(*m_frame), flags, targetRect, modelViewMatrix, opacity, std::nullopt, TextureMapper::TransferFunction::Bt709);
+-    countPaint(start);
++        textureMapper.drawTexturePlanarYUV({ m_textures[0], m_textures[1], m_textures[2] }, yuvToRgbMatrix(*frame), flags, targetRect, modelViewMatrix, opacity, std::nullopt, TextureMapper::TransferFunction::Bt709);
++    countPaint(start, false);
+ }
+ 
+ #if USE(SKIA)
+@@ -194,29 +492,33 @@ sk_sp<SkImage> CoordinatedPlatformLayerBufferFFmpeg::skiaImage()
+     auto* grContext = PlatformDisplay::sharedDisplay().skiaGrContext();
+     if (!grContext)
+         return nullptr;
++    // (a zero-copy picture: its CPU readback; Skia paints video only for canvas and snapshots)
++    const AVFrame* frame = systemMemoryFrame();
++    if (!frame)
++        return nullptr;
+ 
+-    int width = m_frame->width;
+-    int height = m_frame->height;
++    int width = frame->width;
++    int height = frame->height;
+     int chromaWidth = (width + 1) / 2;
+     int chromaHeight = (height + 1) / 2;
+     std::array<SkPixmap, SkYUVAPixmaps::kMaxPlanes> pixmaps;
+     SkYUVAInfo::PlaneConfig planeConfig;
+-    pixmaps[0] = SkPixmap(SkImageInfo::Make(width, height, kGray_8_SkColorType, kOpaque_SkAlphaType), m_frame->data[0], m_frame->linesize[0]);
+-    if (isNV12()) {
++    pixmaps[0] = SkPixmap(SkImageInfo::Make(width, height, kGray_8_SkColorType, kOpaque_SkAlphaType), frame->data[0], frame->linesize[0]);
++    if (frame->format == AV_PIX_FMT_NV12) {
+         planeConfig = SkYUVAInfo::PlaneConfig::kY_UV;
+-        pixmaps[1] = SkPixmap(SkImageInfo::Make(chromaWidth, chromaHeight, kR8G8_unorm_SkColorType, kOpaque_SkAlphaType), m_frame->data[1], m_frame->linesize[1]);
++        pixmaps[1] = SkPixmap(SkImageInfo::Make(chromaWidth, chromaHeight, kR8G8_unorm_SkColorType, kOpaque_SkAlphaType), frame->data[1], frame->linesize[1]);
+     } else {
+         planeConfig = SkYUVAInfo::PlaneConfig::kY_U_V;
+-        pixmaps[1] = SkPixmap(SkImageInfo::Make(chromaWidth, chromaHeight, kGray_8_SkColorType, kOpaque_SkAlphaType), m_frame->data[1], m_frame->linesize[1]);
+-        pixmaps[2] = SkPixmap(SkImageInfo::Make(chromaWidth, chromaHeight, kGray_8_SkColorType, kOpaque_SkAlphaType), m_frame->data[2], m_frame->linesize[2]);
++        pixmaps[1] = SkPixmap(SkImageInfo::Make(chromaWidth, chromaHeight, kGray_8_SkColorType, kOpaque_SkAlphaType), frame->data[1], frame->linesize[1]);
++        pixmaps[2] = SkPixmap(SkImageInfo::Make(chromaWidth, chromaHeight, kGray_8_SkColorType, kOpaque_SkAlphaType), frame->data[2], frame->linesize[2]);
+     }
+-    SkYUVAInfo info(SkISize::Make(width, height), planeConfig, SkYUVAInfo::Subsampling::k420, skiaColorSpace(*m_frame));
++    SkYUVAInfo info(SkISize::Make(width, height), planeConfig, SkYUVAInfo::Subsampling::k420, skiaColorSpace(*frame));
+     auto yuvaPixmaps = SkYUVAPixmaps::FromExternalPixmaps(info, pixmaps.data());
+     if (!yuvaPixmaps.isValid())
+         return nullptr;
+     m_skiaImage = SkImages::TextureFromYUVAPixmaps(grContext, yuvaPixmaps, skgpu::Mipmapped::kNo, false, SkColorSpace::MakeSRGB());
+     if (m_skiaImage)
+-        countPaint(start);
++        countPaint(start, false);
+     return m_skiaImage;
+ }
+ #endif
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h
+index b4841b95..dacbf564 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h
++++ b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h
+@@ -33,6 +33,8 @@
+ #include <wtf/MonotonicTime.h>
+ #include <wtf/ThreadSafeRefCounted.h>
+ 
++struct AVCodecContext;
++struct AVDictionary;
+ struct AVFrame;
+ 
+ namespace WebCore {
+@@ -44,12 +46,20 @@ struct FFmpegFrameCounters final : public ThreadSafeRefCounted<FFmpegFrameCounte
+     static Ref<FFmpegFrameCounters> create() { return adoptRef(*new FFmpegFrameCounters); }
+     std::atomic<uint64_t> painted { 0 };
+     std::atomic<uint64_t> uploadMicroseconds { 0 };
++    std::atomic<uint64_t> zeroCopyPainted { 0 };   // of painted: drawn from the decoder's GPU buffer
+ };
+ 
+-// A decoded picture in system memory (8-bit 4:2:0: three planes, or NV12) on its way to the
+-// compositor. The planes are uploaded on the compositing thread when the frame is drawn:
+-// by Skia from the plane pixmaps (Skia composition, the WPE default), or into three R8
+-// textures drawn by TextureMapper's YUV shader. The colour conversion runs on the GPU either way.
++// A decoded picture on its way to the compositor:
++// - in system memory (8-bit 4:2:0: three planes, or NV12): the planes are uploaded on the
++//   compositing thread when the frame is drawn, by Skia from the plane pixmaps (Skia
++//   composition, the WPE default), or into three R8 textures drawn by TextureMapper's YUV shader;
++// - or (Phoenix-RTOS, zero copy) an AV_PIX_FMT_DRM_PRIME frame of hevc_rpivid: the rpivid
++//   block's picture buffer itself, a V3D BO in the NV12 SAND128 layout (libavcodec/rpivid_drm.h).
++//   It is imported once per buffer as an EGLImage (EGL_EXT_image_dma_buf_import_modifiers) and
++//   drawn through GL_TEXTURE_EXTERNAL_OES (TextureMapper::drawTextureExternalOES): Mesa de-tiles
++//   it on the GPU (v3d_sand8_blit) and converts the colours. Holding the frame keeps the decoder
++//   from writing the buffer again (and the decoder waits for the GPU's last read of it).
++// The colour conversion runs on the GPU either way.
+ class CoordinatedPlatformLayerBufferFFmpeg final : public CoordinatedPlatformLayerBuffer {
+ public:
+     // Takes a reference to the frame; nullptr when its pixel format is not one of the above.
+@@ -59,16 +69,26 @@ public:
+ 
+     static bool supportsPixelFormat(int);
+ 
++    // Before avcodec_open2() of a video decoder: ask hevc_rpivid for zero-copy frames when this
++    // build, the decoder and the EGL display can do it and WPE_PHOENIX_MEDIA_ZERO_COPY is not 0
++    // (rpivid_out=drm_prime in *options, slice instead of frame threads). True when asked.
++    static bool requestZeroCopy(AVCodecContext&, AVDictionary** options);
++    static bool isZeroCopyFrame(const AVFrame&);
++
+ private:
+     void paintToTextureMapper(TextureMapper&, const FloatRect&, const TransformationMatrix& modelViewMatrix = TransformationMatrix(), float opacity = 1.0) override;
+ #if USE(SKIA)
+     sk_sp<SkImage> skiaImage() override;
+ #endif
+ 
+-    void countPaint(MonotonicTime uploadStart);
+-    bool isNV12() const;
++    void countPaint(MonotonicTime uploadStart, bool zeroCopy);
++    // the picture in system memory: the frame, or the CPU readback of a zero-copy frame (made
++    // on first use: a fallback, and Skia painting); nullptr if that fails
++    const AVFrame* systemMemoryFrame();
++    bool paintZeroCopy(TextureMapper&, const FloatRect&, const TransformationMatrix&, float opacity);
+ 
+     AVFrame* m_frame { nullptr };
++    AVFrame* m_readback { nullptr };
+     Ref<FFmpegFrameCounters> m_counters;
+     bool m_painted { false };
+     std::array<unsigned, 3> m_textures { 0, 0, 0 };
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
+index a20a8afc..e3d37c9c 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
+@@ -649,15 +649,20 @@ AVCodecContext* MediaPlayerPrivateFFmpeg::openDecoder(int index)
+     // HLS: H.264 (720p30) needs less than three cores; the page and the compositor share them
+     context->thread_count = envNumber("WPE_PHOENIX_MEDIA_THREADS", m_isHLS && codec->id == AV_CODEC_ID_H264 ? 3 : 0);
+     context->opaque = &m_hardwareState;
+-    if (avcodec_open2(context, codec, nullptr) < 0) {
++    // hevc_rpivid: the block's GPU buffers as the frames (zero copy; WPE_PHOENIX_MEDIA_ZERO_COPY=0: off)
++    AVDictionary* options = nullptr;
++    bool zeroCopy = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy(*context, &options);
++    int opened = avcodec_open2(context, codec, &options);
++    av_dict_free(&options);
++    if (opened < 0) {
+         log("error decoder-open codec=%s", codec->name);
+         avcodec_free_context(&context);
+         return nullptr;
+     }
+     // FFMPEG_RPIVID (0 CPU, 1 the block's verified tool set, 2 all tools) steers hevc_rpivid
+     const char* rpivid = getenv("FFMPEG_RPIVID");
+-    log("decoder %s=%s codec=%s threads=%d FFMPEG_RPIVID=%s", stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ? "video" : "audio", codec->name,
+-        avcodec_get_name(stream->codecpar->codec_id), context->thread_count, rpivid ? rpivid : "unset");
++    log("decoder %s=%s codec=%s threads=%d FFMPEG_RPIVID=%s zero_copy=%d", stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ? "video" : "audio", codec->name,
++        avcodec_get_name(stream->codecpar->codec_id), context->thread_count, rpivid ? rpivid : "unset", zeroCopy);
+     return context;
+ }
+ 
+@@ -1025,6 +1030,7 @@ bool MediaPlayerPrivateFFmpeg::presentFrame(AVFrame& decoded)
+     auto buffer = CoordinatedPlatformLayerBufferFFmpeg::create(*frame, m_frameCounters.copyRef());
+     if (!buffer)
+         return false;
++    m_lastZeroCopy = CoordinatedPlatformLayerBufferFFmpeg::isZeroCopyFrame(*frame);
+     m_contentsBufferProxy->setDisplayBuffer(WTF::move(buffer));
+     m_presented++;
+     return true;
+@@ -1682,12 +1688,13 @@ void MediaPlayerPrivateFFmpeg::statTimerFired()
+             m_hlsSummary.utf8().data(), m_hlsLive, stats.segments, stats.playlistSegments, stats.reloads, m_rebuffers.load(), stats.streams,
+             static_cast<unsigned long long>(stats.bufferBytes / 1024), m_hlsIdle.load());
+     }
+-    log("stat clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu fps=%.1f av_ms=%d vq=%zu aq=%zu paused=%d hw=%s upload_ms=%.2f bytes=%llu"
+-        " ahead_kb=%llu buf_kb=%zu q_kb=%zu preload=%s played=%d players=%u%s",
++    log("stat clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu fps=%.1f av_ms=%d vq=%zu aq=%zu paused=%d hw=%s upload_ms=%.2f"
++        " zc=%d zc_painted=%llu bytes=%llu ahead_kb=%llu buf_kb=%zu q_kb=%zu preload=%s played=%d players=%u%s",
+         clockNow(), static_cast<unsigned long long>(m_decoded.load()), static_cast<unsigned long long>(presented),
+         static_cast<unsigned long long>(painted), static_cast<unsigned long long>(m_dropped.load()), fps, m_avDriftMs.load(),
+         queueLength(m_videoQueue), queueLength(m_audioQueue), m_paused, hardware < 0 ? "-" : hardware ? "1" : "0",
+-        painted ? uploadUs / 1000.0 / painted : 0.0, static_cast<unsigned long long>(bytes),
++        painted ? uploadUs / 1000.0 / painted : 0.0, m_lastZeroCopy.load() ? 1 : 0,
++        static_cast<unsigned long long>(m_frameCounters->zeroCopyPainted.load()), static_cast<unsigned long long>(bytes),
+         static_cast<unsigned long long>(memory.unread / 1024), memory.capacity / 1024,
+         (queueBytes(m_videoQueue) + queueBytes(m_audioQueue)) / 1024, preloadName(m_preload), m_hasPlayed, livePlayers.load(), hls);
+ }
+diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
+index 40af53e9..63e01903 100644
+--- a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
++++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
+@@ -310,6 +310,7 @@ private:
+     // counters (any thread)
+     std::atomic<uint64_t> m_decoded { 0 };
+     std::atomic<uint64_t> m_presented { 0 };
++    std::atomic<bool> m_lastZeroCopy { false }; // the last picture presented was the decoder's GPU buffer
+     std::atomic<uint64_t> m_dropped { 0 };
+     std::atomic<int> m_avDriftMs { 0 };
+     // the rpivid decoder's verdict, from its log lines: -1 none yet, 0 the CPU, 1 the block

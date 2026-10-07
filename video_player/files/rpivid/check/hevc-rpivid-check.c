@@ -5,7 +5,7 @@
  * frame with a reference -- the CPU decoder, or a host's ffmpeg -f framemd5 -- and time it
  *
  *     hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc]
- *                       [-cpuref] [-zc] [-hold n] [-q] [-from name] <file | directory>...
+ *                       [-cpuref] [-bypts] [-zc] [-hold n] [-q] [-from name] <file | directory>...
  *
  *   -n     stop after this many frames (default: the whole file)
  *   -t     CPU decoder threads (default 4)
@@ -21,6 +21,10 @@
  *          independently of the other pass; counts in the pass lines. The decoder then
  *          computes an MD5 of every picture itself: that is in decode_ms/frame
  *   -cpuref  compare with the CPU decoder even where a <file>.md5 reference exists
+ *   -bypts compare the frames of the two passes by pts, not by position (with the CPU
+ *          decoder as the reference): a hardware pass that dropped pictures (after leaving
+ *          the block it drops them up to the next random access point) must have no WRONG
+ *          frame; one line "RPIVID-CHECK bypts ... matched= wrong= unmatched= dropped="
  *   -zc    the hardware pass with zero-copy output (hevc_rpivid rpivid_out=drm_prime,
  *          libavcodec/rpivid_drm.h): AV_PIX_FMT_DRM_PRIME frames of the block's buffers --
  *          GPU buffers (render-server BOs with a dma-buf) where this build has them, else the
@@ -548,7 +552,7 @@ out:
 
 
 typedef struct {
-	int max_frames, threads, hw_threads, level, do_hw, do_cpu, crc, cpuref;
+	int max_frames, threads, hw_threads, level, do_hw, do_cpu, crc, cpuref, bypts;
 } opts_t;
 
 typedef struct {
@@ -689,7 +693,33 @@ static int check_file(const char *file, const opts_t *o)
 		goto out;
 	}
 
-	for (i = 0; (i < hw.n) && (i < nref); i++) {
+	if (o->bypts && !have_ref) {
+		/* both in output order: a pts walk; a hardware frame whose pts the CPU pass lacks is unmatched */
+		int j = 0, matched = 0, wrong = 0, unmatched = 0;
+
+		for (i = 0; i < hw.n; i++) {
+			while ((j < cpu.n) && (cpu.pts[j] < hw.pts[i])) {
+				j++;
+			}
+			if ((j == cpu.n) || (cpu.pts[j] != hw.pts[i])) {
+				unmatched++;
+			}
+			else if (memcmp(hw.md5[i], cpu.md5[j], 16) != 0) {
+				if (wrong++ < 20) {
+					printf("RPIVID-CHECK wrong frame=%d pts=%" PRId64 "\n", i, hw.pts[i]);
+				}
+				first_bad = (first_bad < 0) ? i : first_bad;
+			}
+			else {
+				matched++;
+			}
+		}
+		printf("RPIVID-CHECK bypts hw_frames=%d ref_frames=%d matched=%d wrong=%d unmatched=%d dropped=%d hw_used=%d hw_fallback=%d\n",
+			hw.n, cpu.n, matched, wrong, unmatched, cpu.n - matched - wrong, hw_used, hw_fallback);
+		bad = wrong + unmatched;
+		nref = hw.n;   /* dropped pictures are no mismatch here */
+	}
+	for (i = 0; !o->bypts && (i < hw.n) && (i < nref); i++) {
 		if (memcmp(hw.md5[i], have_ref ? ref.md5[i] : cpu.md5[i], 16) != 0) {
 			if (bad < 20) {
 				printf("RPIVID-CHECK mismatch frame=%d pts=%" PRId64 "\n", i, hw.pts[i]);
@@ -860,6 +890,9 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-cpuref")) {
 			o.cpuref = 1;
 		}
+		else if (!strcmp(argv[i], "-bypts")) {
+			o.bypts = 1;
+		}
 		else if (!strcmp(argv[i], "-zc")) {
 			zc_mode = 1;
 		}
@@ -882,7 +915,7 @@ int main(int argc, char **argv)
 		}
 	}
 	if (usage || (nfiles == 0) || (!o.do_hw && !o.do_cpu)) {
-		printf("usage: hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc] [-cpuref] [-zc]"
+		printf("usage: hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc] [-cpuref] [-bypts] [-zc]"
 			" [-hold n] [-q] [-from name] <file | directory>...\n");
 		return 2;
 	}
