@@ -986,7 +986,7 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level, int out)
 	ctx->t_start = (uint64_t)av_gettime_relative();
 	ctx->zc = zc;
 	e = getenv("FFMPEG_RPIVID_REFUSE_AT");
-	ctx->refuse_at = (e != NULL) ? (uint32_t)strtoul(e, NULL, 10) + 1u : 0u;
+	ctx->refuse_at = ((e != NULL) && (e[0] != '\0')) ? (uint32_t)strtoul(e, NULL, 10) + 1u : 0u;
 
 	avctx->internal->hwaccel_priv_data = ctx;
 	avctx->hwaccel = zc ? &ff_hevc_rpivid_drm_hwaccel.p : &ff_hevc_rpivid_hwaccel.p;
