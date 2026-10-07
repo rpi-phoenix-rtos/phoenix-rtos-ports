@@ -688,6 +688,13 @@ check_program() {
 			webkit_user_script_new_for_world webkit_cookie_manager_set_persistent_storage _ZN3WTF15memoryFootprintEv; do
 		grep -qE " [TtWD] ${s}\$" <<< "${syms}" || { echo "build-wpe.sh: wpe-browser has no ${s}" >&2; exit 1; }
 	done
+	# WebKit's built-in resources (the broken-image icon, the media controls' icons, PDF.js) with
+	# the constructors that register them: a static link drops them unless launcher/CMakeLists.txt
+	# names them (build 42 soak: "g_bytes_get_data: assertion 'bytes != NULL' failed" per web process)
+	for s in WebKitResourcesGResourceBundle ModernMediaControlsGResourceBundle; do
+		grep -qE " T ${s}_get_resource\$" <<< "${syms}" && grep -qE " t ${s}resource_constructor\$" <<< "${syms}" \
+			|| { echo "build-wpe.sh: wpe-browser does not register the GResource bundle ${s}" >&2; exit 1; }
+	done
 	# WebGL: ANGLE's entry points, as WebCore calls them (EGL_*/GL_*: no clash with Mesa's egl*/gl*)
 	if [ "${PHX_WPE_WEBGL:-0}" = 1 ]; then
 		for s in EGL_GetPlatformDisplayEXT GL_BindTexture; do

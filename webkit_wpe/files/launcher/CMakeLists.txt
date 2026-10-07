@@ -64,3 +64,28 @@ target_link_options(WPEBrowser PRIVATE
 )
 set_property(TARGET WPEBrowser APPEND PROPERTY LINK_DEPENDS "${WPEBrowser_EXPORTS}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${WPEBrowser_EXPORTS}")
+
+# WebKit's built-in resources are GResource bundles compiled into libWPEWebKit
+# (Source/WebKit/PlatformWPE.cmake): the broken-image icon, the textarea resize corner and the
+# pan icon (/org/webkitwpe/resources), the media controls' icons (/org/webkit/media-controls) and
+# the PDF.js viewer (/org/webkit/pdfjs). Each bundle is one object holding the data, a
+# <name>_get_resource() function and a constructor that registers the bundle with GIO. Nothing in
+# WebKit calls those functions -- the lookups go through g_resources_lookup_data() -- so where
+# libWPEWebKit is an ARCHIVE (patch 0006) ld never pulls the members in, the constructors never
+# run and every lookup fails. WebCore does not expect that: ImageAdapterGLib.cpp hands the NULL
+# GBytes to span() (its ASSERT is compiled out), which logs "g_bytes_get_data: assertion
+# 'bytes != NULL' failed" once per web process at the first broken <img> or resizable
+# <textarea>, and paints nothing in their place. Naming each function makes ld take its member.
+set(WPEBrowser_GRESOURCE_BUNDLES
+    WebKitResourcesGResourceBundle
+    ModernMediaControlsGResourceBundle
+)
+if (ENABLE_PDFJS)
+    list(APPEND WPEBrowser_GRESOURCE_BUNDLES
+        PdfJSGResourceBundle
+        PdfJSGResourceBundleExtras
+    )
+endif ()
+foreach (_bundle IN LISTS WPEBrowser_GRESOURCE_BUNDLES)
+    target_link_options(WPEBrowser PRIVATE "LINKER:--require-defined=${_bundle}_get_resource")
+endforeach ()
