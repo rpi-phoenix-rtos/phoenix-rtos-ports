@@ -19,7 +19,10 @@
  * frame order, cropping, threading -- can be checked bit-exact against the CPU decoder,
  * for closed-GOP clips: the display index is the POC plus the pictures decoded before the
  * last POC 0; MOCK_GOLDEN_SIZE=<w>x<h> when the file holds the cropped pictures of a
- * stream with a conformance window at the bottom/right).
+ * stream with a conformance window at the bottom/right; MOCK_GOLDEN_IDR=<i,j,...>: the display
+ * indices of the stream's IDR pictures, in order -- the n-th POC 0 the block decodes is the n-th
+ * of them -- for decoders that skip pictures (pictures dropped after leaving the block): else
+ * the display index base of an IDR is the number of pictures the block decoded before it).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -473,7 +476,22 @@ static void phase2(void)
 	if (golden != NULL) {
 		static long gop_base;
 
-		if ((poc == 0) && (pic_no > 0)) {
+		static long idr_no;
+		const char *idrs = getenv("MOCK_GOLDEN_IDR");
+
+		if ((poc == 0) && (idrs != NULL)) {
+			/* the idr_no-th entry of the list (the last one past its end) */
+			long k = 0;
+			const char *q = idrs;
+
+			while ((k < idr_no) && (strchr(q, ',') != NULL)) {
+				q = strchr(q, ',') + 1;
+				k++;
+			}
+			gop_base = atol(q);
+			idr_no++;
+		}
+		else if ((poc == 0) && (pic_no > 0)) {
 			gop_base = pic_no; /* an IDR: every earlier picture is displayed before it */
 		}
 		golden_picture(pa2va(y, 1), pa2va(c, 1), (int32_t)(gop_base + poc));

@@ -136,11 +136,15 @@ typedef struct RPIVIDContext {
 	uint64_t t_start;
 	uint32_t p1_reruns, missing_total;
 	int zc;                        /* drm_prime output */
-	uint32_t refuse_at;            /* FFMPEG_RPIVID_REFUSE_AT: picture number + 1 the block refuses (a test) */
+	uint32_t refuse_at;            /* FFMPEG_RPIVID_REFUSE_AT: picture number + 1 the block refuses (a test, once per process) */
 } RPIVIDContext;
 
 static const FFHWAccel ff_hevc_rpivid_hwaccel;
 static const FFHWAccel ff_hevc_rpivid_drm_hwaccel;
+
+/* FFMPEG_RPIVID_REFUSE_AT=n (a test of the CPU fallback): the n-th picture the block is given
+ * after attaching is refused, once per process */
+static int refused_once;
 
 /* the consumer's buffer operations (rpivid_drm_set_buffer_ops) */
 static AVMutex ops_lock = AV_MUTEX_INITIALIZER;
@@ -1142,7 +1146,9 @@ int ff_rpivid_hevc_picture_ok(AVCodecContext *avctx)
 		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d has no fresh frame data\n", s->poc);
 		return -1;
 	}
-	if ((ctx->refuse_at != 0u) && (ctx->n + 1u == ctx->refuse_at)) {
+	if ((ctx->refuse_at != 0u) && (ctx->n + 1u == ctx->refuse_at) && !refused_once) {
+		/* once per process: the block taken again at the next IRAP then keeps the stream */
+		refused_once = 1;
 		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d refused (FFMPEG_RPIVID_REFUSE_AT, a test)\n", s->poc);
 		return -1;
 	}

@@ -200,23 +200,31 @@ if [ "${loop}" = 1 ]; then
 				n_loop_bad=$((n_loop_bad + 1))
 			fi
 		done
-		# a CPU fallback -- the block refuses its 4th picture (FFMPEG_RPIVID_REFUSE_AT=3), or
-		# fails its 6th (MOCK_FAIL_AT=5) --: pictures are dropped up to the next IRAP, then the CPU
-		# decoder goes on; every frame that is emitted must be right (by pts against the CPU
-		# decoder), in both outputs
-		for k in refuse fail; do
+		# a CPU fallback -- the block refuses its 4th picture (FFMPEG_RPIVID_REFUSE_AT=3, once), or
+		# fails its 6th (MOCK_FAIL_AT=5) --: pictures are dropped up to the next IRAP, where the
+		# block is taken again (retakes=1; with FFMPEG_RPIVID_RETRIES=0, "noretry", it stays off
+		# and the CPU decoder goes on); every frame that is emitted must be right (by pts against
+		# the CPU decoder), in both outputs. MOCK_GOLDEN_IDR: the IDRs' display indices, since the
+		# mock does not see the dropped pictures
+		idrs="$(ffprobe -v error -select_streams v:0 -show_entries frame=key_frame -of csv=p=0 "${c}" | awk '$1 == 1 { print NR - 1 }' | paste -sd, -)"
+		for k in refuse fail noretry; do
 			for m in planar zc; do
-				if [ "${k}" = refuse ]; then env=(FFMPEG_RPIVID_REFUSE_AT=3); else env=(MOCK_FAIL_AT=5); fi
+				case "${k}" in
+					refuse) env=(FFMPEG_RPIVID_REFUSE_AT=3) want_r=1 ;;
+					fail) env=(MOCK_FAIL_AT=5) want_r=1 ;;
+					noretry) env=(FFMPEG_RPIVID_REFUSE_AT=3 FFMPEG_RPIVID_RETRIES=0) want_r=0 ;;
+				esac
 				o="${work}/${b}.${k}-${m}.out"
-				env "${env[@]}" MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_LOG=/dev/null \
+				env "${env[@]}" MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_GOLDEN_IDR="${idrs}" MOCK_LOG=/dev/null \
 					"${work}/hevc-rpivid-check" -cpuref -bypts -l 2 -T 1 $([ "${m}" = zc ] && echo -zc) "${c}" >"${o}" 2>&1 || true
 				if grep -q 'ERROR: AddressSanitizer' "${o}"; then
 					echo "ASAN      ${b} ${k} ${m}"; grep -A12 'ERROR: AddressSanitizer' "${o}" | head -20; exit 1
 				fi
 				v="$(grep -o 'bypts hw_frames=.*' "${o}" || echo 'bypts none')"
-				echo "LOOP-DROP ${b} ${k} ${m}: ${v}"
+				r="$(grep -c 'back on the block from POC' "${o}" || true)"
+				echo "LOOP-DROP ${b} ${k} ${m}: ${v} retakes=${r}"
 				if ! grep -Eq 'matched=[0-9]+ wrong=0 unmatched=0 dropped=[1-9][0-9]* hw_used=1 hw_fallback=1' <<<"${v}" ||
-						! grep -q 'decoding again from POC' "${o}"; then
+						! grep -q 'decoding again from POC' "${o}" || [ "${r}" != "${want_r}" ]; then
 					n_loop_bad=$((n_loop_bad + 1))
 				fi
 			done

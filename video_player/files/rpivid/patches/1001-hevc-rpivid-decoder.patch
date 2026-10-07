@@ -13,6 +13,8 @@ on the CPU; a picture it cannot take, or a picture the block fails, switches the
 rest of the stream to the CPU. The CPU decoder lacks the block-decoded pictures'
 motion fields (TMVP), so it starts at the next IRAP: the pictures up to it (and the
 RASL pictures of a CRA) are dropped, and the caller keeps showing its last picture.
+At that IRAP the block is taken again (at most FFMPEG_RPIVID_RETRIES times per stream,
+default 3; not under frame threads), so one refused or failed picture costs one GOP.
 
 The option "rpivid_out" (FFMPEG_RPIVID_OUT): planar (the default, as above) or
 drm_prime: get_format() then answers AV_PIX_FMT_DRM_PRIME and the hwaccel allocates
@@ -96,7 +98,7 @@ index ad39021..43d88e4 100644
      if (!*hwaccel_picture_private)
          return AVERROR(ENOMEM);
 diff --git a/libavcodec/hevcdec.c b/libavcodec/hevcdec.c
-index b267f6e..2aab391 100644
+index b267f6e..85fcb15 100644
 --- a/libavcodec/hevcdec.c
 +++ b/libavcodec/hevcdec.c
 @@ -50,6 +50,9 @@
@@ -141,11 +143,45 @@ index b267f6e..2aab391 100644
          int c_count = (sps->chroma_format_idc != 0) ? 3 : 1;
          int c_idx;
  
-@@ -2941,6 +2959,42 @@ static int hevc_frame_end(HEVCContext *s)
+@@ -2941,6 +2959,79 @@ static int hevc_frame_end(HEVCContext *s)
      return 0;
  }
  
 +#if CONFIG_HEVC_RPIVID_DECODER
++/* At an IRAP after leaving the block: take it again, a bounded number of times per stream
++ * (FFMPEG_RPIVID_RETRIES, default 3; a refusal or failure each time costs the pictures up to
++ * the next IRAP); not under frame threads, whose contexts share the hwaccel state */
++static void rpivid_retry(HEVCContext *s)
++{
++    const char *e = getenv("FFMPEG_RPIVID_RETRIES");
++    int max = (e && *e) ? atoi(e) : 3, a;
++
++    if (!s->rpivid_failed || !s->rpivid_retry || s->avctx->hwaccel || !IS_IRAP(s) || !s->sh.first_slice_in_pic_flag)
++        return;
++    s->rpivid_retry = 0;
++    if (s->avctx->active_thread_type & FF_THREAD_FRAME) {
++        av_log(s->avctx, AV_LOG_INFO, "rpivid: the block stays off for this stream (frame threads)\n");
++        return;
++    }
++    if (s->rpivid_retries >= max) {
++        av_log(s->avctx, AV_LOG_INFO, "rpivid: the block stays off for this stream (%d retries used)\n", s->rpivid_retries);
++        return;
++    }
++    s->rpivid_retries++;
++    a = ff_rpivid_hevc_attach(s->avctx, s->rpivid_level, s->rpivid_out);
++    if (a < 0) {
++        av_log(s->avctx, AV_LOG_INFO, "rpivid: the block stays off for this stream (it did not take the stream again)\n");
++        return;
++    }
++    s->rpivid_failed = 0;
++    s->max_ra = INT_MAX;   /* a CRA's RASL pictures reference pictures the CPU decoded: dropped */
++    if (a == 1) {
++        s->avctx->sw_pix_fmt = s->avctx->pix_fmt;
++        s->avctx->pix_fmt = AV_PIX_FMT_DRM_PRIME;
++    }
++    av_log(s->avctx, AV_LOG_INFO, "rpivid: back on the block from POC %d (retry %d of %d)\n", s->poc, s->rpivid_retries, max);
++}
++
 +/* Leave the rpivid block for the rest of the stream, on the CPU decoder. Its pictures lack
 + * what the CPU decoder keeps of a picture it decoded (the motion field TMVP reads), so a
 + * picture predicted from them would be wrong: unless the current picture is an IRAP (drop:
@@ -171,9 +207,12 @@ index b267f6e..2aab391 100644
 +        s->ref = s->collocated_ref = NULL;
 +        s->is_decoded = 0;
 +        s->rpivid_skip = 1;
++        s->rpivid_retry = 1;
 +        s->max_ra = INT_MAX;   /* the RASL pictures of the next CRA reference what was dropped */
-+    } else if (s->nal_unit_type == HEVC_NAL_CRA_NUT) {
-+        s->max_ra = s->poc;    /* this CRA's RASL pictures reference the block's pictures */
++    } else {
++        s->rpivid_retry = 1;   /* the block again at the IRAP after this one */
++        if (s->nal_unit_type == HEVC_NAL_CRA_NUT)
++            s->max_ra = s->poc;    /* this CRA's RASL pictures reference the block's pictures */
 +    }
 +    if (zc && (ret = ff_rpivid_hevc_drm_to_cpu(s->avctx)) < 0)
 +        av_log(s->avctx, AV_LOG_ERROR, "rpivid: the pictures held could not be moved to system memory\n");
@@ -184,7 +223,7 @@ index b267f6e..2aab391 100644
  static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
  {
      HEVCLocalContext *lc = s->HEVClc;
-@@ -3029,6 +3083,17 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
+@@ -3029,6 +3120,18 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
              (s->avctx->skip_frame >= AVDISCARD_NONKEY && !IS_IRAP(s))) {
              break;
          }
@@ -198,11 +237,12 @@ index b267f6e..2aab391 100644
 +                av_log(s->avctx, AV_LOG_INFO, "rpivid: decoding again from POC %d (a random access point)\n", s->poc);
 +            }
 +        }
++        rpivid_retry(s);
 +#endif
  
          if (s->sh.first_slice_in_pic_flag) {
              if (s->max_ra == INT_MAX) {
-@@ -3075,6 +3140,19 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
+@@ -3075,6 +3178,19 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
              }
          }
  
@@ -222,7 +262,7 @@ index b267f6e..2aab391 100644
          if (s->sh.first_slice_in_pic_flag && s->avctx->hwaccel) {
              ret = FF_HW_CALL(s->avctx, start_frame, NULL, 0);
              if (ret < 0)
-@@ -3363,7 +3441,18 @@ static int hevc_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
+@@ -3363,7 +3479,18 @@ static int hevc_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
              ff_hevc_unref_frame(s->ref, ~0);
              return ret;
          }
@@ -242,17 +282,19 @@ index b267f6e..2aab391 100644
          /* verify the SEI checksum */
          if (avctx->err_recognition & AV_EF_CRCCHECK && s->ref && s->is_decoded &&
              s->sei.picture_hash.is_md5) {
-@@ -3555,6 +3644,9 @@ static int hevc_update_thread_context(AVCodecContext *dst,
+@@ -3555,6 +3682,11 @@ static int hevc_update_thread_context(AVCodecContext *dst,
          if ((ret = set_sps(s, s0->ps.sps, src->pix_fmt)) < 0)
              return ret;
  
 +    s->rpivid_failed = s0->rpivid_failed;
 +    s->rpivid_skip   = s0->rpivid_skip;
++    s->rpivid_retry  = s0->rpivid_retry;
++    s->rpivid_retries = s0->rpivid_retries;
 +
      s->seq_decode = s0->seq_decode;
      s->seq_output = s0->seq_output;
      s->pocTid0    = s0->pocTid0;
-@@ -3614,6 +3706,24 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
+@@ -3614,6 +3746,24 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
      HEVCContext *s = avctx->priv_data;
      int ret;
  
@@ -277,7 +319,7 @@ index b267f6e..2aab391 100644
      if (avctx->active_thread_type & FF_THREAD_SLICE) {
          s->threads_number = avctx->thread_count;
          ret = ff_slice_thread_init_progress(avctx);
-@@ -3677,6 +3787,15 @@ static const AVOption options[] = {
+@@ -3677,6 +3827,15 @@ static const AVOption options[] = {
          AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
      { "strict-displaywin", "stricly apply default display window size", OFFSET(apply_defdispwin),
          AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
@@ -293,7 +335,7 @@ index b267f6e..2aab391 100644
      { NULL },
  };
  
-@@ -3732,3 +3851,27 @@ const FFCodec ff_hevc_decoder = {
+@@ -3732,3 +3891,27 @@ const FFCodec ff_hevc_decoder = {
                                 NULL
                             },
  };
@@ -322,10 +364,10 @@ index b267f6e..2aab391 100644
 +};
 +#endif
 diff --git a/libavcodec/hevcdec.h b/libavcodec/hevcdec.h
-index 6ef7d4f..9c64eb4 100644
+index 6ef7d4f..e6f8d89 100644
 --- a/libavcodec/hevcdec.h
 +++ b/libavcodec/hevcdec.h
-@@ -593,6 +593,11 @@ typedef struct HEVCContext {
+@@ -593,6 +593,13 @@ typedef struct HEVCContext {
                              ///< as a format defined in 14496-15
      int apply_defdispwin;
  
@@ -333,6 +375,8 @@ index 6ef7d4f..9c64eb4 100644
 +    int rpivid_failed;      ///< the block failed this stream: CPU decode from now on
 +    int rpivid_out;         ///< RPIVID_OUT_* (rpivid_drm.h): the frames of block-decoded pictures; -1 auto
 +    int rpivid_skip;        ///< left the block: pictures are dropped until the next IRAP
++    int rpivid_retry;       ///< left the block: take it again at the next IRAP
++    int rpivid_retries;     ///< times the block was taken again in this stream
 +
      int nal_length_size;    ///< Number of bytes used for nal length (1, 2 or 4)
      int nuh_layer_id;
