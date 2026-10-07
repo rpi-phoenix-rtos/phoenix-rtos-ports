@@ -1,0 +1,35 @@
+Subject: hls: http(s) URLs with caller-supplied I/O and no http protocol
+
+open_url() accepts a segment, key or init-section URL only when avio_find_protocol_name()
+names http(s), file or data. A caller that opens every URL itself -- io_open on a context with
+AVFMT_FLAG_CUSTOM_IO, as WebKit's media player on Phoenix does so that cookies, TLS, CORS and
+the HTTP cache stay the browser's -- builds FFmpeg with --disable-network, so there is no http
+protocol to name and every remote segment fails with AVERROR_INVALIDDATA before io_open is
+reached. With custom I/O, name http:// and https:// URLs (also behind crypto+ / crypto:) by
+their scheme instead; is_http then follows as for the http protocol (byte ranges travel as
+the offset/end_offset options, no avio_seek). Nothing changes without AVFMT_FLAG_CUSTOM_IO.
+
+LGPL-2.1-or-later, as the file it changes.
+
+--- a/libavformat/hls.c
++++ b/libavformat/hls.c
+@@ -658,6 +658,19 @@
+     if (!proto_name)
+         proto_name = avio_find_protocol_name(url);
+ 
++    /* A caller that opens every URL itself (io_open with custom I/O, e.g. a web browser
++     * whose own loader fetches the bytes) needs no http protocol in this build: name
++     * http(s) URLs by their scheme then. */
++    if (!proto_name && (s->flags & AVFMT_FLAG_CUSTOM_IO)) {
++        const char *inner = url;
++        if (av_strstart(url, "crypto", NULL) && (url[6] == '+' || url[6] == ':'))
++            inner = url + 7;
++        if (av_strstart(inner, "https://", NULL))
++            proto_name = "https";
++        else if (av_strstart(inner, "http://", NULL))
++            proto_name = "http";
++    }
++
+     if (!proto_name)
+         return AVERROR_INVALIDDATA;
+ 
