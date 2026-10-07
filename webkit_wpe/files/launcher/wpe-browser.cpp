@@ -39,6 +39,8 @@
  *     --autoplay=POLICY     <video>/<audio> autoplay in a build with media (USE video): muted
  *                           (default, WebKit's: only without sound), allow, deny
  *                           (WPE_BROWSER_AUTOPLAY)
+ *     --stock-features      keep WebKit 2.54's defaults for the CSS features this program turns
+ *                           on (see enableCSSFeatures(); WPE_BROWSER_STOCK_FEATURES=1)
  *   The process model (WebKit patch 0015; also from the environment). WebKit's own defaults are a
  *   desktop's: on a 4 GB Pi ~15 cached web processes and a prewarmed spare one.
  *     --process-cache=N     keep the web processes of at most N recently left sites, for a quick
@@ -802,6 +804,7 @@ static gboolean optNoProcessSwap;
 static int optHangSecs = -1;
 static int optStallSecs = -1;
 static int optFrameStallSecs = -1;
+static gboolean optStockFeatures;
 #if ENABLE_VIDEO
 static char* optAutoplay;
 #endif
@@ -836,6 +839,7 @@ static const GOptionEntry optionEntries[] = {
     { "hang-recovery", 0, 0, G_OPTION_ARG_INT, &optHangSecs, "Restart a web process unresponsive for S s during a navigation (default 30, 0 off)", "S" },
     { "stall-secs", 0, 0, G_OPTION_ARG_INT, &optStallSecs, "Every process reports a main loop (or start-up) stalled for S s (default 10, 0 off)", "S" },
     { "frame-stall-secs", 0, 0, G_OPTION_ARG_INT, &optFrameStallSecs, "Report a view that presented frames, then none for S s (default 0, off)", "S" },
+    { "stock-features", 0, 0, G_OPTION_ARG_NONE, &optStockFeatures, "Keep WebKit's defaults for the CSS features this program enables", nullptr },
 #if ENABLE_VIDEO
     { "autoplay", 0, 0, G_OPTION_ARG_STRING, &optAutoplay, "Media autoplay: muted (default), allow, deny", "POLICY" },
 #endif
@@ -886,6 +890,39 @@ static void optionsFromEnvironment()
         optStallSecs = std::max(number("WPE_BROWSER_STALL_SECS", defaultStallSecs), 0);
     if (optFrameStallSecs < 0)
         optFrameStallSecs = std::max(number("WPE_BROWSER_FRAME_STALL_SECS", 0), 0);
+    if (!optStockFeatures)
+        optStockFeatures = number("WPE_BROWSER_STOCK_FEATURES", 0) != 0;
+}
+
+/*
+ * CSS features WebKit 2.54 implements but ships off ("testable"), which later WebKit marks stable
+ * and turns on by default; each is self-contained and only reached by pages that use it
+ * (coordination repo docs/browser/CSS3TEST-GAPS.md). Not the CSS Painting API, which WebKit still
+ * keeps behind its experimental features. A feature this WebKit does not list is logged as
+ * absent, so an upgrade that renames or drops one shows in the log rather than silently.
+ */
+static void enableCSSFeatures(WebKitSettings* settings)
+{
+    static const char* const identifiers[] = {
+        "CSSCornerShapeEnabled",    /* corner-shape, corner-*-shape (Borders 4) */
+        "CSSObjectViewBoxEnabled",  /* object-view-box (Images 5) */
+        "CSSIdentFunctionEnabled",  /* ident() (Values 5) */
+    };
+    if (optStockFeatures) {
+        LOG("features stock");
+        return;
+    }
+    WebKitFeatureList* features = webkit_settings_get_all_features();
+    std::string enabled, absent;
+    for (const char* identifier : identifiers) {
+        WebKitFeature* feature = webkit_feature_list_find(features, identifier);
+        std::string& to = feature ? enabled : absent;
+        to += to.empty() ? identifier : std::string(",") + identifier;
+        if (feature)
+            webkit_settings_set_feature_enabled(settings, feature, TRUE);
+    }
+    webkit_feature_list_unref(features);
+    LOG("features enabled=%s absent=%s", enabled.empty() ? "-" : enabled.c_str(), absent.empty() ? "-" : absent.c_str());
 }
 
 /*
@@ -2177,6 +2214,7 @@ static int uiMain(int argc, char** argv)
         "enable-2d-canvas-acceleration", FALSE,
         "enable-write-console-messages-to-stdout", TRUE,
         nullptr);
+    enableCSSFeatures(settings);
 
     /* the chrome overlay, in its own script world (window mode) */
     WebKitUserContentManager* contentManager = webkit_user_content_manager_new();
