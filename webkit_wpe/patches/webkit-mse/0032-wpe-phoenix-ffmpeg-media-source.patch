@@ -17,7 +17,9 @@ MediaSource and SourceBuffer (hls.js, dash.js, Shaka, video.js-VHS) without GStr
                                 boxes, it decodes nothing), one MediaSampleFFmpeg per coded frame;
                                 WebCore's TrackBuffers do coded frame processing, eviction and the
                                 buffered ranges; enqueued frames go to the engine; buffer limit
-                                40 MB video / 8 MB audio, 8 / 2 MB before the first play
+                                40 MiB video / 8 MiB audio once played; before, the video
+                                SourceBuffers of never-played players share a 48 MiB pool
+                                (each: pool - the others' bytes, 4..40 MiB), audio 2 MiB
   MediaSampleFFmpeg             a coded frame: an AVPacket (padded copy of the payload, shared by
                                 the sample's copies), MediaTimes in the track's timescale, its
                                 FFmpegCodecConfig; non-displaying frames go to the decoder with
@@ -42,6 +44,13 @@ to 4.2); AAC, MP3, Opus, AC-3, E-AC-3, FLAC; width/height/framerate parameters h
 limits; no WebM, MPEG-TS, VP9, AV1 or encrypted media. MediaCapabilities media-source answers use
 the MSE engine's containers.
 
+WebCore, generic: eviction (SourceBufferPrivate::evictFrames/computeEvictionData) keeps the first
+buffered segment after currentTime when currentTime is not buffered -- the start position of a
+player that has not reached its first timestamp, a pending seek's target -- instead of only
+currentTime + 30 s (a never-played player at 0 with 100-114 s buffered lost all of it). On the
+non-Cocoa ports DocumentLoader no longer resets MediaSourceEnabled to the platform default at
+every load when no site policy is set, so WebKitSettings:enable-mediasource takes effect.
+
 Plumbing: MediaPlatformType::FFmpeg, MediaPlayerType::FFmpegMSE,
 MediaPlayerMediaEngineIdentifier::FFmpegMSE (+ its IPC serialization and the remote player's
 switch), MediaSample::Type::FFmpegSample and a const AVPacket* PlatformSample, the engine's
@@ -54,6 +63,26 @@ seek done pts=/end-of-stream/size/stall, decoder video|audio=<name> config=, dec
 first-frame, first-sound, drained, end, and the stat line (decoded presented painted dropped fps
 av_ms hw ready stalls q_kb mse_sb mse_kb mse_samples played players).
 
+diff --git a/Source/WebCore/loader/DocumentLoader.cpp b/Source/WebCore/loader/DocumentLoader.cpp
+index 41badde9..d9f51723 100644
+--- a/Source/WebCore/loader/DocumentLoader.cpp
++++ b/Source/WebCore/loader/DocumentLoader.cpp
+@@ -1507,7 +1507,15 @@ void DocumentLoader::applyPoliciesToSettings()
+         return;
+ 
+ #if ENABLE(MEDIA_SOURCE)
++#if PLATFORM(COCOA)
+     m_frame->settings().setMediaSourceEnabled(m_mediaSourcePolicy == MediaSourcePolicy::Default ? Settings::platformDefaultMediaSourceEnabled() : m_mediaSourcePolicy == MediaSourcePolicy::Enable);
++#else
++    // Without a site policy the embedder's preference stands (WebKitSettings:enable-mediasource:
++    // the GLib ports have no per-site media source policy, and the platform default, true,
++    // overrode it at every load)
++    if (m_mediaSourcePolicy != MediaSourcePolicy::Default)
++        m_frame->settings().setMediaSourceEnabled(m_mediaSourcePolicy == MediaSourcePolicy::Enable);
++#endif
+ #endif
+ #if ENABLE(WEBKIT_OVERFLOW_SCROLLING_CSS_PROPERTY)
+     if (m_legacyOverflowScrollingTouchPolicy == LegacyOverflowScrollingTouchPolicy::Disable)
 diff --git a/Source/WebCore/platform/FFmpeg.cmake b/Source/WebCore/platform/FFmpeg.cmake
 index 9c268b2c..610e4216 100644
 --- a/Source/WebCore/platform/FFmpeg.cmake
@@ -176,6 +205,68 @@ index 554fe496..6e43e654 100644
  };
  
  enum class MediaPlayerWirelessPlaybackTargetType : uint8_t {
+diff --git a/Source/WebCore/platform/graphics/SourceBufferPrivate.cpp b/Source/WebCore/platform/graphics/SourceBufferPrivate.cpp
+index 58ebd96b..fecb55d7 100644
+--- a/Source/WebCore/platform/graphics/SourceBufferPrivate.cpp
++++ b/Source/WebCore/platform/graphics/SourceBufferPrivate.cpp
+@@ -53,6 +53,21 @@ namespace WebCore {
+ static const unsigned evictionAlgorithmInitialTimeChunk = 30000;
+ static const unsigned evictionAlgorithmTimeChunkLowThreshold = 3000;
+ 
++// Where data ahead of currentTime becomes evictable: the end of the playable segment at
++// currentTime (playback bridges gaps within the media source gap policy, so it ends at the next
++// real stall, evaluated against this SourceBuffer's `buffered`, which starts at currentTime).
++// When currentTime is not buffered -- a player that has not started at the stream's first
++// timestamp, a pending seek whose target is being appended -- the first segment after it is
++// where playback goes next: it is kept whole, and at least timeChunk past currentTime.
++static MediaTime evictableAfter(const MediaSourcePrivate* mediaSource, const PlatformTimeRanges& buffered, const MediaTime& currentTime, const MediaTime& timeChunk)
++{
++    if (!mediaSource || !buffered.length())
++        return currentTime + timeChunk;
++    if (buffered.contain(currentTime))
++        return mediaSource->nextStallTime(currentTime, buffered);
++    return std::max(currentTime + timeChunk, mediaSource->nextStallTime(buffered.start(0), buffered));
++}
++
+ SourceBufferPrivate::SourceBufferPrivate(MediaSourcePrivate& parent)
+     : SourceBufferPrivate(parent, WorkQueue::mainSingleton())
+ {
+@@ -641,15 +656,8 @@ void SourceBufferPrivate::computeEvictionData(ComputeEvictionDataRule rule)
+             if (!buffered.length())
+                 return evictableSize;
+ 
+-            // Playback bridges gaps within the media source gap policy, so only
+-            // data located after the current playable segment is evictable. That
+-            // segment ends at the next real stall (nextStallTime evaluated against
+-            // this SourceBuffer's ranges).
+-            // When currentTime is not buffered here there is no playable segment,
+-            // so keep currentTime + timeChunk of look-ahead.
+-            const bool currentTimeBuffered = buffered.contain(currentTime);
+-            const MediaTime currentPlayableEnd = currentTimeBuffered ? mediaSource->nextStallTime(currentTime, buffered) : MediaTime::invalidTime();
+-            const auto rangeStartAfterCurrentTime = currentTimeBuffered ? currentPlayableEnd : currentTime + timeChunk;
++            // Only data after the segment playback reaches next is evictable (evictableAfter()).
++            const auto rangeStartAfterCurrentTime = evictableAfter(mediaSource.get(), buffered, currentTime, timeChunk);
+             const auto rangeEndAfterCurrentTime = buffered.maximumBufferedTime();
+             ASSERT(rangeEndAfterCurrentTime.isValid());
+ 
+@@ -1798,15 +1806,8 @@ bool SourceBufferPrivate::evictFrames(uint64_t newDataSize, const MediaTime& cur
+                 buffered.intersectWith(trackBuffer.buffered());
+             });
+ 
+-            // Playback bridges gaps within the media source gap policy, so only
+-            // data located after the current playable segment is evictable. That
+-            // segment ends at the next real stall (nextStallTime evaluated against
+-            // this SourceBuffer's ranges).
+-            // When currentTime is not buffered here there is no playable segment,
+-            // so keep currentTime + timeChunk of look-ahead.
+-            const bool currentTimeBuffered = mediaSource && buffered.contain(currentTime);
+-            const MediaTime currentPlayableEnd = currentTimeBuffered ? mediaSource->nextStallTime(currentTime, buffered) : MediaTime::invalidTime();
+-            const auto minimumRangeStartAfterCurrentTime = currentTimeBuffered ? currentPlayableEnd : currentTime + timeChunk;
++            // Only data after the segment playback reaches next is evictable (evictableAfter()).
++            const auto minimumRangeStartAfterCurrentTime = evictableAfter(mediaSource.get(), buffered, currentTime, timeChunk);
+ 
+             auto rangeEndAfterCurrentTime = buffered.maximumBufferedTime();
+             if (!buffered.length())
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp
 new file mode 100644
 index 00000000..4aeb9493
@@ -3426,10 +3517,10 @@ index 00000000..accac148
 +#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.cpp
 new file mode 100644
-index 00000000..8613eba5
+index 00000000..14ed96d9
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/MediaSourcePrivateFFmpeg.cpp
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,163 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -3527,6 +3618,7 @@ index 00000000..8613eba5
 +            *owner = std::nullopt;
 +    }
 +    MediaSourcePrivate::removeSourceBuffer(sourceBuffer);
++    SourceBufferPrivateFFmpeg::updateBufferLimits();
 +}
 +
 +void MediaSourcePrivateFFmpeg::durationChanged(const MediaTime& duration)
@@ -3574,8 +3666,8 @@ index 00000000..8613eba5
 +
 +void MediaSourcePrivateFFmpeg::playerDidPlay()
 +{
-+    for (Ref sourceBuffer : sourceBuffers())
-+        downcast<SourceBufferPrivateFFmpeg>(sourceBuffer.get()).updateMaximumBufferSize();
++    // its SourceBuffers leave the idle pool: theirs and the other idle players' limits change
++    SourceBufferPrivateFFmpeg::updateBufferLimits();
 +}
 +
 +auto MediaSourcePrivateFFmpeg::stats() const -> Stats
@@ -3721,10 +3813,10 @@ index 9db20439..2146c6df 100644
      auto combine = [&](FFmpegMediaPolicy::Capability capability) {
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.cpp
 new file mode 100644
-index 00000000..ab63317d
+index 00000000..f3e647cc
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.cpp
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,483 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -3766,6 +3858,7 @@ index 00000000..ab63317d
 +#include "SharedBuffer.h"
 +#include "SourceBufferPrivateClient.h"
 +#include "VideoTrackPrivate.h"
++#include <wtf/NeverDestroyed.h>
 +#include <wtf/TZoneMallocInlines.h>
 +
 +extern "C" {
@@ -3899,6 +3992,31 @@ index 00000000..ab63317d
 +    return static_cast<size_t>(std::max(number, 1)) * 1024 * 1024;
 +}
 +
++static constexpr size_t kPlayedAudioLimit = 8 * 1024 * 1024;
++static constexpr size_t kIdleAudioLimit = 2 * 1024 * 1024;
++static constexpr size_t kIdleVideoFloor = 4 * 1024 * 1024;
++
++static size_t playedVideoLimit()
++{
++    static const size_t bytes = megabytes("WPE_PHOENIX_MSE_MAX_MB", 40);
++    return bytes;
++}
++
++static size_t idleVideoPool()
++{
++    static const size_t bytes = megabytes("WPE_PHOENIX_MSE_IDLE_POOL_MB", 48);
++    return bytes;
++}
++
++// Every SourceBuffer of the process: the limits of the idle ones depend on each other. Added and
++// removed by the constructor and the destructor, read on the main thread.
++static Lock sourceBuffersLock;
++static Vector<SourceBufferPrivateFFmpeg*>& allSourceBuffers()
++{
++    static NeverDestroyed<Vector<SourceBufferPrivateFFmpeg*>> list;
++    return list;
++}
++
 +Ref<SourceBufferPrivateFFmpeg> SourceBufferPrivateFFmpeg::create(MediaSourcePrivateFFmpeg& parent, const ContentType& type)
 +{
 +    return adoptRef(*new SourceBufferPrivateFFmpeg(parent, type));
@@ -3912,9 +4030,16 @@ index 00000000..ab63317d
 +    , m_logIdentifier(childLogIdentifier(parent.ffmpegPlayer()->mediaPlayerLogIdentifier(), reinterpret_cast<uint64_t>(this)))
 +#endif
 +{
++    Locker locker { sourceBuffersLock };
++    allSourceBuffers().append(this);
 +}
 +
-+SourceBufferPrivateFFmpeg::~SourceBufferPrivateFFmpeg() = default;
++SourceBufferPrivateFFmpeg::~SourceBufferPrivateFFmpeg()
++{
++    // (the others' limits grow at their next append)
++    Locker locker { sourceBuffersLock };
++    allSourceBuffers().removeFirst(this);
++}
 +
 +#if !RELEASE_LOG_DISABLED
 +WTFLogChannel& SourceBufferPrivateFFmpeg::logChannel() const
@@ -3965,6 +4090,8 @@ index 00000000..ab63317d
 +    if (player)
 +        player->log("mse append bytes=%zu samples=%u pending=%zu buffered_kb=%llu", data.size(), m_appendSamples, m_parser.pendingBytes(),
 +            static_cast<unsigned long long>(contentSize() / 1024));
++    // the limit of the next append (WebCore evicts before it parses), here and in the other idle players
++    updateBufferLimits();
 +    return MediaPromise::createAndResolve();
 +}
 +
@@ -4113,20 +4240,61 @@ index 00000000..ab63317d
 +    });
 +}
 +
-+size_t SourceBufferPrivateFFmpeg::platformMaximumBufferSize() const
++// A video SourceBuffer (or one without an initialization segment yet) of a player that has not played
++bool SourceBufferPrivateFFmpeg::isIdleVideo() const
++{
++    RefPtr player = this->player();
++    return !(player && player->hasPlayed()) && (m_hasVideo || m_configs.isEmpty());
++}
++
++size_t SourceBufferPrivateFFmpeg::bufferLimit(uint64_t otherIdleVideoBytes) const
 +{
 +    RefPtr player = this->player();
 +    bool played = player && player->hasPlayed();
-+    // before the first initialization segment: as a video SourceBuffer
 +    bool video = m_hasVideo || m_configs.isEmpty();
++    if (!video)
++        return played ? kPlayedAudioLimit : kIdleAudioLimit;
 +    if (played)
-+        return video ? megabytes("WPE_PHOENIX_MSE_MAX_MB", 40) : 8 * 1024 * 1024;
-+    return video ? megabytes("WPE_PHOENIX_MSE_IDLE_MAX_MB", 8) : 2 * 1024 * 1024;
++        return playedVideoLimit();
++    uint64_t pool = idleVideoPool();
++    uint64_t left = pool > otherIdleVideoBytes ? pool - otherIdleVideoBytes : 0;
++    return static_cast<size_t>(std::clamp<uint64_t>(left, kIdleVideoFloor, playedVideoLimit()));
 +}
 +
-+void SourceBufferPrivateFFmpeg::updateMaximumBufferSize()
++size_t SourceBufferPrivateFFmpeg::platformMaximumBufferSize() const
 +{
-+    setMaximumBufferSize(platformMaximumBufferSize());
++    uint64_t others = 0;
++    {
++        Locker locker { sourceBuffersLock };
++        for (auto* sourceBuffer : allSourceBuffers()) {
++            if (sourceBuffer != this && sourceBuffer->isIdleVideo())
++                others += sourceBuffer->contentSize();
++        }
++    }
++    return bufferLimit(others);
++}
++
++void SourceBufferPrivateFFmpeg::updateBufferLimits()
++{
++    Locker locker { sourceBuffersLock };
++    uint64_t idleVideoBytes = 0;
++    for (auto* sourceBuffer : allSourceBuffers()) {
++        if (sourceBuffer->isIdleVideo())
++            idleVideoBytes += sourceBuffer->contentSize();
++    }
++    for (auto* sourceBuffer : allSourceBuffers()) {
++        uint64_t own = sourceBuffer->isIdleVideo() ? sourceBuffer->contentSize() : 0;
++        size_t limit = sourceBuffer->bufferLimit(idleVideoBytes - own);
++        sourceBuffer->setMaximumBufferSize(limit);
++        if (limit != sourceBuffer->m_loggedLimit) {
++            sourceBuffer->m_loggedLimit = limit;
++            if (RefPtr player = sourceBuffer->player()) {
++                player->log("mse buffer-limit kb=%zu holds_kb=%llu idle_video_kb=%llu played=%d", limit / 1024,
++                    static_cast<unsigned long long>(sourceBuffer->contentSize() / 1024), static_cast<unsigned long long>(idleVideoBytes / 1024),
++                    player->hasPlayed());
++            }
++        }
++    }
 +}
 +
 +} // namespace WebCore
@@ -4134,10 +4302,10 @@ index 00000000..ab63317d
 +#endif // ENABLE(VIDEO) && ENABLE(MEDIA_SOURCE) && USE(FFMPEG)
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.h
 new file mode 100644
-index 00000000..4d7b44b1
+index 00000000..3cae0dc0
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/SourceBufferPrivateFFmpeg.h
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,124 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -4183,9 +4351,17 @@ index 00000000..4d7b44b1
 +// which reports initialization segments and coded frames back to WebCore's SourceBufferPrivate;
 +// the frames WebCore then enqueues go to the player's FFmpegPlaybackEngine.
 +//
-+// Buffer limit (WebCore evicts above it): 40 MB for a SourceBuffer with video
-+// (WPE_PHOENIX_MSE_MAX_MB), 8 MB for audio only; 8 / 2 MB as long as the player has not
-+// played (WPE_PHOENIX_MSE_IDLE_MAX_MB), as MediaPlayerPrivateFFmpeg's idle read-ahead.
++// Buffer limit (WebCore evicts above it, then refuses the append with QuotaExceededError):
++// once its player has played, 40 MiB for a SourceBuffer with video (WPE_PHOENIX_MSE_MAX_MB,
++// ~70 s of 1080p HEVC at 4.5 Mb/s) and 8 MiB for audio only. Before, players buffer ahead
++// (hls.js 30 s, dash.js and Shaka less), and a page may hold many such players (previews,
++// muted teasers), so the video SourceBuffers of the players that have not played share one
++// pool, WPE_PHOENIX_MSE_IDLE_POOL_MB (default 48 MiB):
++//     limit = clamp(pool - what the other ones hold, 4 MiB, the played limit)
++// One idle player can buffer as much as a playing one (hls.js's 30 s of 1080p HEVC is 17-30 MiB
++// at 4.5-8 Mb/s), two share the pool, and every further one gets 4 MiB (two 1080p segments):
++// N idle players hold at most 48 + 4 x (N - 2) MiB (seven: 68 MiB). Audio-only SourceBuffers
++// of idle players: 2 MiB (30 s at 530 kb/s).
 +class SourceBufferPrivateFFmpeg final : public SourceBufferPrivate {
 +public:
 +    static Ref<SourceBufferPrivateFFmpeg> create(MediaSourcePrivateFFmpeg&, const ContentType&);
@@ -4193,8 +4369,9 @@ index 00000000..4d7b44b1
 +
 +    constexpr MediaPlatformType platformType() const final { return MediaPlatformType::FFmpeg; }
 +
-+    // MediaSourcePrivateFFmpeg
-+    void updateMaximumBufferSize();
++    // The buffer limits of every SourceBuffer of the process, after what they hold or their
++    // players changed (main thread)
++    static void updateBufferLimits();
 +    uint64_t samplesReceived() const { return m_samplesReceived; }
 +
 +#if !RELEASE_LOG_DISABLED
@@ -4224,6 +4401,8 @@ index 00000000..4d7b44b1
 +    bool isReadyForMoreSamples(TrackID) final;
 +    void notifyClientWhenReadyForMoreSamples(TrackID) final;
 +    size_t platformMaximumBufferSize() const final;
++    size_t bufferLimit(uint64_t otherIdleVideoBytes) const;
++    bool isIdleVideo() const;
 +
 +    class ParserClient;
 +    void didParseInitSegment(const FFmpegFMP4Parser::InitSegment&);
@@ -4236,6 +4415,8 @@ index 00000000..4d7b44b1
 +    bool m_hasVideo { false };
 +    unsigned m_appendSamples { 0 };
 +    std::atomic<uint64_t> m_samplesReceived { 0 };
++    // the last limit logged
++    size_t m_loggedLimit { 0 };
 +#if !RELEASE_LOG_DISABLED
 +    const Ref<const Logger> m_logger;
 +    const uint64_t m_logIdentifier;
