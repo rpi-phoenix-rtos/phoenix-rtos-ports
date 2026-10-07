@@ -1,4 +1,4 @@
-From 82fa1a3a5538cdfaa720741c43f81a41014c2954 Mon Sep 17 00:00:00 2001
+From 1b741a5326d6a7d251fdd9270ce482d480f88c6f Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
 Date: Thu, 1 Oct 2026 03:03:47 +0200
 Subject: [PATCH] gio: add a polling local file monitor for systems without
@@ -16,16 +16,43 @@ Add a "poll" backend, selected by -Dfile_monitor_backend=poll and by
 "auto" when none of the others is available, and registered at priority
 10 (inotify is 20) so that a real backend still wins.
 
-A file is stat()ed every tick. A directory is polled in two tiers, since
-on such systems every call is a message to a filesystem server and the
-lstat() of a path is the expensive one: every tick the entries are read
-and compared by name and d_ino (created, deleted, renamed, replaced;
-only new entries are lstat()ed), and every fourth tick every entry is
-lstat()ed for content (size, mtime) and attribute changes. The
-directory's own mtime is not used to skip the readdir: not every
-filesystem updates it on link/unlink (Phoenix-RTOS ext2 does not) and
-statfs() cannot tell them apart. Large directories are polled less often
-so that the cost of one monitor stays bounded.
+A file is stat()ed every tick. A directory is stat()ed every tick, and
+its entries are read (one readdir per entry and a message to a
+filesystem server for each, on such systems) only when that stat
+changed: POSIX requires link(), unlink() and rename() to update the
+directory's st_mtime and st_ctime, so while they, its inode, size and
+link count stay as they were, no entry was added, removed or renamed.
+The Phoenix-RTOS filesystems a desktop runs from all do: ext2 (what
+stat() returns always moved; since filesystems 5c807d1 "ext2: POSIX
+timestamps on link/unlink; write directory changes back" the on-disk
+copy does too), the NFS client (the server's own stamps, through a
+100 ms attribute cache that its own changes drop) and dummyfs (mtime).
+
+Timestamps have a granularity -- one second on Phoenix-RTOS, whose
+stat() leaves tv_nsec 0, two seconds on FAT -- so an entry added in the
+same granule as the read before it leaves them unchanged. A listing is
+trusted to stand for the directory only if it was read at least 2 s
+after the monitor first saw the directory's current stamps; until then
+the entries are read on every tick, which costs each change two more
+reads. The 2 s are measured on the monotonic clock rather than by
+comparing the mtime with the time of day, which on an NFS root would
+compare the clocks of two machines.
+
+A filesystem that does not update a directory's stamps is detected, not
+assumed (statfs() cannot tell the filesystems apart): the sweep below
+reads the entries too, and when it finds names added or removed under
+stamps that did not move outside the window, that monitor reads the
+entries on every tick from then on, as before. Only that first change
+is reported late, by up to one sweep period.
+
+Content and attribute changes of the entries do not touch the
+directory, so a sweep lstat()s every entry: every 4 ticks while the
+directory changes, backing off (doubling, up to every 32 ticks) while
+sweeps find nothing; any event brings it back to 4. lstat() of a path
+is the expensive call (on Phoenix-RTOS libc two messages per path
+component), so this is now most of an idle monitor's cost. Large
+directories are polled and swept less often still, so that the cost of
+one monitor stays bounded.
 
 The poller is a GSource on GLib's worker context, as the notification
 backends' readers are, so that synchronous stat() calls -- network
@@ -37,10 +64,10 @@ g_file_monitor_source_handle_event(). The tick is GIO_POLL_INTERVAL_MS
  docs/reference/gio/overview.md   |  10 +-
  gio/giomodule.c                  |   4 +
  gio/meson.build                  |  10 +
- gio/poll/gpolllocalfilemonitor.c | 629 +++++++++++++++++++++++++++++++
+ gio/poll/gpolllocalfilemonitor.c | 752 +++++++++++++++++++++++++++++++
  gio/poll/meson.build             |  27 ++
  meson.options                    |   2 +-
- 6 files changed, 678 insertions(+), 4 deletions(-)
+ 6 files changed, 801 insertions(+), 4 deletions(-)
  create mode 100644 gio/poll/gpolllocalfilemonitor.c
  create mode 100644 gio/poll/meson.build
 
@@ -117,10 +144,10 @@ index a3e6f18..cd018e1 100644
    if bash_comp_dep.found()
 diff --git a/gio/poll/gpolllocalfilemonitor.c b/gio/poll/gpolllocalfilemonitor.c
 new file mode 100644
-index 0000000..a537c87
+index 0000000..872b9b5
 --- /dev/null
 +++ b/gio/poll/gpolllocalfilemonitor.c
-@@ -0,0 +1,629 @@
+@@ -0,0 +1,752 @@
 +/* GIO - GLib Input, Output and Streaming Library
 + *
 + * Copyright (C) 2026 Phoenix Systems
@@ -153,20 +180,38 @@ index 0000000..a537c87
 + *
 + * A file is watched by stat()ing it on every tick.
 + *
-+ * A directory is watched in two tiers, because on such systems every call is
-+ * a message to a filesystem server and lstat() of a path is the expensive one
++ * A directory is watched in tiers, because on such systems every call is a
++ * message to a filesystem server and lstat() of a path is the expensive one
 + * (on Phoenix-RTOS libc it costs two messages per path component):
 + *
-+ *  - every tick the entries are read (one readdir per entry) and compared by
-+ *    name and d_ino, which finds created, deleted, renamed and replaced
++ *  - every tick the directory itself is stat()ed. POSIX requires link(),
++ *    unlink() and rename() to update its st_mtime and st_ctime, so while
++ *    they, its inode, size and link count stay as they were, no entry was
++ *    added, removed or renamed, and nothing more is done;
++ *  - when they move, the entries are read (one readdir per entry) and compared
++ *    by name and d_ino, which finds created, deleted, renamed and replaced
 + *    entries; only the new ones are lstat()ed;
-+ *  - every SWEEP_TICKS ticks every entry is lstat()ed as well, which finds
-+ *    content (size, mtime) and attribute (mode, owner, ctime) changes.
++ *  - every sweep the entries are read and every one is lstat()ed as well,
++ *    which finds content (size, mtime) and attribute (mode, owner, ctime)
++ *    changes: those do not touch the directory. A sweep comes every
++ *    SWEEP_TICKS ticks while the directory changes; each sweep that finds
++ *    nothing doubles the period, up to SWEEP_TICKS_MAX ticks.
 + *
-+ * The directory's own mtime is not used to skip the readdir: POSIX requires
-+ * link(), unlink() and rename() to update it, but not every filesystem does
-+ * (Phoenix-RTOS ext2 updates only the entry's inode), and statfs() there
-+ * cannot tell the filesystems apart.
++ * Timestamps have a granularity (one second on Phoenix-RTOS, whose stat()
++ * leaves tv_nsec 0; two seconds on FAT), so an entry added in the same granule
++ * as the last read leaves them unchanged. A listing is therefore trusted to
++ * stand for the directory only if it was read at least RACY_WINDOW after this
++ * monitor first saw the directory's current stamps: by then the filesystem's
++ * clock has left the granule they name, so any later change must move them.
++ * Until then the entries are read on every tick. The window is measured on the
++ * monotonic clock instead of comparing the mtime with the time of day, which
++ * on an NFS root would compare the clocks of two machines.
++ *
++ * A filesystem that does not update a directory's stamps is detected rather
++ * than assumed (statfs() cannot tell the filesystems apart): a sweep that
++ * finds names added or removed under stamps that did not move, outside the
++ * window, makes this monitor read the entries on every tick from then on.
++ * Only that first change is reported late, by up to one sweep period.
 + *
 + * A large directory is polled less often so that the cost of one monitor stays
 + * bounded: the tick is stretched beyond ENTRIES_PER_TICK entries and the sweep
@@ -199,8 +244,14 @@ index 0000000..a537c87
 +#define MIN_INTERVAL_MS     100
 +#define MAX_INTERVAL_MS     60000
 +
-+/* A full sweep (lstat of every entry) every SWEEP_TICKS ticks. */
-+#define SWEEP_TICKS 4
++/* A sweep (lstat of every entry) every SWEEP_TICKS ticks while the directory
++ * changes, backing off to every SWEEP_TICKS_MAX ticks while it does not. */
++#define SWEEP_TICKS     4
++#define SWEEP_TICKS_MAX 32
++
++/* How long after the directory's stamps last moved a listing may still miss a
++ * change made in the same timestamp granule (1 s; 2 s on FAT). */
++#define RACY_WINDOW (2 * G_TIME_SPAN_SECOND)
 +
 +/* Beyond these the tick and the sweep are stretched in proportion. */
 +#define ENTRIES_PER_TICK  256
@@ -262,7 +313,16 @@ index 0000000..a537c87
 +  gboolean            exists;
 +  PollStat            self;         /* file mode: the file */
 +  GHashTable         *entries;      /* directory mode: name -> PollEntry */
-+  guint               ticks;
++
++  /* directory mode: when the entries must be read */
++  PollStat            dir_st;       /* the directory, as last stat()ed */
++  gboolean            have_dir_st;
++  gint64              dir_st_since; /* when dir_st was first seen (monotonic) */
++  gboolean            trusted;      /* entries were read RACY_WINDOW after dir_st_since */
++  gboolean            stamps_unreliable; /* this filesystem does not update dir_st */
++  guint               sweep_period; /* SWEEP_TICKS..SWEEP_TICKS_MAX */
++  guint               sweep_in;     /* ticks until the next sweep */
++  guint               events;       /* emitted so far */
 +} PollSource;
 +
 +static gint64
@@ -308,12 +368,11 @@ index 0000000..a537c87
 +  return interval;
 +}
 +
-+static gboolean
-+poll_sweep_due (PollSource *ps)
++/* The ticks from one sweep to the next. */
++static guint
++poll_sweep_ticks (PollSource *ps)
 +{
-+  guint period = SWEEP_TICKS * MAX (1, poll_entry_count (ps) / ENTRIES_PER_SWEEP);
-+
-+  return ps->ticks % period == 0;
++  return ps->sweep_period * MAX (1, poll_entry_count (ps) / ENTRIES_PER_SWEEP);
 +}
 +
 +static gboolean
@@ -369,12 +428,23 @@ index 0000000..a537c87
 +  return NO_EVENT;
 +}
 +
++/* Whether a directory that was @old and is now @new may have had entries
++ * added, removed or renamed since. */
++static gboolean
++poll_dir_stamps_moved (const PollStat *old,
++                       const PollStat *new)
++{
++  return old->ino != new->ino || old->mode != new->mode || old->size != new->size ||
++         old->nlink != new->nlink || old->mtime != new->mtime || old->ctime != new->ctime;
++}
++
 +static void
 +poll_emit (PollSource        *ps,
 +           GFileMonitorEvent  event,
 +           const gchar       *child,
 +           const gchar       *rename_to)
 +{
++  ps->events++;
 +  g_file_monitor_source_handle_event (ps->fms, event, child, rename_to, NULL, g_get_monotonic_time ());
 +}
 +
@@ -466,6 +536,28 @@ index 0000000..a537c87
 +  g_string_free (path, TRUE);
 +}
 +
++/* The directory is gone (or is no longer a directory): report it and its
++ * entries once. */
++static void
++poll_directory_gone (PollSource *ps)
++{
++  GHashTableIter iter;
++  gpointer key;
++
++  ps->have_dir_st = FALSE;
++  ps->trusted = FALSE;
++
++  if (!ps->exists)
++    return;
++
++  g_hash_table_iter_init (&iter, ps->entries);
++  while (g_hash_table_iter_next (&iter, &key, NULL))
++    poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, key, NULL);
++  poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, NULL, NULL);
++  g_hash_table_remove_all (ps->entries);
++  ps->exists = FALSE;
++}
++
 +static void
 +poll_directory (PollSource *ps)
 +{
@@ -474,25 +566,53 @@ index 0000000..a537c87
 +  gpointer key, value;
 +  GPtrArray *gone;
 +  GString *path;
-+  gboolean sweep;
++  PollStat st;
++  gboolean sweep, moved, verify;
++  guint events = ps->events;
++  guint names = 0; /* entries created, deleted or renamed this tick */
++  gint64 now;
 +  gsize dirlen;
 +  guint i;
++
++  if (ps->sweep_in > 0)
++    ps->sweep_in--;
++  sweep = ps->sweep_in == 0;
++
++  /* The directory itself: has an entry been added, removed or renamed? */
++  now = g_get_monotonic_time ();
++  if (!poll_stat (ps->path, TRUE, &st))
++    {
++      if (poll_errno_is_absent (errno))
++        poll_directory_gone (ps);
++      return; /* else try again on the next tick */
++    }
++  if (!S_ISDIR (st.mode))
++    {
++      poll_directory_gone (ps);
++      return;
++    }
++
++  moved = !ps->have_dir_st || poll_dir_stamps_moved (&ps->dir_st, &st);
++  if (moved)
++    {
++      ps->dir_st = st;
++      ps->have_dir_st = TRUE;
++      ps->dir_st_since = now;
++    }
++
++  if (!moved && ps->trusted && !ps->stamps_unreliable && !sweep)
++    return;
++
++  /* A sweep's read that the stamps said was not needed checks them. */
++  verify = !moved && ps->trusted && !ps->stamps_unreliable;
 +
 +  entries = poll_read_dir (ps->path);
 +  if (entries == NULL)
 +    {
-+      if (!poll_errno_is_absent (errno))
-+        return; /* try again on the next tick */
-+
-+      if (ps->exists)
-+        {
-+          g_hash_table_iter_init (&iter, ps->entries);
-+          while (g_hash_table_iter_next (&iter, &key, NULL))
-+            poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, key, NULL);
-+          poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, NULL, NULL);
-+          g_hash_table_remove_all (ps->entries);
-+          ps->exists = FALSE;
-+        }
++      if (poll_errno_is_absent (errno))
++        poll_directory_gone (ps);
++      else
++        ps->have_dir_st = FALSE; /* read it again on the next tick */
 +      return;
 +    }
 +
@@ -501,8 +621,6 @@ index 0000000..a537c87
 +      poll_emit (ps, G_FILE_MONITOR_EVENT_CREATED, NULL, NULL);
 +      ps->exists = TRUE;
 +    }
-+
-+  sweep = poll_sweep_due (ps);
 +
 +  path = g_string_new (ps->path);
 +  if (path->len == 0 || path->str[path->len - 1] != '/')
@@ -532,12 +650,12 @@ index 0000000..a537c87
 +
 +          if (sweep)
 +            {
-+              PollStat st = entry->st;
++              PollStat est = entry->st;
 +              gboolean had_stat = entry->have_stat;
 +
 +              if (poll_entry_stat (path, dirlen, name, entry) && had_stat)
 +                {
-+                  gint event = poll_stat_compare (&st, &entry->st, FALSE);
++                  gint event = poll_stat_compare (&est, &entry->st, FALSE);
 +
 +                  if (event != NO_EVENT)
 +                    poll_emit (ps, (GFileMonitorEvent) event, name, NULL);
@@ -549,6 +667,7 @@ index 0000000..a537c87
 +      /* A new name, or a name that now holds another file: renamed from a
 +       * name that went away in the same tick, if its d_ino matches. */
 +      poll_entry_stat (path, dirlen, name, entry);
++      names++;
 +
 +      for (i = 0; entry->d_ino != 0 && i < gone->len; i++)
 +        {
@@ -570,13 +689,41 @@ index 0000000..a537c87
 +
 +  for (i = 0; i < gone->len; i++)
 +    if (gone->pdata[i] != NULL)
-+      poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, gone->pdata[i], NULL);
++      {
++        poll_emit (ps, G_FILE_MONITOR_EVENT_DELETED, gone->pdata[i], NULL);
++        names++;
++      }
 +
 +  g_ptr_array_unref (gone);
 +  g_string_free (path, TRUE);
 +
 +  g_hash_table_unref (ps->entries);
 +  ps->entries = entries;
++
++  /* The stat() above came before the read, so if the stamps were already
++   * RACY_WINDOW old then, the filesystem's clock had left their granule before
++   * the first entry was read: a later change cannot leave them as they are. */
++  ps->trusted = now - ps->dir_st_since >= RACY_WINDOW;
++
++  /* Names changed under stamps that, outside the window, did not move -- and
++   * still have not (they would have if the change came after the stat()). */
++  if (verify && names > 0 && poll_stat (ps->path, TRUE, &st) && !poll_dir_stamps_moved (&ps->dir_st, &st))
++    {
++      g_debug ("GPollLocalFileMonitor: %s: entries changed but the directory's mtime and ctime did not; "
++               "reading it on every tick", ps->path);
++      ps->stamps_unreliable = TRUE;
++    }
++
++  /* Sweep often while the directory changes, less and less while it does not. */
++  if (ps->events != events)
++    ps->sweep_period = SWEEP_TICKS;
++  else if (sweep)
++    ps->sweep_period = MIN (ps->sweep_period * 2, SWEEP_TICKS_MAX);
++
++  if (sweep)
++    ps->sweep_in = poll_sweep_ticks (ps);
++  else
++    ps->sweep_in = MIN (ps->sweep_in, poll_sweep_ticks (ps));
 +}
 +
 +/* A file, or a dangling symlink. FALSE with errno set if neither. */
@@ -624,7 +771,6 @@ index 0000000..a537c87
 +  if (g_source_is_destroyed ((GSource *) ps->fms))
 +    return G_SOURCE_REMOVE;
 +
-+  ps->ticks++;
 +  if (ps->is_directory)
 +    poll_directory (ps);
 +  else
@@ -692,12 +838,16 @@ index 0000000..a537c87
 +   * g_file_monitor_*() returns is reported. */
 +  if (ps->is_directory)
 +    {
++      ps->have_dir_st = poll_stat (ps->path, TRUE, &ps->dir_st);
++      ps->dir_st_since = g_get_monotonic_time ();
 +      ps->entries = poll_read_dir (ps->path);
 +      ps->exists = ps->entries != NULL;
 +      if (ps->entries == NULL)
 +        ps->entries = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_free);
 +      else
 +        poll_stat_all (ps);
++      ps->sweep_period = SWEEP_TICKS;
++      ps->sweep_in = poll_sweep_ticks (ps);
 +    }
 +  else
 +    ps->exists = poll_file_stat (ps->path, &ps->self);
