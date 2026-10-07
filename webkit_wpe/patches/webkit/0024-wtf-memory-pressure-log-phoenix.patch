@@ -1,0 +1,109 @@
+Subject: WTF on Phoenix: the memory pressure handler's periodic monitor logs what it sees and does
+
+WebKit's web process runs MemoryPressureHandler's periodic monitor on Phoenix (patch 0008: the
+footprint from meminfo(), the Unix handler's hold-off timer): every 30 s (or the poll interval of
+the browser's WebKitMemoryPressureSettings) it measures the footprint and, above 0.33 / 0.5 of
+its limit (min(RAM, 3 GB) by default), releases caches and asks for a garbage collection. Its own
+reports are RELEASE_LOGs, which the Phoenix build compiles out (no release logging), so a page
+whose web process grows to 1.2 GB (nytimes.com, survey of build 50) left no trace of whether the
+monitor ran, which policy it chose, or whether releasing gave anything back.
+
+On Phoenix it prints, on stderr (where the browser's logs go), one line per event:
+
+  WPEB-MEMPRESSURE pid=P monitor poll_s=S limit_mb=L conservative_mb=C strict_mb=T kill_mb=K
+  WPEB-MEMPRESSURE pid=P policy OLD -> NEW footprint_mb=F
+  WPEB-MEMPRESSURE pid=P release policy=NEW footprint_mb=F after_mb=A   (each poll above conservative)
+  WPEB-MEMPRESSURE pid=P shrink kill_mb=K after_mb=A                    (above the kill threshold)
+
+"after" is measured right after the release returns: the collection it schedules may come later,
+and freed heap is not returned to the system on Phoenix (mimalloc cannot decommit there, patch
+0005), so a footprint that does not drop says the memory is held, not that nothing was freed.
+
+diff --git a/Source/WTF/wtf/MemoryPressureHandler.cpp b/Source/WTF/wtf/MemoryPressureHandler.cpp
+index 619f780..34531b4 100644
+--- a/Source/WTF/wtf/MemoryPressureHandler.cpp
++++ b/Source/WTF/wtf/MemoryPressureHandler.cpp
+@@ -39,8 +39,35 @@
+ #include <wtf/darwin/DispatchExtras.h>
+ #endif
+ 
++#if OS(PHOENIX)
++#include <stdio.h>
++#include <unistd.h>
++#endif
++
+ namespace WTF {
+ 
++#if OS(PHOENIX)
++// The Phoenix build has no release logging: what the periodic monitor sees and does goes to
++// stderr, one "WPEB-MEMPRESSURE pid=<pid> ..." line each (the browser's logs are stderr).
++static const char* phoenixPolicyName(MemoryUsagePolicy policy)
++{
++    switch (policy) {
++    case MemoryUsagePolicy::Unrestricted:
++        return "unrestricted";
++    case MemoryUsagePolicy::Conservative:
++        return "conservative";
++    case MemoryUsagePolicy::Strict:
++        return "strict";
++    }
++    return "?";
++}
++
++static unsigned long long phoenixMB(uint64_t bytes)
++{
++    return static_cast<unsigned long long>(bytes / MB);
++}
++#endif
++
+ WTF_EXPORT_PRIVATE bool MemoryPressureHandler::ReliefLogger::s_loggingEnabled = false;
+ 
+ #if PLATFORM(IOS_FAMILY)
+@@ -88,6 +115,12 @@ void MemoryPressureHandler::setShouldUsePeriodicMemoryMonitor(bool use)
+     if (use) {
+         m_measurementTimer = makeUnique<RunLoop::Timer>(RunLoop::mainSingleton(), "MemoryPressureHandler::MeasurementTimer"_s, this, &MemoryPressureHandler::measurementTimerFired);
+         m_measurementTimer->startRepeating(m_configuration.pollInterval);
++#if OS(PHOENIX)
++        fprintf(stderr, "WPEB-MEMPRESSURE pid=%d monitor poll_s=%.1f limit_mb=%llu conservative_mb=%llu strict_mb=%llu kill_mb=%llu\n",
++            static_cast<int>(getpid()), m_configuration.pollInterval.seconds(), phoenixMB(m_configuration.baseThreshold),
++            phoenixMB(thresholdForPolicy(MemoryUsagePolicy::Conservative)), phoenixMB(thresholdForPolicy(MemoryUsagePolicy::Strict)),
++            phoenixMB(thresholdForMemoryKill().value_or(0)));
++#endif
+     } else
+         m_measurementTimer = nullptr;
+ }
+@@ -187,6 +220,9 @@ void MemoryPressureHandler::shrinkOrDie(size_t killThreshold)
+ 
+     size_t footprint = memoryFootprint();
+     RELEASE_LOG(MemoryPressure, "New memory footprint: %zu MB", footprint / MB);
++#if OS(PHOENIX)
++    fprintf(stderr, "WPEB-MEMPRESSURE pid=%d shrink kill_mb=%llu after_mb=%llu\n", static_cast<int>(getpid()), phoenixMB(killThreshold), phoenixMB(footprint));
++#endif
+ 
+     if (footprint < killThreshold) {
+         RELEASE_LOG(MemoryPressure, "Shrank below memory kill threshold. Process gets to live.");
+@@ -206,6 +242,10 @@ void MemoryPressureHandler::setMemoryUsagePolicyBasedOnFootprint(size_t footprin
+         return;
+ 
+     RELEASE_LOG(MemoryPressure, "Memory usage policy changed: %s -> %s", toString(m_memoryUsagePolicy).characters(), toString(newPolicy).characters());
++#if OS(PHOENIX)
++    fprintf(stderr, "WPEB-MEMPRESSURE pid=%d policy %s -> %s footprint_mb=%llu\n", static_cast<int>(getpid()), phoenixPolicyName(m_memoryUsagePolicy),
++        phoenixPolicyName(newPolicy), phoenixMB(footprint));
++#endif
+     m_memoryUsagePolicy = newPolicy;
+     memoryPressureStatusChanged();
+ }
+@@ -251,6 +291,13 @@ void MemoryPressureHandler::measurementTimerFired()
+         releaseMemory(Critical::Yes, Synchronous::No);
+         break;
+     }
++#if OS(PHOENIX)
++    // what the release gave back at once (the garbage collection it asks for may come later)
++    if (m_memoryUsagePolicy != MemoryUsagePolicy::Unrestricted) {
++        fprintf(stderr, "WPEB-MEMPRESSURE pid=%d release policy=%s footprint_mb=%llu after_mb=%llu\n", static_cast<int>(getpid()),
++            phoenixPolicyName(m_memoryUsagePolicy), phoenixMB(footprint), phoenixMB(memoryFootprint()));
++    }
++#endif
+ }
+ 
+ void MemoryPressureHandler::setProcessState(WebsamProcessState state)

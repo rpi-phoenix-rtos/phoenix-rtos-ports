@@ -41,6 +41,16 @@
  *                           (WPE_BROWSER_AUTOPLAY)
  *     --stock-features      keep WebKit 2.54's defaults for the CSS features this program turns
  *                           on (see enableCSSFeatures(); WPE_BROWSER_STOCK_FEATURES=1)
+ *     --memory-limit=MB     the web processes' memory pressure handler (WebKit's periodic monitor)
+ *                           measures against MB instead of min(RAM, 3 GB): it releases caches from
+ *                           0.33 x MB (conservative) and harder from 0.5 x MB (strict)
+ *                           (WPE_BROWSER_MEMORY_LIMIT_MB)
+ *     --memory-kill=F       ... and a web process above F x MB is terminated, the view reporting
+ *                           "web-process-terminated reason=memory-limit" (F > 0.5; default 0, never;
+ *                           WPE_BROWSER_MEMORY_KILL)
+ *     --memory-poll-secs=S  how often it measures (default 30; WPE_BROWSER_MEMORY_POLL_SECS)
+ *                           The web process logs what the monitor does: "WPEB-MEMPRESSURE ..." (WebKit
+ *                           patch 0024)
  *   WPE_BROWSER_LIST_FEATURES=1 logs every WebKit feature once at start-up, one line each:
  *   "features list <identifier> status=<status> default=0|1 enabled=0|1"
  *   The process model (WebKit patch 0015; also from the environment). WebKit's own defaults are a
@@ -64,7 +74,9 @@
  *     --cycle=LIST          load the next page of LIST every --cycle-secs (WPE_BROWSER_CYCLE):
  *                           comma-separated entries, or the path of a file with one per line
  *     --cycle-secs=S        default 60 (WPE_BROWSER_CYCLE_SECS)
- *     --rss-secs=S          every process logs its memory footprint every S s (WPE_BROWSER_RSS_SECS)
+ *     --rss-secs=S          every process logs its memory footprint every S s (WPE_BROWSER_RSS_SECS);
+ *                           a child also logs where it is ("mem-map": the anonymous memory of its
+ *                           map entries grouped by entry size, and its thread count; see logMapBreakdown())
  *     --auto=STEPS          synthetic keyboard input (WPE_BROWSER_AUTO): comma-separated
  *                           <seconds>:key:<keys> (e.g. ctrl+l, alt+Left, F5, Return) or
  *                           <seconds>:type:<text>, fed through the same path as real keys
@@ -386,6 +398,60 @@ static std::vector<entryinfo_t> mapEntries()
     return { };
 }
 
+/*
+ * "mem-map role=R pid=P threads=T entries=E anon_kb=A groups=SIZEk*N=ANONk,... rest=ANONk": the
+ * anonymous pages of this process's map entries (what the footprint line sums) grouped by the
+ * entry's size, the ten largest groups first. Repeated sizes are the process's kinds of memory: thread stacks (one entry each, the
+ * requested size; WebKit's threads 1 MiB, the media player's own, libphoenix's default 256 KiB),
+ * mimalloc's arenas, the JIT pool. With the thread count it tells stacks from heap.
+ */
+static void logMapBreakdown()
+{
+    const std::vector<entryinfo_t> map = mapEntries();
+    struct Group {
+        size_t sizeKB;
+        unsigned count;
+        size_t anonKB;
+    };
+    std::vector<Group> groups;
+    size_t totalKB = 0;
+    for (const auto& e : map) {
+        /* as WTF::memoryFootprint(): an entry without anonymous pages is marked ~0U */
+        if (e.anonsz == static_cast<size_t>(~0U) || e.anonsz == SIZE_MAX)
+            continue;
+        const size_t sizeKB = e.size / 1024, anonKB = e.anonsz / 1024;
+        totalKB += anonKB;
+        auto it = std::find_if(groups.begin(), groups.end(), [&](const Group& g) { return g.sizeKB == sizeKB; });
+        if (it == groups.end())
+            groups.push_back({ sizeKB, 1, anonKB });
+        else {
+            it->count++;
+            it->anonKB += anonKB;
+        }
+    }
+    std::sort(groups.begin(), groups.end(), [](const Group& a, const Group& b) { return a.anonKB > b.anonKB; });
+    const pid_t pid = getpid();
+    int threads = 0;
+    std::vector<threadinfo_t> info(static_cast<size_t>(std::max(threadcount(), 64) + 64));
+    const int count = std::min(threadsinfo(static_cast<int>(info.size()), PH_THREADINFO_ALL, info.data()), static_cast<int>(info.size()));
+    for (int i = 0; i < count; i++) {
+        if (info[i].pid == pid)
+            threads++;
+    }
+    char list[640];
+    size_t used = 0, restKB = totalKB;
+    list[0] = '\0';
+    for (size_t i = 0; i < groups.size() && i < 10; i++) {
+        const int n = snprintf(list + used, sizeof(list) - used, "%s%zuk*%u=%zuk", used ? "," : "", groups[i].sizeKB, groups[i].count, groups[i].anonKB);
+        if (n < 0 || static_cast<size_t>(n) >= sizeof(list) - used)
+            break;
+        used += static_cast<size_t>(n);
+        restKB -= groups[i].anonKB;
+    }
+    LOG("mem-map role=%s pid=%d threads=%d entries=%zu anon_kb=%zu groups=%s rest=%zuk", processRole, static_cast<int>(pid), threads,
+        map.size(), totalKB, used ? list : "-", restKB);
+}
+
 static gboolean heartbeat(gpointer)
 {
     lastBeatMs.store(static_cast<int64_t>(nowMs()));
@@ -649,8 +715,10 @@ static void* watchdog(void* arg)
         ++polls;
         if (exitStartMs.load() && nowMs() - static_cast<double>(exitStartMs.load()) > exitGraceMs)
             break; /* exit() hangs: reported and ended below */
-        if (rssPolls && polls % rssPolls == 0)
+        if (rssPolls && polls % rssPolls == 0) {
             logFootprint(processRole);
+            logMapBreakdown();
+        }
         if (reportRequested.exchange(false) && nowMs() - lastRequestReport >= reportRequestMinMs) {
             /* a peer's frame stall: where this process is */
             lastRequestReport = nowMs();
@@ -807,6 +875,9 @@ static int optHangSecs = -1;
 static int optStallSecs = -1;
 static int optFrameStallSecs = -1;
 static gboolean optStockFeatures;
+static int optMemoryLimitMB;
+static double optMemoryKill;
+static double optMemoryPollSecs;
 #if ENABLE_VIDEO
 static char* optAutoplay;
 #endif
@@ -842,6 +913,9 @@ static const GOptionEntry optionEntries[] = {
     { "stall-secs", 0, 0, G_OPTION_ARG_INT, &optStallSecs, "Every process reports a main loop (or start-up) stalled for S s (default 10, 0 off)", "S" },
     { "frame-stall-secs", 0, 0, G_OPTION_ARG_INT, &optFrameStallSecs, "Report a view that presented frames, then none for S s (default 0, off)", "S" },
     { "stock-features", 0, 0, G_OPTION_ARG_NONE, &optStockFeatures, "Keep WebKit's defaults for the CSS features this program enables", nullptr },
+    { "memory-limit", 0, 0, G_OPTION_ARG_INT, &optMemoryLimitMB, "The web processes' memory pressure handler measures against MB (default min(RAM, 3 GB))", "MB" },
+    { "memory-kill", 0, 0, G_OPTION_ARG_DOUBLE, &optMemoryKill, "Terminate a web process above F x the memory limit (F > 0.5; default 0, never)", "F" },
+    { "memory-poll-secs", 0, 0, G_OPTION_ARG_DOUBLE, &optMemoryPollSecs, "How often the memory pressure handler measures (default 30)", "S" },
 #if ENABLE_VIDEO
     { "autoplay", 0, 0, G_OPTION_ARG_STRING, &optAutoplay, "Media autoplay: muted (default), allow, deny", "POLICY" },
 #endif
@@ -894,6 +968,16 @@ static void optionsFromEnvironment()
         optFrameStallSecs = std::max(number("WPE_BROWSER_FRAME_STALL_SECS", 0), 0);
     if (!optStockFeatures)
         optStockFeatures = number("WPE_BROWSER_STOCK_FEATURES", 0) != 0;
+    if (optMemoryLimitMB <= 0)
+        optMemoryLimitMB = std::max(number("WPE_BROWSER_MEMORY_LIMIT_MB", 0), 0);
+    auto real = [](const char* name) {
+        const char* value = g_getenv(name);
+        return value && *value ? g_ascii_strtod(value, nullptr) : 0.0;
+    };
+    if (optMemoryKill <= 0)
+        optMemoryKill = std::max(real("WPE_BROWSER_MEMORY_KILL"), 0.0);
+    if (optMemoryPollSecs <= 0)
+        optMemoryPollSecs = std::max(real("WPE_BROWSER_MEMORY_POLL_SECS"), 0.0);
 }
 
 /*
@@ -2070,7 +2154,30 @@ static WebKitNetworkSession* createNetworkSession()
  */
 static WebKitWebContext* createWebContext()
 {
-    WebKitWebContext* webContext = webkit_web_context_get_default();
+    /* --memory-limit/-kill/-poll-secs: the settings are a construct property, so a context of our
+     * own (the web view is given it); otherwise WebKit's default one */
+    WebKitWebContext* webContext;
+    if (optMemoryLimitMB > 0 || optMemoryKill > 0 || optMemoryPollSecs > 0) {
+        WebKitMemoryPressureSettings* memory = webkit_memory_pressure_settings_new();
+        if (optMemoryLimitMB > 0)
+            webkit_memory_pressure_settings_set_memory_limit(memory, static_cast<guint>(optMemoryLimitMB));
+        if (optMemoryKill > 0) {
+            if (optMemoryKill > webkit_memory_pressure_settings_get_strict_threshold(memory))
+                webkit_memory_pressure_settings_set_kill_threshold(memory, optMemoryKill);
+            else
+                LOG("memory-pressure kill=%.2f ignored: it must be above the strict threshold %.2f", optMemoryKill,
+                    webkit_memory_pressure_settings_get_strict_threshold(memory));
+        }
+        if (optMemoryPollSecs > 0)
+            webkit_memory_pressure_settings_set_poll_interval(memory, optMemoryPollSecs);
+        LOG("memory-pressure limit_mb=%u conservative=%.2f strict=%.2f kill=%.2f poll_s=%.1f",
+            webkit_memory_pressure_settings_get_memory_limit(memory), webkit_memory_pressure_settings_get_conservative_threshold(memory),
+            webkit_memory_pressure_settings_get_strict_threshold(memory), webkit_memory_pressure_settings_get_kill_threshold(memory),
+            webkit_memory_pressure_settings_get_poll_interval(memory));
+        webContext = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "memory-pressure-settings", memory, nullptr));
+        webkit_memory_pressure_settings_free(memory);
+    } else
+        webContext = webkit_web_context_get_default();
     /* the default, but the disk cache depends on it */
     webkit_web_context_set_cache_model(webContext, WEBKIT_CACHE_MODEL_WEB_BROWSER);
     /* The WebProcess's injected bundle (libWPEInjectedBundle.so, dlopen()ed) loads these. */
@@ -2213,7 +2320,7 @@ static int uiMain(int argc, char** argv)
     if (optIgnoreTLSErrors)
         webkit_network_session_set_tls_errors_policy(session, WEBKIT_TLS_ERRORS_POLICY_IGNORE);
     startupPhase("web-context");
-    createWebContext();
+    WebKitWebContext* webContext = createWebContext();
     startupPhase("web-view");
 #if ENABLE_VIDEO
     /* <video>/<audio>: a build with media (the port's USE video: ENABLE_VIDEO with WebKit patch
@@ -2278,6 +2385,7 @@ static int uiMain(int argc, char** argv)
 #endif
     webView = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
         "display", display,
+        "web-context", webContext,
         "network-session", session,
         "settings", settings,
         "user-content-manager", contentManager,

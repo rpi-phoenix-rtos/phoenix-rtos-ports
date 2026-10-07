@@ -51,6 +51,9 @@
 	#   patches/webkit/0023       WPEPlatform Wayland: a buffer rendered from inside buffer-rendered
 	#                             keeps its frame callback (with 0019 the view stalled for good
 	#                             once a frame was held: GPU raster + <video>, build 42)
+	#   patches/webkit/0024       diagnostic: the web process's memory pressure monitor logs its
+	#                             limits, policy changes and releases ("WPEB-MEMPRESSURE"; the
+	#                             build has no release logging)
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
 	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).

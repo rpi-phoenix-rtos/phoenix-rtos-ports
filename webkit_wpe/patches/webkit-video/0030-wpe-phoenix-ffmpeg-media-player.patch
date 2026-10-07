@@ -26,6 +26,20 @@ Every event prints "WPEB-MEDIA mono=<ms> id=<n> ..." on stderr; WPE_PHOENIX_MEDI
 (default 2000, 0 off) is the period of the "stat" line; WPE_PHOENIX_MEDIA_THREADS sets the
 decoders' thread count (0: FFmpeg's choice), WPE_PHOENIX_MEDIA_AUDIO=0 keeps the device closed.
 
+Memory. On Phoenix a player's thread stacks are resident from the start (the kernel populates
+them) and freed heap is never returned, so what a <video> holds is what the page costs: a page
+with many paused videos (nytimes.com: seven players, 1.2 GB) runs out of memory. The player
+honours preload="none" as GStreamer's does (nothing is fetched until play(), prepareToPlay() or a
+preload above none; the element then fires 'suspend'); until its first play() it reads ahead
+WPE_PHOENIX_MEDIA_IDLE_AHEAD_MB (default 2), after it WPE_PHOENIX_MEDIA_AHEAD_MB (default 16),
+both the stream's unread bytes and the packet queues; the stream allocates its whole window once
+(appending grew it by reallocation, each leaving a freed block behind); its three threads get
+WPE_PHOENIX_MEDIA_STACK_KB of stack (default 2048, was 8 MiB). For measurements:
+WPE_PHOENIX_MEDIA_PRELOAD=0 ignores the preload attribute, WPE_PHOENIX_MEDIA_DISABLE=1 makes the
+engine support no type (every <video>/<audio> fails as unsupported). The stat line adds
+ahead_kb= (unread), buf_kb= (the stream buffer's capacity), q_kb= (the packet queues),
+preload=, played= and players= (alive in the process).
+
 Also: GStreamer.cmake adds GStreamer's sources only with USE_GSTREAMER; the new engine
 identifier and player type (+ the IPC serializer list, the remote player's switch); and
 VideoFrame.cpp's non-GStreamer fallback includes NativeImage.h (copyNativeImage() returns a
@@ -465,7 +479,7 @@ diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.cpp b/Sou
 new file mode 100644
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.cpp
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,408 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -516,10 +530,11 @@ new file mode 100644
 +namespace WebCore {
 +
 +static constexpr size_t kIOBufferSize = 64 * 1024;
-+// a request is stopped while this much waits unread, and started again below kResumeAhead
-+static constexpr uint64_t kMaxAhead = 16 * 1024 * 1024;
-+static constexpr uint64_t kResumeAhead = 4 * 1024 * 1024;
-+// bytes already read are dropped in steps of this, keeping kKeepBehind for short seeks back
++// a request is stopped while more than m_maxAhead waits unread, and started again below a quarter
++// of it; bytes already read are dropped in steps of kCompactStep, keeping kKeepBehind for short
++// seeks back. The buffer is allocated for that whole window at once: grown by appending, its
++// reallocations (each a new block while the old one is copied) leave freed blocks the size of
++// the window behind, which on Phoenix stay resident (mimalloc cannot decommit there).
 +static constexpr uint64_t kCompactStep = 4 * 1024 * 1024;
 +static constexpr uint64_t kKeepBehind = 1024 * 1024;
 +
@@ -553,7 +568,7 @@ new file mode 100644
 +    unsigned m_request;
 +};
 +
-+RefPtr<FFmpegMediaStream> FFmpegMediaStream::create(const URL& url, RefPtr<PlatformMediaResourceLoader>&& loader)
++RefPtr<FFmpegMediaStream> FFmpegMediaStream::create(const URL& url, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead)
 +{
 +    ASSERT(isMainThread());
 +    int fd = -1;
@@ -563,13 +578,14 @@ new file mode 100644
 +            return nullptr;
 +    } else if (!loader)
 +        return nullptr;
-+    return adoptRef(*new FFmpegMediaStream(url, fd, WTF::move(loader)));
++    return adoptRef(*new FFmpegMediaStream(url, fd, WTF::move(loader), maxAhead));
 +}
 +
-+FFmpegMediaStream::FFmpegMediaStream(const URL& url, int fd, RefPtr<PlatformMediaResourceLoader>&& loader)
++FFmpegMediaStream::FFmpegMediaStream(const URL& url, int fd, RefPtr<PlatformMediaResourceLoader>&& loader, uint64_t maxAhead)
 +    : m_url(url)
 +    , m_fd(fd)
 +    , m_loader(WTF::move(loader))
++    , m_maxAhead(std::max<uint64_t>(maxAhead, kIOBufferSize))
 +{
 +    if (m_fd >= 0) {
 +        struct stat st;
@@ -657,6 +673,25 @@ new file mode 100644
 +    return m_size && m_received >= *m_size;
 +}
 +
++auto FFmpegMediaStream::memory() const -> Memory
++{
++    Locker locker { m_lock };
++    uint64_t end = m_bufferStart + m_buffer.size();
++    return { end - std::min(std::max(m_position, m_bufferStart), end), m_buffer.capacity() };
++}
++
++void FFmpegMediaStream::setMaxAhead(uint64_t maxAhead)
++{
++    Locker locker { m_lock };
++    m_maxAhead = std::max<uint64_t>(maxAhead, kIOBufferSize);
++    if (m_fd >= 0 || m_cancelled || m_requestActive || m_requestDone)
++        return;
++    // only a request stopped by the limit is started here: the next read starts any other
++    uint64_t end = m_bufferStart + m_buffer.size();
++    if (m_position >= m_bufferStart && m_position <= end && end - m_position < m_maxAhead / 4 && (!m_size || end < *m_size))
++        startRequestLocked(end);
++}
++
 +int FFmpegMediaStream::readPacket(void* opaque, uint8_t* data, int size)
 +{
 +    return static_cast<FFmpegMediaStream*>(opaque)->read({ data, static_cast<size_t>(size) });
@@ -703,7 +738,7 @@ new file mode 100644
 +                m_bufferStart += drop;
 +            }
 +            // flow control: a request stopped with enough unread is started again
-+            if (!m_requestActive && !m_requestDone && end - m_position < kResumeAhead)
++            if (!m_requestActive && !m_requestDone && end - m_position < m_maxAhead / 4)
 +                startRequestLocked(end);
 +            return n;
 +        }
@@ -826,10 +861,12 @@ new file mode 100644
 +    }
 +    if (data.empty())
 +        return;
++    if (m_buffer.size() + data.size() > m_buffer.capacity())
++        m_buffer.reserveCapacity(std::max<size_t>(m_buffer.size() + data.size(), m_maxAhead + kCompactStep + kKeepBehind + kIOBufferSize));
 +    m_buffer.append(data);
 +    m_received += data.size();
 +    m_condition.notifyAll();
-+    if (m_bufferStart + m_buffer.size() - std::max(m_position, m_bufferStart) > kMaxAhead)
++    if (m_bufferStart + m_buffer.size() - std::max(m_position, m_bufferStart) > m_maxAhead)
 +        stopRequestLocked();
 +}
 +
@@ -855,7 +892,7 @@ diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.h b/Sourc
 new file mode 100644
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegMediaStream.h
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,124 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -904,11 +941,12 @@ new file mode 100644
 +// an AVIOContext. A local file (file://) is read directly; anything else goes through WebKit's
 +// media resource loader (the network process; http, https, blob, data), the way GStreamer's
 +// webkitwebsrc does: a seek outside the bytes already here is a new request with a Range
-+// header, and a request is stopped while more than kMaxAhead bytes wait unread.
++// header, and a request is stopped while more than the read-ahead limit waits unread (and
++// started again below a quarter of it).
 +class FFmpegMediaStream final : public ThreadSafeRefCounted<FFmpegMediaStream> {
 +public:
-+    // Main thread. nullptr if a local file cannot be opened.
-+    static RefPtr<FFmpegMediaStream> create(const URL&, RefPtr<PlatformMediaResourceLoader>&&);
++    // Main thread. nullptr if a local file cannot be opened. maxAhead: the read-ahead limit.
++    static RefPtr<FFmpegMediaStream> create(const URL&, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead);
 +    ~FFmpegMediaStream();
 +
 +    // The demux thread. The context is owned by the stream.
@@ -917,6 +955,10 @@ new file mode 100644
 +    // Any thread: wakes a blocked read, which then fails (AVERROR_EXIT). For teardown.
 +    void cancel();
 +
++    // Any thread: a new read-ahead limit (a paused player that never played keeps a small one).
++    // A request stopped by the old limit starts again at once if the new one leaves room.
++    void setMaxAhead(uint64_t);
++
 +    bool isLocalFile() const { return m_fd >= 0; }
 +    uint64_t bytesReceived() const;
 +    std::optional<uint64_t> size() const;
@@ -924,13 +966,20 @@ new file mode 100644
 +    bool isComplete() const;
 +    const URL& url() const { return m_url; }
 +
++    // What the stream holds in memory: bytes received and not read yet, and the buffer's capacity.
++    struct Memory {
++        uint64_t unread { 0 };
++        size_t capacity { 0 };
++    };
++    Memory memory() const;
++
 +    // The resource client's entry points (main thread).
 +    void didReceiveResponse(unsigned request, const ResourceResponse&);
 +    void didReceiveData(unsigned request, std::span<const uint8_t>);
 +    void didFinish(unsigned request, bool failed);
 +
 +private:
-+    FFmpegMediaStream(const URL&, int fd, RefPtr<PlatformMediaResourceLoader>&&);
++    FFmpegMediaStream(const URL&, int fd, RefPtr<PlatformMediaResourceLoader>&&, uint64_t maxAhead);
 +
 +    static int readPacket(void*, uint8_t*, int);
 +    static int64_t seekPacket(void*, int64_t, int);
@@ -953,6 +1002,7 @@ new file mode 100644
 +    uint64_t m_position WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 +    uint64_t m_received WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 +    std::optional<uint64_t> m_size WTF_GUARDED_BY_LOCK(m_lock);
++    uint64_t m_maxAhead WTF_GUARDED_BY_LOCK(m_lock);
 +    // bytes to drop at the head of a response that ignored the Range header (status 200)
 +    uint64_t m_discard WTF_GUARDED_BY_LOCK(m_lock) { 0 };
 +    unsigned m_request WTF_GUARDED_BY_LOCK(m_lock) { 0 };
@@ -971,7 +1021,7 @@ diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cp
 new file mode 100644
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
-@@ -0,0 +1,1200 @@
+@@ -0,0 +1,1320 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -1043,12 +1093,10 @@ new file mode 100644
 +static constexpr double kAudioLate = 0.05;   // a sound frame heard later than this is dropped
 +static constexpr double kAudioEarly = 0.02;  // ... earlier than this waits behind silence
 +static constexpr double kLateDrop = 0.10;    // a picture later than this is dropped
-+static constexpr size_t kQueueMaxBytes = 16 * 1024 * 1024;
 +static constexpr size_t kQueueMaxPackets = 256;
 +static const char* const kAudioDevice = "/dev/audio0";
 +// one writer of the device in the whole system: a process-owned record lock (dropped at exit)
 +static const char* const kAudioLockFile = "/tmp/.wpe-audio0.lock";
-+static constexpr size_t kThreadStack = 8 * 1024 * 1024;
 +
 +static unsigned nextPlayerID()
 +{
@@ -1070,6 +1118,56 @@ new file mode 100644
 +        return fallback;
 +    return atoi(value);
 +}
++
++// The memory knobs (see MediaPlayerPrivateFFmpeg.h), read once per process.
++static size_t mediaAheadBytes()
++{
++    static const size_t bytes = static_cast<size_t>(std::max(envNumber("WPE_PHOENIX_MEDIA_AHEAD_MB", 16), 1)) * 1024 * 1024;
++    return bytes;
++}
++
++static size_t mediaIdleAheadBytes()
++{
++    static const size_t bytes = static_cast<size_t>(std::max(envNumber("WPE_PHOENIX_MEDIA_IDLE_AHEAD_MB", 2), 1)) * 1024 * 1024;
++    return std::min(bytes, mediaAheadBytes());
++}
++
++// Each of a player's three threads. Thread stacks are resident from the start on Phoenix (the
++// kernel populates them), so 8 MiB each cost 24 MiB per <video> before it shows anything; the
++// decoders' own frame threads run in libphoenix's default 256 KiB.
++static size_t mediaThreadStack()
++{
++    static const size_t bytes = static_cast<size_t>(std::max(envNumber("WPE_PHOENIX_MEDIA_STACK_KB", 2048), 256)) * 1024;
++    return bytes;
++}
++
++static bool mediaPreloadHonoured()
++{
++    static const bool honoured = envNumber("WPE_PHOENIX_MEDIA_PRELOAD", 1);
++    return honoured;
++}
++
++static bool mediaDisabled()
++{
++    static const bool disabled = envNumber("WPE_PHOENIX_MEDIA_DISABLE", 0);
++    return disabled;
++}
++
++static const char* preloadName(MediaPlayer::Preload preload)
++{
++    switch (preload) {
++    case MediaPlayer::Preload::None:
++        return "none";
++    case MediaPlayer::Preload::MetaData:
++        return "metadata";
++    case MediaPlayer::Preload::Auto:
++        return "auto";
++    }
++    return "?";
++}
++
++// the players alive in this process (the stat line)
++static std::atomic<unsigned> livePlayers { 0 };
 +
 +// FFmpeg's messages: warnings and errors, and the rpivid decoder's own lines (which also say
 +// whether the block or the CPU decodes). A decoder context's opaque is its player.
@@ -1114,11 +1212,13 @@ new file mode 100644
 +    std::call_once(once, [] {
 +        av_log_set_callback(ffmpegLog);
 +    });
++    livePlayers++;
 +}
 +
 +MediaPlayerPrivateFFmpeg::~MediaPlayerPrivateFFmpeg()
 +{
 +    stop();
++    livePlayers--;
 +}
 +
 +void MediaPlayerPrivateFFmpeg::log(const char* format, ...) const
@@ -1159,11 +1259,17 @@ new file mode 100644
 +
 +void MediaPlayerPrivateFFmpeg::getSupportedTypes(HashSet<String>& types)
 +{
++    if (mediaDisabled()) {
++        types.clear();
++        return;
++    }
 +    types = mimeTypeCache();
 +}
 +
 +MediaPlayer::SupportsType MediaPlayerPrivateFFmpeg::supportsType(const MediaEngineSupportParameters& parameters)
 +{
++    if (mediaDisabled())
++        return MediaPlayer::SupportsType::IsNotSupported;
 +    if (parameters.platformType != PlatformMediaDecodingType::FileOrHLS)
 +        return MediaPlayer::SupportsType::IsNotSupported;
 +    auto containerType = parameters.type.containerType();
@@ -1326,12 +1432,39 @@ new file mode 100644
 +        return;
 +    stop();
 +    m_quit = false;
-+    URL url { urlString };
++    if (mediaDisabled()) {
++        // MediaPlayer tries an engine for a load without a type even when it supports none
++        log("load disabled (WPE_PHOENIX_MEDIA_DISABLE) uri=%s", urlString.utf8().data());
++        setNetworkState(MediaPlayer::NetworkState::FormatError);
++        return;
++    }
++    m_pendingURL = urlString;
++    if (m_preload == MediaPlayer::Preload::None && mediaPreloadHonoured()) {
++        // as GStreamer's player: nothing is fetched until play(), prepareToPlay() or a preload
++        // above none; Idle lets the element fire 'suspend' and stop delaying the load event
++        m_isDelayingLoad = true;
++        log("load delayed preload=none uri=%s", urlString.utf8().data());
++        setNetworkState(MediaPlayer::NetworkState::Idle);
++        setReadyState(MediaPlayer::ReadyState::HaveNothing);
++        return;
++    }
++    commitLoad();
++}
++
++void MediaPlayerPrivateFFmpeg::commitLoad()
++{
++    RefPtr player = m_player.get();
++    if (!player)
++        return;
++    m_isDelayingLoad = false;
++    URL url { m_pendingURL };
 +    RefPtr<PlatformMediaResourceLoader> loader;
 +    if (!url.protocolIsFile())
 +        loader = player->mediaResourceLoader();
-+    m_stream = FFmpegMediaStream::create(url, WTF::move(loader));
-+    log("load uri=%s local=%d mime=%s", url.string().utf8().data(), url.protocolIsFile(), player->contentMIMEType().utf8().data());
++    m_stream = FFmpegMediaStream::create(url, WTF::move(loader), m_hasPlayed ? mediaAheadBytes() : mediaIdleAheadBytes());
++    updateReadAhead();
++    log("load uri=%s local=%d mime=%s preload=%s ahead_kb=%zu stack_kb=%zu", url.string().utf8().data(), url.protocolIsFile(),
++        player->contentMIMEType().utf8().data(), preloadName(m_preload), static_cast<size_t>(m_queueMaxBytes.load() / 1024), mediaThreadStack() / 1024);
 +    if (!m_stream) {
 +        log("error open-failed uri=%s errno=%d", url.string().utf8().data(), errno);
 +        setNetworkState(MediaPlayer::NetworkState::NetworkError);
@@ -1343,7 +1476,32 @@ new file mode 100644
 +    if (int period = envNumber("WPE_PHOENIX_MEDIA_STAT_MS", 2000); period > 0)
 +        m_statTimer.startRepeating(Seconds::fromMilliseconds(period));
 +    m_demuxThread = Thread::create("FFmpegDemux"_s, [this] { demuxThread(); }, ThreadType::Unknown, Thread::QOS::UserInitiated,
-+        Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(kThreadStack));
++        Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(mediaThreadStack()));
++}
++
++void MediaPlayerPrivateFFmpeg::setPreload(MediaPlayer::Preload preload)
++{
++    m_preload = preload;
++    if (m_isDelayingLoad && preload != MediaPlayer::Preload::None)
++        commitLoad();
++}
++
++// HTMLMediaElement's load() and play() (also before load(): then the load is not delayed)
++void MediaPlayerPrivateFFmpeg::prepareToPlay()
++{
++    m_preload = MediaPlayer::Preload::Auto;
++    if (m_isDelayingLoad)
++        commitLoad();
++}
++
++// A player that has not played reads ahead little: a page may hold many paused <video>s (a
++// news front page: one per story), and each one's read-ahead stays resident.
++void MediaPlayerPrivateFFmpeg::updateReadAhead()
++{
++    size_t ahead = m_hasPlayed ? mediaAheadBytes() : mediaIdleAheadBytes();
++    m_queueMaxBytes = ahead;
++    if (m_stream)
++        m_stream->setMaxAhead(ahead);
 +}
 +
 +#if ENABLE(MEDIA_SOURCE)
@@ -1373,6 +1531,7 @@ new file mode 100644
 +{
 +    m_statTimer.stop();
 +    m_quit = true;
++    m_isDelayingLoad = false;
 +    if (m_stream)
 +        m_stream->cancel();
 +    queueAbort(m_videoQueue);
@@ -1501,11 +1660,11 @@ new file mode 100644
 +
 +    if (m_videoStream >= 0) {
 +        m_videoThread = Thread::create("FFmpegVideo"_s, [this] { videoThread(); }, ThreadType::Graphics, Thread::QOS::UserInteractive,
-+            Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(kThreadStack));
++            Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(mediaThreadStack()));
 +    }
 +    if (m_audioStream >= 0) {
 +        m_audioThread = Thread::create("FFmpegAudio"_s, [this] { audioThread(); }, ThreadType::Audio, Thread::QOS::UserInteractive,
-+            Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(kThreadStack));
++            Thread::SchedulingPolicy::Other, StackAllocationSpecification::RequestSize(mediaThreadStack()));
 +    }
 +
 +    // One pass reads from the start or from a seek target to the end of the file. Only this
@@ -1547,7 +1706,7 @@ new file mode 100644
 +            usleep(10000);
 +            continue;
 +        }
-+        bool full = queueBytes(m_videoQueue) + queueBytes(m_audioQueue) > kQueueMaxBytes
++        bool full = queueBytes(m_videoQueue) + queueBytes(m_audioQueue) > m_queueMaxBytes.load()
 +            || ((m_videoStream < 0 || queueLength(m_videoQueue) > kQueueMaxPackets) && (m_audioStream < 0 || queueLength(m_audioQueue) > kQueueMaxPackets));
 +        if (full) {
 +            usleep(10000);
@@ -2036,6 +2195,12 @@ new file mode 100644
 +
 +void MediaPlayerPrivateFFmpeg::play()
 +{
++    if (!m_hasPlayed) {
++        m_hasPlayed = true;
++        updateReadAhead();
++    }
++    if (m_isDelayingLoad)
++        commitLoad();
 +    if (!m_paused)
 +        return;
 +    m_paused = false;
@@ -2162,11 +2327,16 @@ new file mode 100644
 +    uint64_t painted = m_frameCounters->painted;
 +    uint64_t uploadUs = m_frameCounters->uploadMicroseconds;
 +    int hardware = m_hardwareState;
-+    log("stat clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu fps=%.1f av_ms=%d vq=%zu aq=%zu paused=%d hw=%s upload_ms=%.2f bytes=%llu",
++    // memory: the stream's unread bytes and buffer capacity, the packet queues' bytes
++    auto memory = m_stream ? m_stream->memory() : FFmpegMediaStream::Memory { };
++    log("stat clock=%.3f decoded=%llu presented=%llu painted=%llu dropped=%llu fps=%.1f av_ms=%d vq=%zu aq=%zu paused=%d hw=%s upload_ms=%.2f bytes=%llu"
++        " ahead_kb=%llu buf_kb=%zu q_kb=%zu preload=%s played=%d players=%u",
 +        clockNow(), static_cast<unsigned long long>(m_decoded.load()), static_cast<unsigned long long>(presented),
 +        static_cast<unsigned long long>(painted), static_cast<unsigned long long>(m_dropped.load()), fps, m_avDriftMs.load(),
 +        queueLength(m_videoQueue), queueLength(m_audioQueue), m_paused, hardware < 0 ? "-" : hardware ? "1" : "0",
-+        painted ? uploadUs / 1000.0 / painted : 0.0, static_cast<unsigned long long>(m_stream ? m_stream->bytesReceived() : 0));
++        painted ? uploadUs / 1000.0 / painted : 0.0, static_cast<unsigned long long>(m_stream ? m_stream->bytesReceived() : 0),
++        static_cast<unsigned long long>(memory.unread / 1024), memory.capacity / 1024,
++        (queueBytes(m_videoQueue) + queueBytes(m_audioQueue)) / 1024, preloadName(m_preload), m_hasPlayed, livePlayers.load());
 +}
 +
 +} // namespace WebCore
@@ -2176,7 +2346,7 @@ diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h 
 new file mode 100644
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.h
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,282 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -2248,6 +2418,15 @@ new file mode 100644
 +//
 +// Every event prints a "WPEB-MEDIA mono=<ms> id=<n> ..." line on stderr; WPE_PHOENIX_MEDIA_STAT_MS
 +// (default 2000, 0 off) sets the period of the "stat" line.
++//
++// Memory (each player's threads, read-ahead and decoders are resident on Phoenix: thread stacks
++// are populated when the thread starts, and freed heap is never returned): preload "none" loads
++// nothing until play() / prepareToPlay() / a preload above none, as GStreamer's player does; a
++// player that has not played yet reads ahead WPE_PHOENIX_MEDIA_IDLE_AHEAD_MB (default 2), one
++// that has, WPE_PHOENIX_MEDIA_AHEAD_MB (default 16; both the stream's unread bytes and the packet
++// queues); its threads get WPE_PHOENIX_MEDIA_STACK_KB of stack (default 2048). For measurements:
++// WPE_PHOENIX_MEDIA_PRELOAD=0 ignores the preload attribute, WPE_PHOENIX_MEDIA_DISABLE=1 makes the
++// engine support no type at all (every <video>/<audio> fails as unsupported).
 +class MediaPlayerPrivateFFmpeg final
 +    : public MediaPlayerPrivateInterface
 +    , public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<MediaPlayerPrivateFFmpeg, WTF::DestructionThread::Main> {
@@ -2266,6 +2445,8 @@ new file mode 100644
 +    static MediaPlayer::SupportsType supportsType(const MediaEngineSupportParameters&);
 +
 +    void load(const String&) final;
++    void setPreload(MediaPlayer::Preload) final;
++    void prepareToPlay() final;
 +#if ENABLE(MEDIA_SOURCE)
 +    void load(const URL&, const LoadOptions&, MediaSourcePrivateClient&) final;
 +#endif
@@ -2336,6 +2517,8 @@ new file mode 100644
 +    void clockSetPaused(bool);
 +
 +    void stop();
++    void commitLoad();
++    void updateReadAhead();
 +    void demuxThread();
 +    bool openContainer();
 +    AVCodecContext* openDecoder(int stream);
@@ -2379,6 +2562,14 @@ new file mode 100644
 +    mutable PlatformTimeRanges m_buffered;
 +    uint64_t m_lastStatPresented { 0 };
 +    MonotonicTime m_lastStatTime;
++    MediaPlayer::Preload m_preload { MediaPlayer::Preload::Auto };
++    // load() with preload "none": the URL waits here for commitLoad()
++    bool m_isDelayingLoad { false };
++    String m_pendingURL;
++    // play() was called once: the full read-ahead from then on
++    bool m_hasPlayed { false };
++    // the demux thread's packet queue limit (bytes), from updateReadAhead()
++    std::atomic<size_t> m_queueMaxBytes { 16 * 1024 * 1024 };
 +
 +    // the threads
 +    RefPtr<Thread> m_demuxThread;
