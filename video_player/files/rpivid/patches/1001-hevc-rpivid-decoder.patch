@@ -12,11 +12,17 @@ allocated, so players see a software decoder. A stream the block cannot take sta
 on the CPU; a picture it cannot take, or a picture the block fails, switches the
 rest of the stream to the CPU (the pictures it decoded serve as references).
 
+The option "rpivid_out" (FFMPEG_RPIVID_OUT): planar (the default, as above) or
+drm_prime: get_format() then answers AV_PIX_FMT_DRM_PRIME and the hwaccel allocates
+the frames itself (the block's GPU-importable buffers, libavcodec/rpivid_drm.h,
+installed); on a fallback the pictures held move to system memory first
+(ff_rpivid_hevc_drm_to_cpu), and the SEI picture hash is not checked on DRM frames.
+
   configure        hevc_rpivid_decoder: deps pthreads, selects hevc_decoder
-  Makefile         the rpivid objects
+  Makefile         the rpivid objects, rpivid_drm.h installed
   allcodecs.c      ff_hevc_rpivid_decoder before ff_hevc_decoder
   decode.c         per-frame hwaccel data without a frames context
-  hevcdec.[ch]     the option, the attach/fallback points, SAO buffers kept for a
+  hevcdec.[ch]     the options, the attach/fallback points, SAO buffers kept for a
                    fallback, the SEI picture hash also checked on block-decoded
                    frames, the hevc_rpivid FFCodec
 
@@ -37,14 +43,15 @@ index 1f0b949..29d3f14 100755
  huffyuv_encoder_select="bswapdsp huffman huffyuvencdsp llvidencdsp"
  hymt_decoder_select="huffyuv_decoder"
 diff --git a/libavcodec/Makefile b/libavcodec/Makefile
-index 580a8d6..2f63e51 100644
+index 580a8d6..36f1a0c 100644
 --- a/libavcodec/Makefile
 +++ b/libavcodec/Makefile
-@@ -425,6 +425,7 @@ OBJS-$(CONFIG_HCA_DECODER)             += hcadec.o
+@@ -425,6 +425,8 @@ OBJS-$(CONFIG_HCA_DECODER)             += hcadec.o
  OBJS-$(CONFIG_HCOM_DECODER)            += hcom.o
  OBJS-$(CONFIG_HDR_DECODER)             += hdrdec.o
  OBJS-$(CONFIG_HDR_ENCODER)             += hdrenc.o
 +OBJS-$(CONFIG_HEVC_RPIVID_DECODER)     += rpivid_hevc.o rpivid_cmd.o rpivid_hw.o rpivid_sand.o
++HEADERS-$(CONFIG_HEVC_RPIVID_DECODER)  += rpivid_drm.h
  OBJS-$(CONFIG_HEVC_DECODER)            += hevcdec.o hevc_mvs.o \
                                            hevc_cabac.o hevc_refs.o hevcpred.o    \
                                            hevcdsp.o hevc_filter.o hevc_data.o \
@@ -87,7 +94,7 @@ index ad39021..43d88e4 100644
      if (!*hwaccel_picture_private)
          return AVERROR(ENOMEM);
 diff --git a/libavcodec/hevcdec.c b/libavcodec/hevcdec.c
-index b267f6e..424e407 100644
+index b267f6e..f6f495b 100644
 --- a/libavcodec/hevcdec.c
 +++ b/libavcodec/hevcdec.c
 @@ -50,6 +50,9 @@
@@ -100,7 +107,7 @@ index b267f6e..424e407 100644
  
  static const uint8_t hevc_pel_weight[65] = { [2] = 0, [4] = 1, [6] = 2, [8] = 3, [12] = 4, [16] = 5, [24] = 6, [32] = 7, [48] = 8, [64] = 9 };
  
-@@ -519,7 +522,18 @@ static enum AVPixelFormat get_format(HEVCContext *s, const HEVCSPS *sps)
+@@ -519,7 +522,22 @@ static enum AVPixelFormat get_format(HEVCContext *s, const HEVCSPS *sps)
      *fmt++ = sps->pix_fmt;
      *fmt = AV_PIX_FMT_NONE;
  
@@ -108,9 +115,13 @@ index b267f6e..424e407 100644
 +    {
 +        enum AVPixelFormat ret = ff_get_format(s->avctx, pix_fmts);
 +
-+        /* the rpivid block decodes into system memory frames of the software format */
-+        if (ret == sps->pix_fmt && !s->avctx->hwaccel && s->rpivid_level > 0 && !s->rpivid_failed)
-+            ff_rpivid_hevc_attach(s->avctx, s->rpivid_level);
++        /* the rpivid block decodes into system memory frames of the software format, or
++         * (rpivid_out=drm_prime) into its own buffers, returned as AV_PIX_FMT_DRM_PRIME frames */
++        if (ret == sps->pix_fmt && !s->avctx->hwaccel && s->rpivid_level > 0 && !s->rpivid_failed &&
++            ff_rpivid_hevc_attach(s->avctx, s->rpivid_level, s->rpivid_out) == 1) {
++            s->avctx->sw_pix_fmt = ret;
++            return AV_PIX_FMT_DRM_PRIME;
++        }
 +        return ret;
 +    }
 +#else
@@ -119,7 +130,7 @@ index b267f6e..424e407 100644
  }
  
  static int set_sps(HEVCContext *s, const HEVCSPS *sps,
-@@ -551,7 +565,7 @@ static int set_sps(HEVCContext *s, const HEVCSPS *sps,
+@@ -551,7 +569,7 @@ static int set_sps(HEVCContext *s, const HEVCSPS *sps,
          av_freep(&s->sao_pixel_buffer_v[i]);
      }
  
@@ -128,47 +139,55 @@ index b267f6e..424e407 100644
          int c_count = (sps->chroma_format_idc != 0) ? 3 : 1;
          int c_idx;
  
-@@ -2941,6 +2955,17 @@ static int hevc_frame_end(HEVCContext *s)
+@@ -2941,6 +2959,23 @@ static int hevc_frame_end(HEVCContext *s)
      return 0;
  }
  
 +#if CONFIG_HEVC_RPIVID_DECODER
 +/* Leave the rpivid block for the rest of the stream. The pictures it decoded are in
-+ * system memory, so they serve the CPU decoder as references. */
-+static void rpivid_fallback(HEVCContext *s, const char *why)
++ * system memory, so they serve the CPU decoder as references (drm_prime output: they are
++ * copied into system memory first). */
++static int rpivid_fallback(HEVCContext *s, const char *why)
 +{
++    int zc = ff_rpivid_hevc_zero_copy(s->avctx), ret = 0;
++
 +    av_log(s->avctx, AV_LOG_WARNING, "rpivid: continuing on the CPU decoder (%s)\n", why);
 +    ff_hwaccel_uninit(s->avctx);
 +    s->rpivid_failed = 1;
++    if (zc && (ret = ff_rpivid_hevc_drm_to_cpu(s->avctx)) < 0)
++        av_log(s->avctx, AV_LOG_ERROR, "rpivid: the pictures held could not be moved to system memory\n");
++    return ret;
 +}
 +#endif
 +
  static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
  {
      HEVCLocalContext *lc = s->HEVClc;
-@@ -3075,6 +3100,12 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
+@@ -3075,6 +3110,13 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
              }
          }
  
 +#if CONFIG_HEVC_RPIVID_DECODER
 +        /* a picture the block cannot take is still whole: decode it on the CPU */
 +        if (s->sh.first_slice_in_pic_flag && ff_rpivid_hevc_active(s->avctx) &&
-+            ff_rpivid_hevc_picture_ok(s->avctx) < 0)
-+            rpivid_fallback(s, "a picture the block cannot decode");
++            ff_rpivid_hevc_picture_ok(s->avctx) < 0 &&
++            (ret = rpivid_fallback(s, "a picture the block cannot decode")) < 0)
++            goto fail;
 +#endif
          if (s->sh.first_slice_in_pic_flag && s->avctx->hwaccel) {
              ret = FF_HW_CALL(s->avctx, start_frame, NULL, 0);
              if (ret < 0)
-@@ -3363,7 +3394,16 @@ static int hevc_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
+@@ -3363,7 +3405,17 @@ static int hevc_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
              ff_hevc_unref_frame(s->ref, ~0);
              return ret;
          }
 -    } else {
 +#if CONFIG_HEVC_RPIVID_DECODER
 +        if (ff_rpivid_hevc_active(avctx)) {
-+            if (ff_rpivid_hevc_failed(avctx))
-+                rpivid_fallback(s, "the block failed a picture");
-+            else if (s->ref)
++            if (ff_rpivid_hevc_failed(avctx)) {
++                if ((ret = rpivid_fallback(s, "the block failed a picture")) < 0)
++                    return ret;
++            } else if (s->ref && !ff_rpivid_hevc_zero_copy(avctx))
 +                s->is_decoded = 1; /* a system memory picture: the SEI checksum applies */
 +        }
 +#endif
@@ -177,7 +196,7 @@ index b267f6e..424e407 100644
          /* verify the SEI checksum */
          if (avctx->err_recognition & AV_EF_CRCCHECK && s->ref && s->is_decoded &&
              s->sei.picture_hash.is_md5) {
-@@ -3555,6 +3595,8 @@ static int hevc_update_thread_context(AVCodecContext *dst,
+@@ -3555,6 +3607,8 @@ static int hevc_update_thread_context(AVCodecContext *dst,
          if ((ret = set_sps(s, s0->ps.sps, src->pix_fmt)) < 0)
              return ret;
  
@@ -186,7 +205,7 @@ index b267f6e..424e407 100644
      s->seq_decode = s0->seq_decode;
      s->seq_output = s0->seq_output;
      s->pocTid0    = s0->pocTid0;
-@@ -3614,6 +3656,19 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
+@@ -3614,6 +3668,24 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
      HEVCContext *s = avctx->priv_data;
      int ret;
  
@@ -201,23 +220,33 @@ index b267f6e..424e407 100644
 +                s->rpivid_level = e[0] - '0';
 +        }
 +    }
++    if (s->rpivid_out < 0) {
++        const char *e = getenv("FFMPEG_RPIVID_OUT");
++
++        s->rpivid_out = (e && !strcmp(e, "drm_prime")) ? RPIVID_OUT_DRM_PRIME : RPIVID_OUT_PLANAR;
++    }
 +#endif
 +
      if (avctx->active_thread_type & FF_THREAD_SLICE) {
          s->threads_number = avctx->thread_count;
          ret = ff_slice_thread_init_progress(avctx);
-@@ -3677,6 +3732,10 @@ static const AVOption options[] = {
+@@ -3677,6 +3749,15 @@ static const AVOption options[] = {
          AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
      { "strict-displaywin", "stricly apply default display window size", OFFSET(apply_defdispwin),
          AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
 +#if CONFIG_HEVC_RPIVID_DECODER
 +    { "rpivid", "rpivid hardware decode: 0 off, 1 the default tool set, 2 all tools (-1: 1 for hevc_rpivid, 0 for hevc)",
 +        OFFSET(rpivid_level), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 2, PAR },
++    { "rpivid_out", "the frames of pictures the rpivid block decodes (-1: FFMPEG_RPIVID_OUT, else planar)",
++        OFFSET(rpivid_out), AV_OPT_TYPE_INT, {.i64 = -1}, -1, RPIVID_OUT_DRM_PRIME, PAR, "rpivid_out" },
++    { "planar", "system-memory frames (the software pixel format)", 0, AV_OPT_TYPE_CONST, {.i64 = RPIVID_OUT_PLANAR}, 0, 0, PAR, "rpivid_out" },
++    { "drm_prime", "AV_PIX_FMT_DRM_PRIME frames of the block's buffers (zero copy; libavcodec/rpivid_drm.h)", 0,
++        AV_OPT_TYPE_CONST, {.i64 = RPIVID_OUT_DRM_PRIME}, 0, 0, PAR, "rpivid_out" },
 +#endif
      { NULL },
  };
  
-@@ -3732,3 +3791,27 @@ const FFCodec ff_hevc_decoder = {
+@@ -3732,3 +3813,27 @@ const FFCodec ff_hevc_decoder = {
                                 NULL
                             },
  };
@@ -246,15 +275,16 @@ index b267f6e..424e407 100644
 +};
 +#endif
 diff --git a/libavcodec/hevcdec.h b/libavcodec/hevcdec.h
-index 6ef7d4f..b5f146d 100644
+index 6ef7d4f..b752349 100644
 --- a/libavcodec/hevcdec.h
 +++ b/libavcodec/hevcdec.h
-@@ -593,6 +593,9 @@ typedef struct HEVCContext {
+@@ -593,6 +593,10 @@ typedef struct HEVCContext {
                              ///< as a format defined in 14496-15
      int apply_defdispwin;
  
 +    int rpivid_level;       ///< rpivid hardware decode: -1 auto, RPIVID_LEVEL_* (rpivid_hevc.h)
 +    int rpivid_failed;      ///< the block failed this stream: CPU decode from now on
++    int rpivid_out;         ///< RPIVID_OUT_* (rpivid_drm.h): the frames of block-decoded pictures; -1 auto
 +
      int nal_length_size;    ///< Number of bytes used for nal length (1, 2 or 4)
      int nuh_layer_id;

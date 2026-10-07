@@ -675,4 +675,20 @@ void rpivid_geom(rpivid_geom_t *g, uint32_t width, uint32_t height, unsigned int
 	/* collocated motion vectors (the driver's setup_colmv sizing) */
 	g->colmv_stride = (width + 63u) & ~63u;
 	g->colmv_size = (size_t)g->colmv_stride * (((height + 63u) & ~63u) >> 4);
+	g->col_height = 0;
+	g->chroma_offset = 0;
+}
+
+
+void rpivid_geom_col128(rpivid_geom_t *g, uint32_t width, uint32_t height, unsigned int bit_depth)
+{
+	uint32_t h16 = (height + 15u) & ~15u;
+
+	rpivid_geom(g, width, height, bit_depth);
+	g->col_height = h16 + h16 / 2u;
+	g->luma_stride = g->col_height * 128u;
+	g->chroma_stride = g->luma_stride;
+	g->chroma_offset = (size_t)h16 * 128u;
+	g->luma_size = (size_t)g->luma_stride * g->cols;
+	g->chroma_size = 0;
 }

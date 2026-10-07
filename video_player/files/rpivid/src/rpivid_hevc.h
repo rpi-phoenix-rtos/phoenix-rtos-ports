@@ -22,6 +22,7 @@
 #define AVCODEC_RPIVID_HEVC_H
 
 #include "avcodec.h"
+#include "rpivid_drm.h"
 
 /* How much of the stream syntax goes to the block:
  *   0  none (CPU decoder)
@@ -39,10 +40,20 @@
 
 /* From get_format(), with the SPS active and a software format chosen: take the
  * block if the stream fits the level (else log why not and leave the CPU decoder).
- * 0 = attached. */
-int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level);
+ * out: RPIVID_OUT_* (rpivid_drm.h). 0 = attached with system-memory frames, 1 = attached
+ * with AV_PIX_FMT_DRM_PRIME frames (the caller's pixel format becomes AV_PIX_FMT_DRM_PRIME,
+ * avctx->sw_pix_fmt the software one), -1 = not attached. */
+int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level, int out);
 
 int ff_rpivid_hevc_active(const AVCodecContext *avctx);
+
+/* attached with AV_PIX_FMT_DRM_PRIME frames */
+int ff_rpivid_hevc_zero_copy(const AVCodecContext *avctx);
+
+/* After a drm_prime hwaccel was detached for the CPU decoder: the decoder's pictures (its
+ * DPB, the current one, the staged output) become system-memory frames of
+ * avctx->sw_pix_fmt with the block's pixels; avctx->pix_fmt becomes sw_pix_fmt. */
+int ff_rpivid_hevc_drm_to_cpu(AVCodecContext *avctx);
 
 /* Before the first slice of a picture goes to the hwaccel: can the block decode it?
  * (A PPS or slice structure the stream-level check could not see.) */

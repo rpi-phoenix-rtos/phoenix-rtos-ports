@@ -301,6 +301,16 @@ p_build() {
 	done
 	grep -q 'ff_hevc_rpivid_decoder' < <("${NL_NM}" "${FFD}/lib/libavcodec.a") || b_die "video_player: ffmpeg/: libavcodec has no hevc_rpivid"
 	grep -q 'ff_hls_demuxer' < <("${NL_NM}" "${FFD}/lib/libavformat.a") || b_die "video_player: ffmpeg/: libavformat has no hls demuxer"
+	[ -f "${FFD}/include/libavcodec/rpivid_drm.h" ] || b_die "video_player: ffmpeg/: no libavcodec/rpivid_drm.h"
+	# hevc_rpivid's zero-copy picture buffers from the V3D render server (files/rpivid/drm):
+	# for hevc-rpivid-check -zc here and for players (webkit_wpe), which also link
+	# libdrm-phoenix's libdrm.a and its --wrap flags
+	local LDP="${PORT_DEP_libdrm_phoenix}"
+	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" -I"${LDP}/include" -I"${LDP}/include/libdrm" \
+		-c "${F}/rpivid/drm/rpivid_bo_drm.c" -o "${VP_OUT}/rpivid_bo_drm.o"
+	rm -f "${FFD}/lib/librpivid_bo_drm.a"
+	"${NL_AR}" rcs "${FFD}/lib/librpivid_bo_drm.a" "${VP_OUT}/rpivid_bo_drm.o"
+	install -m 644 "${F}/rpivid/drm/rpivid_bo_drm.h" "${FFD}/include/rpivid_bo_drm.h"
 
 	VP_GLUE_O="${VP_OUT}/ffplay_phoenix_glue.o"
 	"${NL_CC}" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${F}/ffplay_phoenix_glue.c" -o "${VP_GLUE_O}"
@@ -326,22 +336,27 @@ p_build() {
 	# --- 4. hevc-rpivid-check: the rpivid decoder against the CPU one (libavformat +
 	# libavcodec, no SDL); the glue's 8 MiB thread stacks and ffplay's 16 MiB main stack (the
 	# CPU decoder runs on the main thread with -t 1 and in the stream probe) -----------------
-	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" \
+	# -zc: GPU picture buffers (rpivid_bo_drm.o, libdrm-phoenix and its --wrap flags)
+	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -DRPIVID_CHECK_DRM -I"${VP_FS}" -I"${F}/rpivid/drm" \
 		-c "${F}/rpivid/check/hevc-rpivid-check.c" -o "${VP_OUT}/hevc-rpivid-check.o"
 	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=pthread_create \
+		-Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 \
 		-Wl,-z,stack-size=16777216 -Wl,-Map,"${VP_OUT}/hevc-rpivid-check.map" -o "${VP_OUT}/hevc-rpivid-check" "${VP_OUT}/hevc-rpivid-check.o" "${VP_GLUE_O}" \
+		"${VP_OUT}/rpivid_bo_drm.o" \
 		-Wl,--start-group "${VP_FS}/libavformat/libavformat.a" "${VP_FS}/libavcodec/libavcodec.a" "${VP_FS}/libswresample/libswresample.a" \
-		"${VP_FS}/libavutil/libavutil.a" "${ZV}/lib/libz.a" -Wl,--end-group -lm \
+		"${VP_FS}/libavutil/libavutil.a" "${ZV}/lib/libz.a" "${LDP}/lib/libdrm.a" -Wl,--end-group -lm \
 		>"${VP_OUT}/hevc-rpivid-check-link.log" 2>&1 ||
 		{ head -40 "${VP_OUT}/hevc-rpivid-check-link.log"; b_die "video_player: hevc-rpivid-check: link failed"; }
 	"${NL_STRIP}" -o "${VP_OUT}/hevc-rpivid-check.stripped" "${VP_OUT}/hevc-rpivid-check"
 	nl_no_undefined "${VP_OUT}/hevc-rpivid-check"
 	local rs rsyms rbad=0
 	rsyms="$("${NL_NM}" "${VP_OUT}/hevc-rpivid-check")"
-	for rs in main ff_hevc_rpivid_decoder ff_hevc_decoder rpivid_hw_open rpivid_sand8_to_planar rpivid_cmd_slice __wrap_pthread_create; do
+	for rs in main ff_hevc_rpivid_decoder ff_hevc_decoder rpivid_hw_open rpivid_sand8_to_planar rpivid_cmd_slice __wrap_pthread_create \
+			rpivid_bo_drm_install rpivid_drm_frame_to_planar rpivid_drm_set_buffer_ops __wrap_mmap __wrap_ioctl drmPrimeHandleToFD; do
 		grep -qE " [TtWwDdRr] ${rs}\$" <<<"${rsyms}" || { echo "video_player: hevc-rpivid-check: symbol ${rs}: NO"; rbad=1; }
 	done
-	for rs in 'RPIVID-CHECK verdict=' 'rpivid: hardware HEVC decode' '/dev/vcmbox' '/tmp/.rpivid.lock'; do
+	for rs in 'RPIVID-CHECK verdict=' 'rpivid: hardware HEVC decode' '/dev/vcmbox' '/tmp/.rpivid.lock' 'RPIVID-CHECK zc frames=' \
+			'/dev/dri/renderD128' 'rpivid: drm_prime output'; do
 		[ "$(nl_count_strings "${VP_OUT}/hevc-rpivid-check.stripped" "${rs}")" != 0 ] || { echo "video_player: hevc-rpivid-check: string '${rs}': 0"; rbad=1; }
 	done
 	[ "${rbad}" = 0 ] || b_die "video_player: hevc-rpivid-check: verification failed (see above)"
