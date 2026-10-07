@@ -15,6 +15,8 @@
 #            B6_SOAK_ARGS: more browser options (the process model: --process-cache=N,
 #            --prewarm, --no-process-swap, --hang-recovery=S, --stall-secs=S);
 #            B6_WEBKIT_DEBUG: WebKit log channels (WEBKIT_DEBUG; a release_log build only)
+#   (all modes but sites) B6_BROWSER_ARGS: the raster/transport options, default /bin/browser's
+#            "--dmabuf --webgl" (GPU raster); "--cpu-rendering" was the default before 2026-10-07
 #   start    the UI start-up with what the soak adds to it: a persistent session and the web
 #            process extensions, B6_START_RUNS (4) browser runs on the start page with
 #            --exit-after-load, each given B6_START_SECS (60) before it counts as hung and is
@@ -160,7 +162,7 @@ inner() {
 			files 0
 			for run in ${runs}; do
 				echo "B6 persist run=${run} start url=${WIKI} t=${SECONDS}"
-				"${BROWSER}" --cpu-rendering "${WIKI}" &
+				"${BROWSER}" ${B6_BROWSER_ARGS---dmabuf --webgl} "${WIKI}" &
 				pids=($!)
 				pause "${B6_PERSIST_SECS:-100}"
 				kill -TERM "${pids[0]}" 2>/dev/null
@@ -178,7 +180,7 @@ inner() {
 			echo "B6 soak args=${B6_SOAK_ARGS:-none} webkit_debug=${B6_WEBKIT_DEBUG:-none}"
 			shm_stats
 			WPE_BROWSER_CYCLE=/usr/share/wpe-browser/b6-sites.txt WPE_BROWSER_CYCLE_SECS=${B6_SOAK_CYCLE_SECS:-60} \
-				WPE_BROWSER_RSS_SECS=${every} "${BROWSER}" --cpu-rendering \
+				WPE_BROWSER_RSS_SECS=${every} "${BROWSER}" ${B6_BROWSER_ARGS---dmabuf --webgl} \
 				--web-extensions=/usr/lib/wpe-browser/pi-extensions "${args[@]}" &
 			p=$!
 			pids=("${p}")
@@ -196,7 +198,7 @@ inner() {
 			local runs=${B6_START_RUNS:-4} secs=${B6_START_SECS:-60} run p waited pass=0
 			for ((run = 1; run <= runs; run++)); do
 				echo "B6 start run=${run} t=${SECONDS}"
-				"${BROWSER}" --cpu-rendering --web-extensions=/usr/lib/wpe-browser/pi-extensions --exit-after-load \
+				"${BROWSER}" ${B6_BROWSER_ARGS---dmabuf --webgl} --web-extensions=/usr/lib/wpe-browser/pi-extensions --exit-after-load \
 					/usr/share/wpe-browser/start.html &
 				p=$!
 				pids=("${p}")
@@ -236,14 +238,14 @@ inner() {
 				"360:key:ctrl+q"
 			)
 			local IFS=,
-			WPE_BROWSER_AUTO="${steps[*]}" "${BROWSER}" --cpu-rendering &
+			WPE_BROWSER_AUTO="${steps[*]}" "${BROWSER}" ${B6_BROWSER_ARGS---dmabuf --webgl} &
 			unset IFS
 			pids=($!)
 			wait "${pids[0]}"
 			echo "B6 keys browser rc=$? t=${SECONDS}"
 			;;
 		keys-hid)
-			"${BROWSER}" --cpu-rendering &
+			"${BROWSER}" ${B6_BROWSER_ARGS---dmabuf --webgl} &
 			pids=($!)
 			# libinput-phoenix writes its raw-mode byte when it opens the file: the handshake, and
 			# what keeps the reports 8-byte aligned (they start at offset 1)
