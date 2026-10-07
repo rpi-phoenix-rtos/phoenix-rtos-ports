@@ -13,7 +13,8 @@
 #   - cookies (no third-party ones), local storage and HSTS in $HOME/.local/share/wpe-browser,
 #     the HTTP disk cache in $HOME/.cache/wpe-browser ($HOME is /root on the Pi: the persistent
 #     NFS or SD root, never the RAM /tmp);
-#   - Skia's CPU raster, a 1280x960 window;
+#   - Skia's GPU raster on the V3D, a 1280x960 window (build 47 A/B: Speedometer 1.256 vs 1.168
+#     for CPU raster over shared memory, MotionMark-quick 40.9 vs 5.0);
 #   - frames to labwc as dma-bufs (wpe-browser --dmabuf): the web process renders into GPU
 #     textures that labwc composites directly. Shared memory (BROWSER_DMABUF=0) adds a GPU
 #     readback in the web process and two more copies of every frame (wl_shm, labwc's upload)
@@ -24,10 +25,11 @@
 # it only with Ctrl+L or when the pointer touches the top edge.
 #
 # Environment: BROWSER_SIZE (WxH, default 1280x960), BROWSER_DMABUF=0 (shared-memory frames
-# instead of dma-bufs), BROWSER_GPU=1 (Skia's GPU raster on the V3D instead of the CPU),
-# BROWSER_FRAME_AHEAD=1 (the web process renders the next frame while labwc shows this one),
-# BROWSER_WEBGL=1 (WebGL, in a build with the port's USE flag webgl) -- the last three off until
-# their Pi gates pass -- and wpe-browser's own WPE_BROWSER_* test knobs (passed through). Outside
+# instead of dma-bufs), BROWSER_GPU=0 (Skia's CPU raster instead of the V3D),
+# BROWSER_WEBGL=0 (no WebGL; on by default in a build with the port's USE flag webgl),
+# BROWSER_FRAME_AHEAD=1 (the web process renders the next frame while labwc shows this one; off:
+# no measurable gain since build 46) and wpe-browser's own WPE_BROWSER_* test knobs (passed
+# through). Outside
 # the session (WAYLAND_DISPLAY unset) the first $XDG_RUNTIME_DIR/wayland-N socket (default
 # /tmp/xdg) is used.
 #
@@ -45,8 +47,8 @@ if [ -z "${WAYLAND_DISPLAY:-}" ]; then
 	done
 fi
 args=(--size="${BROWSER_SIZE:-1280x960}")
-[ "${BROWSER_GPU:-0}" = 1 ] || args+=(--cpu-rendering)
+[ "${BROWSER_GPU:-1}" = 1 ] || args+=(--cpu-rendering)
 [ "${BROWSER_DMABUF:-1}" = 0 ] || args+=(--dmabuf)
 [ "${BROWSER_FRAME_AHEAD:-0}" != 1 ] || args+=(--frame-ahead)
-[ "${BROWSER_WEBGL:-0}" != 1 ] || args+=(--webgl)
+[ "${BROWSER_WEBGL:-1}" != 1 ] || args+=(--webgl)
 exec /usr/bin/wpe-browser "${args[@]}" "$@"
