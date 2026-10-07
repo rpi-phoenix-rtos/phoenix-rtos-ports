@@ -12,7 +12,9 @@
  * allocation; this is how the FFmpeg hwaccel is held to the HW-proven reference
  * player (tools/hevc-decode/hevc-m2.c).
  *
- * Environment: MOCK_LOG=<file> (the log; default stdout), MOCK_FAIL_AT=<n> (picture n
+ * Environment: MOCK_ISR_RACE=1 (an interrupt handler is registered, and it runs inside the
+ * waiter's read of the interrupt controller each time that read sees a completion: both observe
+ * the same completion, the race that left a stale phase-2 completion on the Pi), MOCK_LOG=<file> (the log; default stdout), MOCK_FAIL_AT=<n> (picture n
  * fails phase 1: CFSTATUS != CFNUM), MOCK_GOLDEN=<file> (phase 2 "decodes" picture POC p
  * by writing frame p of this raw yuv420p / yuv420p10le file, display order, into the
  * output buffers in the block's SAND layout: then the decoder's output path -- de-tiling,
@@ -201,13 +203,20 @@ int vcmbox_call(uint32_t tag, uint32_t valBufSize, const uint32_t *in, uint32_t 
 }
 
 
+static int (*isr_fn)(unsigned int, void *);
+static int in_isr;
+
+
 int interrupt(unsigned int n, int (*f)(unsigned int, void *), void *arg, handle_t queue, handle_t *handle)
 {
 	(void)n;
-	(void)f;
 	(void)arg;
 	(void)queue;
-	(void)handle;
+	if (getenv("MOCK_ISR_RACE") != NULL) {
+		isr_fn = f;
+		*handle = 3;
+		return 0;
+	}
 	return -ENOSYS; /* the decoders poll the interrupt controller instead */
 }
 
@@ -509,7 +518,15 @@ static void phase2(void)
 static uint32_t mmio_rd(const volatile uint8_t *base, uint32_t off)
 {
 	if (base == intc) {
-		return (off == ARG_IC_ICTRL) ? ictrl : 0u;
+		uint32_t v = (off == ARG_IC_ICTRL) ? ictrl : 0u;
+
+		if ((off == ARG_IC_ICTRL) && (isr_fn != NULL) && !in_isr && ((v & (ACTIVE1_INT_SET | ACTIVE2_INT_SET)) != 0u)) {
+			/* the handler runs between this read and the waiter's use of it */
+			in_isr = 1;
+			(void)isr_fn(0, NULL);
+			in_isr = 0;
+		}
+		return v;
 	}
 	if (off == RPI_VERSION) {
 		return RPIVID_EXPECT_VER;

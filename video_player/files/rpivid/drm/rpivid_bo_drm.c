@@ -15,7 +15,9 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sys/mman.h>
@@ -131,10 +133,20 @@ static void bo_free(void *opaque, RpividDrmBuffer *b)
 }
 
 
+static uint64_t now_ms(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+}
+
+
 static int bo_wait_idle(void *opaque, const RpividDrmBuffer *b)
 {
 	struct rpivid_v3d_wait_bo wb;
-	int i;
+	uint64_t t0 = now_ms(), dt;
+	int i, rc = -ETIMEDOUT;
 
 	(void)opaque;
 	/* the server parks a wait for at most 2 s (V3DA_WAIT_MAX_MS): a few tries */
@@ -143,13 +155,21 @@ static int bo_wait_idle(void *opaque, const RpividDrmBuffer *b)
 		wb.handle = b->handle;
 		wb.timeout_ns = 2000000000ull;
 		if (drmIoctl(render_fd, RPIVID_V3D_WAIT_BO, &wb) == 0) {
-			return 0;
+			rc = 0;
+			break;
 		}
+		rc = -errno;
 		if ((errno != ETIME) && (errno != ETIMEDOUT) && (errno != EBUSY) && (errno != EINTR)) {
 			break;
 		}
 	}
-	return -errno;
+	/* a picture buffer the GPU held long (a stall to explain): stderr, as the players log */
+	dt = now_ms() - t0;
+	if ((rc != 0) || (dt > 50u)) {
+		fprintf(stderr, "rpivid-bo: WAIT_BO handle %u: %s after %llu ms\n", b->handle, (rc == 0) ? "idle" : strerror(-rc),
+			(unsigned long long)dt);
+	}
+	return rc;
 }
 
 

@@ -133,6 +133,7 @@ typedef struct RPIVIDContext {
 	/* statistics (ns): all frames, and the current reporting window */
 	uint64_t n, sum_slices, sum_p1, sum_p2, sum_detile;
 	uint64_t wn, w_slices, w_p1, w_p2, w_detile;
+	uint32_t stale_total, w_stale;   /* completions already pending when a phase started (rpivid_hw.c) */
 	uint64_t t_start;
 	uint32_t p1_reruns, missing_total;
 	int zc;                        /* drm_prime output */
@@ -873,10 +874,11 @@ static int rpivid_uninit(AVCodecContext *avctx)
 	}
 	if (ctx->n != 0u) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: %" PRIu64 " pictures on the block: hw %.2f ms (phase 1 %.2f, phase 2 %.2f), "
-			"SAND->planar %.2f ms, slices (bitstream copy, commands) %.2f ms per picture; %u phase-1 reruns, %u missing references, %d buffers\n",
+			"SAND->planar %.2f ms, slices (bitstream copy, commands) %.2f ms per picture; %u phase-1 reruns, %u missing references, %d buffers, "
+			"%u stale completions\n",
 			ctx->n, (ctx->sum_p1 + ctx->sum_p2) / 1e6 / ctx->n, ctx->sum_p1 / 1e6 / ctx->n, ctx->sum_p2 / 1e6 / ctx->n,
 			ctx->sum_detile / 1e6 / ctx->n, ctx->sum_slices / 1e6 / ctx->n, ctx->p1_reruns, ctx->missing_total,
-			(ctx->pool != NULL) ? ctx->pool->nbufs : 0);
+			(ctx->pool != NULL) ? ctx->pool->nbufs : 0, ctx->stale_total);
 	}
 	rpivid_cmd_free(&ctx->cmd);
 	rpivid_dma_free(&ctx->bs);
@@ -1378,10 +1380,11 @@ static void stat_window(AVCodecContext *avctx, RPIVIDContext *ctx)
 	if (ctx->wn < STAT_EVERY) {
 		return;
 	}
-	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms%s\n", ctx->n,
+	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms%s stale=%u\n", ctx->n,
 		(ctx->w_p1 + ctx->w_p2) / 1e6 / ctx->wn, ctx->w_p1 / 1e6 / ctx->wn, ctx->w_p2 / 1e6 / ctx->wn, ctx->w_detile / 1e6 / ctx->wn,
-		ctx->w_slices / 1e6 / ctx->wn, ctx->zc ? " zc=1" : "");
+		ctx->w_slices / 1e6 / ctx->wn, ctx->zc ? " zc=1" : "", ctx->w_stale);
 	ctx->wn = ctx->w_slices = ctx->w_p1 = ctx->w_p2 = ctx->w_detile = 0;
+	ctx->w_stale = 0;
 }
 
 
@@ -1447,6 +1450,13 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	t1 = (uint64_t)av_gettime_relative();
 	rc = rpivid_hw_decode(ctx->hw, &j, &st);
 	t2 = (uint64_t)av_gettime_relative();
+	ctx->stale_total += st.stale;
+	ctx->w_stale += st.stale;
+	if ((rc == 0) && (st.p1_ns + st.p2_ns > 100000000u)) {
+		/* a decode that waited long for the block (a stall to explain) */
+		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d took %.0f ms on the block (phase 1 %.0f, phase 2 %.0f)\n", s->poc,
+			(st.p1_ns + st.p2_ns) / 1e6, st.p1_ns / 1e6, st.p2_ns / 1e6);
+	}
 	if (st.p1_runs > 1u) {
 		ctx->p1_reruns += st.p1_runs - 1u;
 	}

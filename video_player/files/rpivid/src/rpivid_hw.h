@@ -49,6 +49,7 @@ typedef struct {
 typedef struct {
 	uint64_t p1_ns, p2_ns;         /* phase durations */
 	uint32_t p1_runs;              /* phase-1 runs (> 1: a PU/coefficient buffer was enlarged) */
+	uint32_t stale;                /* completions already pending when a phase was started (cleared) */
 	uint32_t status, cfstatus, cfnum;
 } rpivid_hw_stat_t;
 

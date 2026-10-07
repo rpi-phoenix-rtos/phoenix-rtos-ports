@@ -214,10 +214,40 @@ static int hw_isr(unsigned int n, void *arg)
 	ic = rd(intc, ARG_IC_ICTRL);
 	a = ic & (ACTIVE1_INT_SET | ACTIVE2_INT_SET);
 	if (a != 0u) {
-		irq_active |= a;
+		__atomic_fetch_or(&irq_active, a, __ATOMIC_SEQ_CST);
 		wr(intc, ARG_IC_ICTRL, ic & ~SET_ZERO_MASK);
 	}
 	return 1;
+}
+
+
+/* One completion, two observers: the interrupt handler and the waiter (which also polls the
+ * controller) can both see it, and the handler's mark can land after the waiter consumed the
+ * completion. Left there, it would end the next wait of that phase at once, before the block
+ * finished -- the output read while being written, and the next phase started on a busy block
+ * (which then stops responding). So before a phase starts, a completion of it that is already
+ * pending is the previous one's: forgotten. 1 if there was one. */
+static int clear_stale(rpivid_hw_t *hw, uint32_t bit)
+{
+	uint32_t ic;
+	int stale = 0;
+
+	if (hw->have_irq) {
+		mutexLock(hw->irq_mtx);
+	}
+	if ((__atomic_fetch_and(&irq_active, ~bit, __ATOMIC_SEQ_CST) & bit) != 0u) {
+		stale = 1;
+	}
+	ic = rd(hw->intc, ARG_IC_ICTRL);
+	if ((ic & bit) != 0u) {
+		/* write-1-to-clear this phase's bit only; the enables written back as read */
+		wr(hw->intc, ARG_IC_ICTRL, (ic & ~SET_ZERO_MASK & ~(ACTIVE1_INT_SET | ACTIVE2_INT_SET)) | bit);
+		stale = 1;
+	}
+	if (hw->have_irq) {
+		mutexUnlock(hw->irq_mtx);
+	}
+	return stale;
 }
 
 
@@ -232,14 +262,15 @@ static int wait_active(rpivid_hw_t *hw, uint32_t bit, int timeout_ms)
 		mutexLock(hw->irq_mtx);
 	}
 	for (;;) {
-		if ((irq_active & bit) != 0u) {
-			irq_active &= ~bit;
+		if ((__atomic_fetch_and(&irq_active, ~bit, __ATOMIC_SEQ_CST) & bit) != 0u) {
 			rc = 0;
 			break;
 		}
 		ic = rd(hw->intc, ARG_IC_ICTRL);
 		if ((ic & bit) != 0u) {
 			wr(hw->intc, ARG_IC_ICTRL, ic & ~SET_ZERO_MASK);
+			/* the handler may have marked the same completion meanwhile */
+			__atomic_fetch_and(&irq_active, ~bit, __ATOMIC_SEQ_CST);
 			rc = 0;
 			break;
 		}
@@ -590,6 +621,7 @@ int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *s
 		wr(hw->regs, RPI_COEFFWBASE, RPI_VC_ADDR(hw->coeff.pa));
 		wr(hw->regs, RPI_COEFFWSTRIDE, RPI_VC_LEN(coeff_stride));
 		wr(hw->regs, RPI_CFNUM, j->cmd_len);
+		st->stale += (uint32_t)clear_stale(hw, ACTIVE1_INT_SET);
 		wr(hw->regs, RPI_CFBASE, RPI_VC_ADDR(hw->cmd.pa));
 		if (wait_active(hw, ACTIVE1_INT_SET, P1_TIMEOUT_MS) < 0) {
 			hw_wedged = 1;
@@ -642,6 +674,7 @@ int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *s
 	wr(hw->regs, RPI_MVBASE, RPI_VC_ADDR(j->mv));
 	wr(hw->regs, RPI_COLBASE, RPI_VC_ADDR(j->col));
 	rpivid_dma_fence();
+	st->stale += (uint32_t)clear_stale(hw, ACTIVE2_INT_SET);
 	wr(hw->regs, RPI_NUMROWS, j->ctb_rows);
 	if (wait_active(hw, ACTIVE2_INT_SET, P2_TIMEOUT_MS) < 0) {
 		hw_wedged = 1;

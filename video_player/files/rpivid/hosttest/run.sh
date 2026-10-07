@@ -35,7 +35,8 @@
 # every 8-bit clip BIT-EXACT too; and a forced CPU fallback (FFMPEG_RPIVID_REFUSE_AT=3: the
 # block refuses its 4th picture; MOCK_FAIL_AT=5: it fails its 6th): pictures are dropped up to
 # the next IRAP, then the CPU decoder goes on, and every frame emitted, in either output, must
-# equal the CPU decoder's frame of the same pts.
+# equal the CPU decoder's frame of the same pts. Also per clip: the interrupt path
+# (MOCK_ISR_RACE=1), BIT-EXACT with no stale completion.
 #
 # Copyright 2026 Phoenix Systems
 #
@@ -185,6 +186,17 @@ if [ "${loop}" = 1 ]; then
 			echo "LOOP      ${b} threads=${t}: ${v}"
 			case "${v}" in *BIT-EXACT*hw_used=1) ;; *) n_loop_bad=$((n_loop_bad + 1)) ;; esac
 		done
+		# the interrupt path (MOCK_ISR_RACE=1: a handler registered, running inside the waiter's
+		# controller read: both see one completion): still BIT-EXACT, no completion left stale
+		MOCK_ISR_RACE=1 MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_LOG=/dev/null \
+			"${work}/hevc-rpivid-check" -cpuref -l 2 -T 1 "${c}" >"${work}/${b}.isr.out" 2>&1 || true
+		if grep -q 'ERROR: AddressSanitizer' "${work}/${b}.isr.out"; then
+			echo "ASAN      ${b} isr"; grep -A12 'ERROR: AddressSanitizer' "${work}/${b}.isr.out" | head -20; exit 1
+		fi
+		v="$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]* first_bad=[0-9-]* hw_used=[0-9]' "${work}/${b}.isr.out" || echo 'verdict=none')"
+		z="$(grep -o 'completion by interrupt\|[0-9]* stale completions' "${work}/${b}.isr.out" | tr '\n' ' ')"
+		echo "LOOP-ISR  ${b}: ${v}; ${z}"
+		case "${v} ${z}" in *BIT-EXACT*hw_used=1*"completion by interrupt"*" 0 stale completions"*) ;; *) n_loop_bad=$((n_loop_bad + 1)) ;; esac
 		# zero copy: 8-bit only (10-bit streams keep system-memory frames: nothing new to see)
 		[ "${pf}" = yuv420p ] || continue
 		for t in 1 "${threads}"; do
