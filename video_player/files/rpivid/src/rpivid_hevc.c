@@ -245,7 +245,7 @@ static const struct {
 	int on;                        /* in the default set (level 1) */
 } tools[T_NTOOLS] = {
 	[T_CTB32] = { "ctb32", "32x32 CTBs", 1 },
-	[T_CTB16] = { "ctb16", "16x16 CTBs", 1 },
+	[T_CTB16] = { "ctb16", "16x16 CTBs", 0 },
 	[T_BLOCKS] = { "blocks", "coding blocks >= 16 or transform blocks other than 4..32", 1 },
 	[T_TU_DEPTH_INTRA] = { "tu_depth_intra", "transform tree depth > 0 in intra CUs", 1 },
 	[T_TU_DEPTH_INTER] = { "tu_depth_inter", "transform tree depth > 0 in inter CUs", 1 },
@@ -722,10 +722,7 @@ static void fill_pic(RPIVIDContext *ctx, const HEVCContext *s)
 	}
 	p->log2_parallel_merge_level = (uint8_t)pps->log2_parallel_merge_level;
 	p->slice_temporal_mvp = s->sh.slice_temporal_mvp_enabled_flag;
-	/* a one-slice picture keeps the exact form tools/hevc-decode proved (rpivid_cmd.h);
-	 * a picture of several slices follows the Linux driver throughout */
 	p->one_slice = (uint8_t)ctx->one_slice;
-	p->compat_intra_no_msgs = (uint8_t)ctx->one_slice;
 }
 
 
