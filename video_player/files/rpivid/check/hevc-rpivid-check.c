@@ -5,7 +5,7 @@
  * frame with a reference -- the CPU decoder, or a host's ffmpeg -f framemd5 -- and time it
  *
  *     hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc]
- *                       [-cpuref] [-q] [-from name] <file | directory>...
+ *                       [-cpuref] [-zc] [-hold n] [-q] [-from name] <file | directory>...
  *
  *   -n     stop after this many frames (default: the whole file)
  *   -t     CPU decoder threads (default 4)
@@ -21,6 +21,15 @@
  *          independently of the other pass; counts in the pass lines. The decoder then
  *          computes an MD5 of every picture itself: that is in decode_ms/frame
  *   -cpuref  compare with the CPU decoder even where a <file>.md5 reference exists
+ *   -zc    the hardware pass with zero-copy output (hevc_rpivid rpivid_out=drm_prime,
+ *          libavcodec/rpivid_drm.h): AV_PIX_FMT_DRM_PRIME frames of the block's buffers --
+ *          GPU buffers (render-server BOs with a dma-buf) where this build has them, else the
+ *          decoder's own memory -- each read back to system memory on the CPU
+ *          (rpivid_drm_frame_to_planar) to be hashed: the zero-copy path held to the same
+ *          references. Frame threads are off in this mode (-T > 1 = slice threads).
+ *   -hold  with -zc: keep the last n frames referenced (default 4), as a compositor holds
+ *          pictures, and hash each again when it is let go: a buffer reused while still
+ *          held shows as held_bad= (counted as mismatches)
  *   -q     only this tool's lines and the decoder's rpivid lines (default with a
  *          directory or several files)
  *   -from  skip the files listed before the one of this name (to go on after a stream that
@@ -74,6 +83,7 @@
 #endif
 
 #include <libavcodec/avcodec.h>
+#include <libavcodec/rpivid_drm.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avstring.h>
 #include <libavutil/imgutils.h>
@@ -81,6 +91,10 @@
 #include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
+
+#ifdef RPIVID_CHECK_DRM
+#include "rpivid_bo_drm.h"
+#endif
 
 typedef struct {
 	const char *name;
@@ -95,8 +109,15 @@ typedef struct {
 	double demux_s;                /* of the wall time: reading the file (av_read_frame) */
 	int w, h;
 	enum AVPixelFormat fmt;
+	/* -zc */
+	int zc_frames;                 /* DRM_PRIME frames received */
+	AVFrame *rb;                   /* their system-memory copy */
+	AVFrame *held[64];
+	uint8_t held_md5[64][16];
+	int nheld, held_checked, held_bad;
 } pass_t;
 
+static int zc_mode, zc_hold = 4, zc_gpu = -1;
 static int hw_used, hw_fallback;
 static int print_md5, crc_mode, crc_checked, crc_bad, quiet;
 static char hw_tools[512] = "-", hw_nondefault[512] = "-", hw_cpu_why[200];
@@ -265,9 +286,63 @@ static int frame_md5(struct AVMD5 *md5, uint8_t out[16], const AVFrame *f)
 }
 
 
-static int add_frame(pass_t *p, const AVFrame *f)
+/* -zc: a DRM_PRIME frame read back into p->rb (reused), at the frame's own size */
+static int read_back(pass_t *p, const AVFrame *frame)
+{
+	if ((p->rb == NULL) && ((p->rb = av_frame_alloc()) == NULL)) {
+		return -1;
+	}
+	if ((p->rb->buf[0] != NULL) && ((p->rb->width < frame->width) || (p->rb->height < frame->height))) {
+		av_frame_unref(p->rb);
+	}
+	if (rpivid_drm_frame_to_planar(p->rb, frame) < 0) {
+		return -1;
+	}
+	/* a buffer of a larger picture: hash exactly this frame's size */
+	p->rb->width = frame->width;
+	p->rb->height = frame->height;
+	return 0;
+}
+
+
+/* -zc: let the oldest held frame go, hashing it again first */
+static void release_held(pass_t *p)
+{
+	uint8_t md5[16];
+	int i;
+
+	if (p->nheld == 0) {
+		return;
+	}
+	p->held_checked++;
+	if ((read_back(p, p->held[0]) < 0) || (frame_md5(p->md5ctx, md5, p->rb) < 0) || (memcmp(md5, p->held_md5[0], 16) != 0)) {
+		if (p->held_bad++ < 5) {
+			printf("RPIVID-CHECK zc held frame pts=%" PRId64 " changed while it was held\n", p->held[0]->pts);
+		}
+	}
+	av_frame_free(&p->held[0]);
+	for (i = 1; i < p->nheld; i++) {
+		p->held[i - 1] = p->held[i];
+		memcpy(p->held_md5[i - 1], p->held_md5[i], 16);
+	}
+	p->nheld--;
+}
+
+
+static int add_frame(pass_t *p, const AVFrame *frame)
 {
 	int64_t t0 = av_gettime_relative();
+	const AVFrame *f = frame;
+
+	if (frame->format == AV_PIX_FMT_DRM_PRIME) {
+		/* -zc: the block's buffer, read back for the hash */
+		if (read_back(p, frame) < 0) {
+			printf("RPIVID-CHECK error: a DRM_PRIME frame that is not hevc_rpivid's\n");
+			return -1;
+		}
+		f = p->rb;
+		p->zc_frames++;
+	}
 
 	if (p->n == p->cap) {
 		int ncap = p->cap ? p->cap * 2 : 1024;
@@ -298,7 +373,7 @@ static int add_frame(pass_t *p, const AVFrame *f)
 	}
 	p->w = f->width;
 	p->h = f->height;
-	p->fmt = f->format;
+	p->fmt = frame->format;
 	if (print_md5) {
 		char hex[33];
 		int i;
@@ -309,6 +384,17 @@ static int add_frame(pass_t *p, const AVFrame *f)
 		printf("MD5 %s %d %" PRId64 " %s\n", p->name, p->n, f->pts, hex);
 	}
 	p->n++;
+	if ((frame->format == AV_PIX_FMT_DRM_PRIME) && (zc_hold > 0) && p->hash) {
+		if (p->nheld == zc_hold) {
+			release_held(p);
+		}
+		p->held[p->nheld] = av_frame_clone(frame);
+		if (p->held[p->nheld] == NULL) {
+			return -1;
+		}
+		memcpy(p->held_md5[p->nheld], p->md5[p->n - 1], 16);
+		p->nheld++;
+	}
 	p->check_s += (av_gettime_relative() - t0) / 1e6;
 	return 0;
 }
@@ -367,6 +453,11 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 		goto out;
 	}
 	cc->thread_count = threads;
+	if (zc_mode && (level != 0)) {
+		/* drm_prime output needs no frame threads (rpivid_drm.h) */
+		cc->thread_type = FF_THREAD_SLICE;
+		av_dict_set(&opts, "rpivid_out", "drm_prime", 0);
+	}
 	if (crc) {
 		cc->err_recognition |= AV_EF_CRCCHECK;
 	}
@@ -420,6 +511,9 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 			}
 		}
 	}
+	while (p->nheld > 0) {
+		release_held(p);
+	}
 	p->wall = (av_gettime_relative() - t0) / 1e6;
 	p->cpu = (c0 >= 0.0) ? cpu_seconds() - c0 : -1.0;
 	ret = 0;
@@ -434,12 +528,20 @@ static int run_pass(pass_t *p, const char *file, const char *decoder, int thread
 		p->w, p->h, av_get_pix_fmt_name(p->fmt), p->wall, p->n ? p->wall * 1000.0 / p->n : 0.0, (p->wall > 0.0) ? p->n / p->wall : 0.0,
 		cpu, p->errors, crc_checked, crc_bad, p->n ? (p->wall - p->check_s - p->demux_s) * 1000.0 / p->n : 0.0,
 		p->n ? p->demux_s * 1000.0 / p->n : 0.0, p->n ? p->check_s * 1000.0 / p->n : 0.0);
+	if (zc_mode && (level != 0)) {
+		printf("RPIVID-CHECK zc frames=%d drm_prime=%d buffers=%s held_checked=%d held_bad=%d\n", p->n, p->zc_frames,
+			(zc_gpu > 0) ? "gpu" : "own", p->held_checked, p->held_bad);
+	}
 
 out:
 	avcodec_free_context(&cc);
 	avformat_close_input(&fc);
 	av_packet_free(&pkt);
 	av_frame_free(&frame);
+	while (p->nheld > 0) {
+		av_frame_free(&p->held[--p->nheld]);
+	}
+	av_frame_free(&p->rb);
 	av_freep(&p->md5ctx);
 	return ret;
 }
@@ -610,7 +712,10 @@ static int check_file(const char *file, const opts_t *o)
 			((bad == 0) && (hw.n == cpu.n)) ? "BIT-EXACT" : "MISMATCH", hw.n, bad, first_bad, hw_used, hw_fallback,
 			(hw.wall > 0.0) ? cpu.wall / hw.wall : 0.0);
 	}
-	mismatches = bad + abs(hw.n - nref);
+	mismatches = bad + abs(hw.n - nref) + hw.held_bad;
+	if (zc_mode && (hw.zc_frames == 0) && !hw_fallback && hw_used) {
+		printf("RPIVID-CHECK zc warning: no DRM_PRIME frame (drm_prime output not taken: see the rpivid: lines)\n");
+	}
 	fallback = !hw_used || hw_fallback;
 	result = (mismatches != 0) ? "FAIL" : (fallback ? "CPU" : "PASS");
 	ret = (mismatches != 0) ? 1 : (fallback ? 3 : 0);
@@ -755,6 +860,13 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-cpuref")) {
 			o.cpuref = 1;
 		}
+		else if (!strcmp(argv[i], "-zc")) {
+			zc_mode = 1;
+		}
+		else if (!strcmp(argv[i], "-hold") && (i + 1 < argc)) {
+			zc_hold = atoi(argv[++i]);
+			zc_hold = (zc_hold < 0) ? 0 : ((zc_hold > 64) ? 64 : zc_hold);
+		}
 		else if (!strcmp(argv[i], "-q")) {
 			q = 1;
 		}
@@ -770,14 +882,27 @@ int main(int argc, char **argv)
 		}
 	}
 	if (usage || (nfiles == 0) || (!o.do_hw && !o.do_cpu)) {
-		printf("usage: hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc] [-cpuref] [-q]"
-			" [-from name] <file | directory>...\n");
+		printf("usage: hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc] [-cpuref] [-zc]"
+			" [-hold n] [-q] [-from name] <file | directory>...\n");
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	crc_mode = o.crc;
 	quiet = (q >= 0) ? q : (nfiles > 1);
 	av_log_set_callback(log_cb);
+	if (zc_mode) {
+#ifdef RPIVID_CHECK_DRM
+		/* GPU buffers: render-server BOs with a dma-buf, as a player gets them */
+		int e = rpivid_bo_drm_install();
+
+		zc_gpu = (e == 0);
+		if (e != 0) {
+			printf("RPIVID-CHECK zc warning: no render node (%s): the decoder's own buffers\n", av_err2str(e));
+		}
+#else
+		zc_gpu = 0;
+#endif
+	}
 
 	rc = 0;
 	for (i = 0; i < nfiles; i++) {

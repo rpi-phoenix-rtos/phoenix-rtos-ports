@@ -14,6 +14,14 @@
  * with the HEVCFrame for as long as hevcdec.c keeps it, which is exactly as long as the
  * picture can be a reference.
  *
+ * Two outputs (the decoder option rpivid_out, rpivid_drm.h):
+ *   planar     ff_hevc_rpivid_hwaccel: the SAND pictures (two cached buffers each, luma and
+ *              chroma) de-tiled by the CPU into the system-memory frames hevcdec.c allocated
+ *   drm_prime  ff_hevc_rpivid_drm_hwaccel (zero copy): one buffer per picture in the
+ *              NV12_COL128 layout, from the consumer's buffer operations (GPU-importable
+ *              BOs), allocated as the frame itself (alloc_frame) and returned as an
+ *              AV_PIX_FMT_DRM_PRIME frame; the frame's buffer reference keeps it from reuse.
+ *
  * Copyright 2026 Phoenix Systems
  *
  * This file is part of Phoenix-RTOS.
@@ -29,7 +37,11 @@
 #include "libavutil/thread.h"
 #include "libavutil/time.h"
 
+#include "libavutil/hwcontext_drm.h"
+#include "libavutil/imgutils.h"
+
 #include "avcodec.h"
+#include "decode.h"
 #include "get_bits.h"
 #include "golomb.h"
 #include "hevcdec.h"
@@ -38,15 +50,35 @@
 #include "refstruct.h"
 
 #include "rpivid_cmd.h"
+#include "rpivid_drm.h"
 #include "rpivid_hevc.h"
 #include "rpivid_hw.h"
 #include "rpivid_sand.h"
 
 #define STAT_EVERY 300
 
+/* DRM_FORMAT_NV12 and DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(h) (drm_fourcc.h) */
+#define RPIVID_DRM_NV12         ((uint32_t)'N' | ((uint32_t)'V' << 8) | ((uint32_t)'1' << 16) | ((uint32_t)'2' << 24))
+#define RPIVID_DRM_SAND128(h)   ((UINT64_C(0x07) << 56) | (((uint64_t)(h) << 8) & UINT64_C(0x00ffffffffffff00)) | 4u)
+#define RPIVID_DRM_MAGIC        0x52504452u   /* "RDPR" */
+
+struct RPIVIDPool;
+
+/* what a DRM_PRIME frame's buf[0] holds: data[0] points at desc */
+typedef struct RPIVIDDrm {
+	AVDRMFrameDescriptor desc;     /* first: data[0] == the RPIVIDDrm */
+	uint32_t magic;
+	struct RPIVIDBuf *buf;
+} RPIVIDDrm;
+
 typedef struct RPIVIDBuf {
-	rpivid_dma_t y, c, mv;
+	rpivid_dma_t y, c, mv;         /* drm_prime: y and c are views of one buffer */
 	struct RPIVIDBuf *next;
+	struct RPIVIDPool *pool;
+	RpividDrmBuffer bo;            /* drm_prime: the picture buffer */
+	int has_bo;                    /* from the buffer operations (else rpivid_dma_alloc'd, in y) */
+	int handed_out;                /* drm_prime: it was a frame before (wait_idle on reuse) */
+	RPIVIDDrm drm;
 } RPIVIDBuf;
 
 /* The SAND buffers of one stream geometry. Frames hold a reference, so buffers
@@ -56,6 +88,10 @@ typedef struct RPIVIDPool {
 	int refs;
 	rpivid_geom_t g;
 	int with_mv;
+	int zc;                        /* drm_prime: one buffer per picture, g from rpivid_geom_col128 */
+	uint32_t width, height;        /* coded size */
+	RpividDrmBufferOps ops;        /* drm_prime, have_ops: where the buffers come from */
+	int have_ops;
 	RPIVIDBuf *free;
 	int nbufs;
 } RPIVIDPool;
@@ -64,6 +100,7 @@ typedef struct RPIVIDPool {
 typedef struct RPIVIDFrame {
 	RPIVIDPool *pool;
 	RPIVIDBuf *buf;
+	AVBufferRef *bref;             /* drm_prime: a reference to the frame's buffer */
 	int decoded;                   /* the block wrote buf: usable as a reference */
 	int has_mv;                    /* and its motion vectors (a collocated picture) */
 } RPIVIDFrame;
@@ -98,14 +135,33 @@ typedef struct RPIVIDContext {
 	uint64_t wn, w_slices, w_p1, w_p2, w_detile;
 	uint64_t t_start;
 	uint32_t p1_reruns, missing_total;
+	int zc;                        /* drm_prime output */
+	uint32_t refuse_at;            /* FFMPEG_RPIVID_REFUSE_AT: picture number + 1 the block refuses (a test) */
 } RPIVIDContext;
 
 static const FFHWAccel ff_hevc_rpivid_hwaccel;
+static const FFHWAccel ff_hevc_rpivid_drm_hwaccel;
+
+/* the consumer's buffer operations (rpivid_drm_set_buffer_ops) */
+static AVMutex ops_lock = AV_MUTEX_INITIALIZER;
+static RpividDrmBufferOps ops_global;
+static int ops_set;
+
+
+void rpivid_drm_set_buffer_ops(const RpividDrmBufferOps *ops)
+{
+	ff_mutex_lock(&ops_lock);
+	ops_set = (ops != NULL);
+	if (ops != NULL) {
+		ops_global = *ops;
+	}
+	ff_mutex_unlock(&ops_lock);
+}
 
 
 /* ---- the SAND buffer pool ---- */
 
-static RPIVIDPool *pool_new(const rpivid_geom_t *g, int with_mv)
+static RPIVIDPool *pool_new(const rpivid_geom_t *g, int with_mv, int zc, uint32_t width, uint32_t height)
 {
 	RPIVIDPool *p = av_mallocz(sizeof(*p));
 
@@ -116,16 +172,84 @@ static RPIVIDPool *pool_new(const rpivid_geom_t *g, int with_mv)
 	p->refs = 1;
 	p->g = *g;
 	p->with_mv = with_mv;
+	p->zc = zc;
+	p->width = width;
+	p->height = height;
+	if (zc) {
+		ff_mutex_lock(&ops_lock);
+		p->have_ops = ops_set;
+		p->ops = ops_global;
+		ff_mutex_unlock(&ops_lock);
+	}
 	return p;
 }
 
 
-static void buf_free(RPIVIDBuf *b)
+static void buf_free(RPIVIDPool *p, RPIVIDBuf *b)
 {
-	rpivid_dma_free(&b->y);
-	rpivid_dma_free(&b->c);
+	if (!p->zc) {
+		rpivid_dma_free(&b->y);
+		rpivid_dma_free(&b->c);
+	}
+	else if (b->has_bo) {
+		/* y and c are views of the buffer */
+		p->ops.free(p->ops.opaque, &b->bo);
+	}
+	else {
+		rpivid_dma_free(&b->y);   /* c is a view of y's allocation */
+	}
 	rpivid_dma_free(&b->mv);
 	av_free(b);
+}
+
+
+/* drm_prime: one buffer in the NV12_COL128 layout, and the frame descriptor naming it */
+static int buf_alloc_zc(RPIVIDPool *p, RPIVIDBuf *b)
+{
+	AVDRMFrameDescriptor *d = &b->drm.desc;
+	size_t size = p->g.luma_size;
+
+	if (p->have_ops) {
+		memset(&b->bo, 0, sizeof(b->bo));
+		b->bo.fd = -1;
+		if ((p->ops.alloc(p->ops.opaque, size, &b->bo) < 0) || (b->bo.cpu == NULL) || (b->bo.size < size) || (b->bo.pa == 0u)) {
+			return -1;
+		}
+		b->has_bo = 1;
+		b->y.cpu = b->bo.cpu;
+		b->y.pa = b->bo.pa;
+		b->y.size = b->bo.size;
+	}
+	else if (rpivid_dma_alloc(&b->y, size) < 0) {
+		return -1;
+	}
+	else {
+		b->bo.cpu = b->y.cpu;
+		b->bo.pa = b->y.pa;
+		b->bo.size = b->y.size;
+		b->bo.fd = -1;
+	}
+	b->c.cpu = (uint8_t *)b->y.cpu + p->g.chroma_offset;
+	b->c.pa = b->y.pa + p->g.chroma_offset;
+	b->c.size = b->y.size - p->g.chroma_offset;
+
+	memset(&b->drm, 0, sizeof(b->drm));
+	b->drm.magic = RPIVID_DRM_MAGIC;
+	b->drm.buf = b;
+	d->nb_objects = 1;
+	d->objects[0].fd = b->bo.fd;
+	d->objects[0].size = b->bo.size;
+	d->objects[0].format_modifier = RPIVID_DRM_SAND128(p->g.col_height);
+	d->nb_layers = 1;
+	d->layers[0].format = RPIVID_DRM_NV12;
+	d->layers[0].nb_planes = 2;
+	d->layers[0].planes[0].object_index = 0;
+	d->layers[0].planes[0].offset = 0;
+	d->layers[0].planes[0].pitch = (ptrdiff_t)p->width;
+	d->layers[0].planes[1].object_index = 0;
+	d->layers[0].planes[1].offset = (ptrdiff_t)p->g.chroma_offset;
+	d->layers[0].planes[1].pitch = (ptrdiff_t)p->width;
+	return 0;
 }
 
 
@@ -154,7 +278,7 @@ static void pool_unref(RPIVIDPool *p)
 	}
 	while ((b = p->free) != NULL) {
 		p->free = b->next;
-		buf_free(b);
+		buf_free(p, b);
 	}
 	ff_mutex_destroy(&p->lock);
 	av_free(p);
@@ -173,6 +297,15 @@ static RPIVIDBuf *pool_get(RPIVIDPool *p)
 	ff_mutex_unlock(&p->lock);
 	if (b != NULL) {
 		b->next = NULL;
+		/* drm_prime: a buffer a consumer may have given to the GPU is written again only
+		 * once no submitted GPU work reads it */
+		if (b->handed_out && b->has_bo && (p->ops.wait_idle != NULL) && (p->ops.wait_idle(p->ops.opaque, &b->bo) < 0)) {
+			buf_free(p, b);
+			ff_mutex_lock(&p->lock);
+			p->nbufs--;
+			ff_mutex_unlock(&p->lock);
+			return NULL;
+		}
 		return b;
 	}
 
@@ -180,11 +313,19 @@ static RPIVIDBuf *pool_get(RPIVIDPool *p)
 	if (b == NULL) {
 		return NULL;
 	}
+	b->pool = p;
+	if (p->zc) {
+		/* the GPU reads these; the CPU only for a readback or a fallback */
+		if ((buf_alloc_zc(p, b) < 0) || (p->with_mv && (rpivid_dma_alloc(&b->mv, p->g.colmv_size) < 0))) {
+			buf_free(p, b);
+			return NULL;
+		}
+	}
 	/* the pictures are read by the CPU (SAND->planar) and cached: uncached reads of a
 	 * 1080p picture took ~8 ms of one core */
-	if ((rpivid_dma_alloc_cached(&b->y, p->g.luma_size) < 0) || (rpivid_dma_alloc_cached(&b->c, p->g.chroma_size) < 0) ||
+	else if ((rpivid_dma_alloc_cached(&b->y, p->g.luma_size) < 0) || (rpivid_dma_alloc_cached(&b->c, p->g.chroma_size) < 0) ||
 			(p->with_mv && (rpivid_dma_alloc(&b->mv, p->g.colmv_size) < 0))) {
-		buf_free(b);
+		buf_free(p, b);
 		return NULL;
 	}
 	ff_mutex_lock(&p->lock);
@@ -208,10 +349,197 @@ static void rpivid_frame_free(FFRefStructOpaque opaque, void *data)
 	RPIVIDFrame *f = data;
 
 	(void)opaque;
-	if (f->buf != NULL) {
+	if (f->bref != NULL) {
+		av_buffer_unref(&f->bref);   /* drm_prime: the buffer goes back with its last reference */
+	}
+	else if (f->buf != NULL) {
 		pool_put(f->pool, f->buf);
 	}
 	pool_unref(f->pool);
+}
+
+
+/* ---- drm_prime frames ---- */
+
+/* the last reference to a DRM_PRIME frame's buffer is gone */
+static void drm_buf_release(void *opaque, uint8_t *data)
+{
+	RPIVIDBuf *b = opaque;
+	RPIVIDPool *p = b->pool;
+
+	(void)data;
+	pool_put(p, b);
+	pool_unref(p);
+}
+
+
+/* FFHWAccel.alloc_frame (drm_prime): the frame is a pool buffer */
+static int rpivid_alloc_frame(AVCodecContext *avctx, AVFrame *frame)
+{
+	RPIVIDContext *ctx = avctx->internal->hwaccel_priv_data;
+	RPIVIDBuf *b;
+	int ret = ff_attach_decode_data(frame);
+
+	if (ret < 0) {
+		return ret;
+	}
+	b = pool_get(ctx->pool);
+	if (b == NULL) {
+		av_log(avctx, AV_LOG_ERROR, "rpivid: no buffer for another picture (%d held)\n", ctx->pool->nbufs);
+		return AVERROR(ENOMEM);
+	}
+	frame->buf[0] = av_buffer_create((uint8_t *)&b->drm, sizeof(b->drm), drm_buf_release, b, 0);
+	if (frame->buf[0] == NULL) {
+		pool_put(ctx->pool, b);
+		return AVERROR(ENOMEM);
+	}
+	pool_ref(ctx->pool);
+	b->handed_out = 1;
+	frame->data[0] = (uint8_t *)&b->drm.desc;
+	frame->format = AV_PIX_FMT_DRM_PRIME;
+	return 0;
+}
+
+
+/* The buffer of one of our DRM_PRIME frames, or NULL */
+static RPIVIDBuf *drm_buf(const AVFrame *f)
+{
+	const RPIVIDDrm *d;
+
+	if ((f == NULL) || (f->format != AV_PIX_FMT_DRM_PRIME) || (f->buf[0] == NULL) || (f->buf[0]->size != sizeof(RPIVIDDrm))) {
+		return NULL;
+	}
+	d = (const RPIVIDDrm *)(const void *)f->buf[0]->data;
+	return ((d->magic == RPIVID_DRM_MAGIC) && ((const uint8_t *)&d->desc == f->data[0])) ? d->buf : NULL;
+}
+
+
+/* De-tile the whole coded picture of b into dst's planes (yuv420p, at least the coded size) */
+static void drm_detile(uint8_t *const data[3], const int linesize[3], const RPIVIDBuf *b)
+{
+	const RPIVIDPool *p = b->pool;
+
+	rpivid_dma_sync_for_cpu(&b->y, b->y.size);
+	rpivid_sand8_to_planar(data[0], linesize[0], data[1], linesize[1], data[2], linesize[2], b->y.cpu, b->c.cpu,
+		p->g.luma_stride, p->g.chroma_stride, p->width, p->height);
+}
+
+
+int rpivid_drm_frame_to_planar(AVFrame *dst, const AVFrame *src)
+{
+	const RPIVIDBuf *b = drm_buf(src);
+	const RPIVIDPool *p;
+	AVFrame *full = NULL;
+	int ret, w, h;
+
+	if (b == NULL) {
+		return AVERROR(EINVAL);
+	}
+	p = b->pool;
+	w = src->width;
+	h = src->height;
+	if (dst->buf[0] == NULL) {
+		dst->format = AV_PIX_FMT_YUV420P;
+		dst->width = w;
+		dst->height = h;
+		if ((ret = av_frame_get_buffer(dst, 0)) < 0) {
+			return ret;
+		}
+	}
+	else if ((dst->format != AV_PIX_FMT_YUV420P) || (dst->width < w) || (dst->height < h)) {
+		return AVERROR(EINVAL);
+	}
+	if ((src->crop_left == 0u) && (src->crop_top == 0u) && (w == (int)p->width) && (h == (int)p->height) &&
+			(dst->width == w) && (dst->height == h)) {
+		drm_detile(dst->data, dst->linesize, b);
+	}
+	else {
+		/* a conformance window: the whole picture, then its visible part */
+		const uint8_t *s[4];
+		size_t cl = src->crop_left, ct = src->crop_top;
+
+		full = av_frame_alloc();
+		if (full == NULL) {
+			return AVERROR(ENOMEM);
+		}
+		full->format = AV_PIX_FMT_YUV420P;
+		full->width = (int)p->width;
+		full->height = (int)p->height;
+		if (((ret = av_frame_get_buffer(full, 0)) < 0) || (cl + (size_t)w > p->width) || (ct + (size_t)h > p->height)) {
+			av_frame_free(&full);
+			return (ret < 0) ? ret : AVERROR(EINVAL);
+		}
+		drm_detile(full->data, full->linesize, b);
+		s[0] = full->data[0] + ct * (size_t)full->linesize[0] + cl;
+		s[1] = full->data[1] + (ct / 2u) * (size_t)full->linesize[1] + cl / 2u;
+		s[2] = full->data[2] + (ct / 2u) * (size_t)full->linesize[2] + cl / 2u;
+		s[3] = NULL;
+		av_image_copy(dst->data, dst->linesize, s, full->linesize, AV_PIX_FMT_YUV420P, w, h);
+		av_frame_free(&full);
+	}
+	/* a reused dst: this frame's side data only */
+	while (dst->nb_side_data > 0) {
+		av_frame_remove_side_data(dst, dst->side_data[0]->type);
+	}
+	if ((ret = av_frame_copy_props(dst, src)) < 0) {
+		return ret;
+	}
+	dst->crop_left = dst->crop_top = dst->crop_right = dst->crop_bottom = 0;
+	return 0;
+}
+
+
+/* hevcdec.c, the CPU decoder taking over from drm_prime (the hwaccel already detached): every
+ * picture the decoder holds becomes a system-memory frame with the block's pixels, so the CPU
+ * decoder can read them as references; the current picture's (garbage until the CPU decodes
+ * it) too, and a picture already staged for output follows its frame. A picture hevcdec.c
+ * made up for a missing reference has no defined pixels here, as in planar mode (it is not
+ * filled grey under an hwaccel). Frames already returned keep their buffers. */
+int ff_rpivid_hevc_drm_to_cpu(AVCodecContext *avctx)
+{
+	HEVCContext *s = avctx->priv_data;
+	int i, ret = 0;
+
+	avctx->pix_fmt = avctx->sw_pix_fmt;
+	for (i = 0; i < (int)FF_ARRAY_ELEMS(s->DPB); i++) {
+		AVFrame *f = s->DPB[i].frame, *t;
+		const RPIVIDBuf *b = drm_buf(f);
+
+		if (b == NULL) {
+			continue;
+		}
+		if (b->pool->g.col_height == 0u) {
+			return AVERROR_BUG;
+		}
+		t = av_frame_alloc();
+		if (t == NULL) {
+			return AVERROR(ENOMEM);
+		}
+		if ((ret = ff_get_buffer(avctx, t, AV_GET_BUFFER_FLAG_REF)) < 0) {
+			av_frame_free(&t);
+			return ret;
+		}
+		if ((t->format != AV_PIX_FMT_YUV420P) || (t->width < (int)b->pool->width) || (t->height < (int)b->pool->height)) {
+			av_frame_free(&t);
+			return AVERROR_BUG;
+		}
+		drm_detile(t->data, t->linesize, b);
+		if ((ret = av_frame_copy_props(t, f)) < 0) {
+			av_frame_free(&t);
+			return ret;
+		}
+		if ((s->output_frame->buf[0] != NULL) && (s->output_frame->buf[0]->buffer == f->buf[0]->buffer)) {
+			av_frame_unref(s->output_frame);
+			if ((ret = av_frame_ref(s->output_frame, t)) < 0) {
+				av_frame_free(&t);
+				return ret;
+			}
+		}
+		av_frame_unref(f);
+		av_frame_move_ref(f, t);
+		av_frame_free(&t);
+	}
+	return 0;
 }
 
 
@@ -559,7 +887,13 @@ static int rpivid_uninit(AVCodecContext *avctx)
 
 int ff_rpivid_hevc_active(const AVCodecContext *avctx)
 {
-	return avctx->hwaccel == &ff_hevc_rpivid_hwaccel.p;
+	return (avctx->hwaccel == &ff_hevc_rpivid_hwaccel.p) || (avctx->hwaccel == &ff_hevc_rpivid_drm_hwaccel.p);
+}
+
+
+int ff_rpivid_hevc_zero_copy(const AVCodecContext *avctx)
+{
+	return avctx->hwaccel == &ff_hevc_rpivid_drm_hwaccel.p;
 }
 
 
@@ -571,7 +905,7 @@ int ff_rpivid_hevc_failed(const AVCodecContext *avctx)
 }
 
 
-int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level)
+int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level, int out)
 {
 	const HEVCContext *s = avctx->priv_data;
 	const HEVCSPS *sps = s->ps.sps;
@@ -580,10 +914,23 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level)
 	char why[192], list[512];
 	uint32_t enabled, need;
 	int64_t m;
-	int i, rc;
+	int i, rc, zc = 0;
+	const char *e;
 
 	if ((level <= RPIVID_LEVEL_OFF) || (sps == NULL) || (avctx->hwaccel != NULL)) {
 		return -1;
+	}
+	if (out == RPIVID_OUT_DRM_PRIME) {
+		/* frame threads would each hold DRM frames a CPU fallback could not reach */
+		if (sps->bit_depth != 8) {
+			av_log(avctx, AV_LOG_INFO, "rpivid: drm_prime output is 8-bit only: system-memory frames\n");
+		}
+		else if ((avctx->active_thread_type & FF_THREAD_FRAME) != 0) {
+			av_log(avctx, AV_LOG_INFO, "rpivid: drm_prime output needs no frame threading: system-memory frames\n");
+		}
+		else {
+			zc = 1;
+		}
 	}
 	enabled = tools_enabled(avctx, level);
 	m = sps_tools(sps, why, sizeof(why));
@@ -617,8 +964,13 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level)
 		av_free(ctx);
 		return -1;
 	}
-	rpivid_geom(&g, (uint32_t)sps->width, (uint32_t)sps->height, (unsigned int)sps->bit_depth);
-	ctx->pool = pool_new(&g, sps->sps_temporal_mvp_enabled_flag);
+	if (zc) {
+		rpivid_geom_col128(&g, (uint32_t)sps->width, (uint32_t)sps->height, (unsigned int)sps->bit_depth);
+	}
+	else {
+		rpivid_geom(&g, (uint32_t)sps->width, (uint32_t)sps->height, (unsigned int)sps->bit_depth);
+	}
+	ctx->pool = pool_new(&g, sps->sps_temporal_mvp_enabled_flag, zc, (uint32_t)sps->width, (uint32_t)sps->height);
 	if ((ctx->pool == NULL) || (rpivid_dma_alloc(&ctx->dummy_mv, g.colmv_size) < 0)) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: CPU decode: out of memory\n");
 		pool_unref(ctx->pool);
@@ -632,14 +984,21 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level)
 	ctx->sps_tools = (uint32_t)sps_tools(sps, why, sizeof(why));
 	ctx->used = need;
 	ctx->t_start = (uint64_t)av_gettime_relative();
+	ctx->zc = zc;
+	e = getenv("FFMPEG_RPIVID_REFUSE_AT");
+	ctx->refuse_at = ((e != NULL) && (e[0] != '\0')) ? (uint32_t)strtoul(e, NULL, 10) + 1u : 0u;
 
 	avctx->internal->hwaccel_priv_data = ctx;
-	avctx->hwaccel = &ff_hevc_rpivid_hwaccel.p;
+	avctx->hwaccel = zc ? &ff_hevc_rpivid_drm_hwaccel.p : &ff_hevc_rpivid_hwaccel.p;
 	/* "tools: " lists what the stream uses beyond the proven set (hevc-rpivid-check reports it) */
 	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit, tools: %s, HEVC clock %u MHz, completion %s\n", sps->width,
 		sps->height, sps->bit_depth, tool_list(list, sizeof(list), need), rpivid_hw_clock(ctx->hw) / 1000000u,
 		rpivid_hw_irq(ctx->hw) ? "by interrupt" : "POLLED (no interrupt)");
-	return 0;
+	if (zc) {
+		av_log(avctx, AV_LOG_INFO, "rpivid: drm_prime output: NV12 SAND128 column height %u, %zu bytes per picture, %s\n", g.col_height,
+			g.luma_size, ctx->pool->have_ops ? "GPU buffers (dma-buf)" : "own memory (no buffer operations: no dma-buf)");
+	}
+	return zc ? 1 : 0;
 }
 
 
@@ -783,10 +1142,27 @@ int ff_rpivid_hevc_picture_ok(AVCodecContext *avctx)
 		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d has no fresh frame data\n", s->poc);
 		return -1;
 	}
-	f->buf = pool_get(ctx->pool);
-	if (f->buf == NULL) {
-		av_log(avctx, AV_LOG_WARNING, "rpivid: no contiguous memory for another picture buffer (%d held)\n", ctx->pool->nbufs);
+	if ((ctx->refuse_at != 0u) && (ctx->n + 1u == ctx->refuse_at)) {
+		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d refused (FFMPEG_RPIVID_REFUSE_AT, a test)\n", s->poc);
 		return -1;
+	}
+	if (ctx->zc) {
+		/* the frame is the buffer (rpivid_alloc_frame) */
+		const AVFrame *fr = s->ref->frame;
+
+		f->buf = drm_buf(fr);
+		if ((f->buf == NULL) || ((f->bref = av_buffer_ref(fr->buf[0])) == NULL)) {
+			f->buf = NULL;
+			av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d is not a drm_prime frame of this decoder\n", s->poc);
+			return -1;
+		}
+	}
+	else {
+		f->buf = pool_get(ctx->pool);
+		if (f->buf == NULL) {
+			av_log(avctx, AV_LOG_WARNING, "rpivid: no contiguous memory for another picture buffer (%d held)\n", ctx->pool->nbufs);
+			return -1;
+		}
 	}
 	f->pool = pool_ref(ctx->pool);
 	return 0;
@@ -996,9 +1372,9 @@ static void stat_window(AVCodecContext *avctx, RPIVIDContext *ctx)
 	if (ctx->wn < STAT_EVERY) {
 		return;
 	}
-	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms\n", ctx->n,
+	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms%s\n", ctx->n,
 		(ctx->w_p1 + ctx->w_p2) / 1e6 / ctx->wn, ctx->w_p1 / 1e6 / ctx->wn, ctx->w_p2 / 1e6 / ctx->wn, ctx->w_detile / 1e6 / ctx->wn,
-		ctx->w_slices / 1e6 / ctx->wn);
+		ctx->w_slices / 1e6 / ctx->wn, ctx->zc ? " zc=1" : "");
 	ctx->wn = ctx->w_slices = ctx->w_p1 = ctx->w_p2 = ctx->w_detile = 0;
 }
 
@@ -1075,16 +1451,19 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 		ctx->frame_err = "hardware";
 	}
 
-	/* the planar frame, also from a failed decode: what the block wrote beats a stale buffer */
-	rpivid_dma_sync_for_cpu(&cur->buf->y, g->luma_size);
-	rpivid_dma_sync_for_cpu(&cur->buf->c, g->chroma_size);
-	if (sps->bit_depth == 8) {
-		rpivid_sand8_to_planar(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
-			cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);
-	}
-	else {
-		rpivid_sand10_to_planar16(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
-			cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);
+	/* the planar frame, also from a failed decode: what the block wrote beats a stale buffer
+	 * (drm_prime: the frame is the buffer; ff_rpivid_hevc_drm_to_cpu de-tiles on a fallback) */
+	if (!ctx->zc) {
+		rpivid_dma_sync_for_cpu(&cur->buf->y, g->luma_size);
+		rpivid_dma_sync_for_cpu(&cur->buf->c, g->chroma_size);
+		if (sps->bit_depth == 8) {
+			rpivid_sand8_to_planar(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
+				cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);
+		}
+		else {
+			rpivid_sand10_to_planar16(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
+				cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);
+		}
 	}
 	if (ctx->frame_err != NULL) {
 		goto fail;
@@ -1124,6 +1503,22 @@ static const FFHWAccel ff_hevc_rpivid_hwaccel = {
 	.p.type = AVMEDIA_TYPE_VIDEO,
 	.p.id = AV_CODEC_ID_HEVC,
 	.p.pix_fmt = AV_PIX_FMT_YUV420P,
+	.start_frame = rpivid_start_frame,
+	.decode_slice = rpivid_decode_slice,
+	.end_frame = rpivid_end_frame,
+	.frame_priv_data_size = sizeof(RPIVIDFrame),
+	.free_frame_priv = rpivid_frame_free,
+	.priv_data_size = sizeof(RPIVIDContext),
+	.uninit = rpivid_uninit,
+};
+
+/* drm_prime: the frames are the picture buffers (AV_PIX_FMT_DRM_PRIME) */
+static const FFHWAccel ff_hevc_rpivid_drm_hwaccel = {
+	.p.name = "hevc_rpivid_drm",
+	.p.type = AVMEDIA_TYPE_VIDEO,
+	.p.id = AV_CODEC_ID_HEVC,
+	.p.pix_fmt = AV_PIX_FMT_DRM_PRIME,
+	.alloc_frame = rpivid_alloc_frame,
 	.start_frame = rpivid_start_frame,
 	.decode_slice = rpivid_decode_slice,
 	.end_frame = rpivid_end_frame,

@@ -148,8 +148,19 @@ typedef struct {
 	size_t luma_size, chroma_size; /* allocation sizes */
 	uint32_t colmv_stride;         /* collocated motion vector buffer stride (MVSTRIDE/COLSTRIDE) */
 	size_t colmv_size;             /* and size, per picture */
+	uint32_t col_height;           /* single buffer (rpivid_geom_col128): lines per column, else 0 */
+	size_t chroma_offset;          /* single buffer: chroma's offset in it (luma at 0), else 0 */
 } rpivid_geom_t;
 
+/* Two buffers: luma columns of the picture height (rounded to 16 rows) of 128 bytes,
+ * chroma columns of half that, each plane in its own allocation (luma_size, chroma_size) */
 void rpivid_geom(rpivid_geom_t *g, uint32_t width, uint32_t height, unsigned int bit_depth);
+
+/* One buffer per picture, the layout of Linux's NV12_COL128 and of DRM's
+ * DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT(col_height): each 128-byte column holds the
+ * picture's luma rows (height rounded to 16) followed by its chroma rows (half that), so
+ * both planes have the column stride col_height * 128; luma_size is the whole picture,
+ * chroma starts at chroma_offset, chroma_size is 0 */
+void rpivid_geom_col128(rpivid_geom_t *g, uint32_t width, uint32_t height, unsigned int bit_depth);
 
 #endif
