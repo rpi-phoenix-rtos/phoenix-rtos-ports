@@ -1,16 +1,18 @@
 /*
  * Phoenix-RTOS
  *
- * hevc-rpivid-check: decode an HEVC file with the rpivid hardware decoder and with the
- * CPU decoder, compare every frame and time both
+ * hevc-rpivid-check: decode HEVC files with the rpivid hardware decoder, compare every
+ * frame with a reference -- the CPU decoder, or a host's ffmpeg -f framemd5 -- and time it
  *
- *     hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc] <file>
+ *     hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc]
+ *                       [-cpuref] [-q] [-from name] <file | directory>...
  *
  *   -n     stop after this many frames (default: the whole file)
  *   -t     CPU decoder threads (default 4)
  *   -T     hardware decoder threads (default 1: one block; more only tests FFmpeg's frame threading)
- *   -l     the hevc_rpivid "rpivid" level: 1 the verified tool set, 2 all tools (default: the
- *          decoder's own, i.e. FFMPEG_RPIVID or 1)
+ *   -l     the hevc_rpivid "rpivid" level: 1 the default tool set, 2 every tool (default: the
+ *          decoder's own, i.e. FFMPEG_RPIVID or 1); FFMPEG_RPIVID_TOOLS=-name,+name changes
+ *          single tools (rpivid_hevc.c)
  *   -hw    only the hardware pass; -cpu only the CPU pass (timing; nothing compared, so
  *          nothing hashed unless -md5)
  *   -md5   one "MD5 <pass> <frame> <pts> <md5>" line per frame (the md5 of the frame's
@@ -18,10 +20,32 @@
  *   -crc   check every frame against the stream's own picture hash SEI (x265 --hash 1),
  *          independently of the other pass; counts in the pass lines. The decoder then
  *          computes an MD5 of every picture itself: that is in decode_ms/frame
+ *   -cpuref  compare with the CPU decoder even where a <file>.md5 reference exists
+ *   -q     only this tool's lines and the decoder's rpivid lines (default with a
+ *          directory or several files)
+ *   -from  skip the files listed before the one of this name (to go on after a stream that
+ *          left the block unusable for the rest of the process: "cpu_why=the block stopped
+ *          responding")
+ *
+ * The reference: <file>.md5 next to the file when there is one (ffmpeg -fps_mode
+ * passthrough -f framemd5 output of the host: only the hardware pass runs), else the
+ * CPU decoder. A directory stands for the files its MANIFEST names (the first word of
+ * each line not starting with '#', in that order: tools/hevc-decode/rpivid-check/gen-set.sh
+ * writes one), else for its HEVC files (.265 .hevc .h265 .bit .mp4 .mkv .mov) in name
+ * order. Every file ends with one line
+ *
+ *     RPIVID-CHECK stream=<name> frames=<n> mismatches=<m> fallback=<0|1> fps=<x> result=<r> ...
+ *
+ * mismatches: frames whose md5 differs from the reference's, plus the difference of the
+ * frame counts; fallback=1: the hardware decoder did not take the stream, or left it for
+ * the CPU decoder part way; result: PASS (fallback=0, mismatches=0), CPU (fallback, no
+ * mismatch), FAIL or ERROR; then the reference, the first bad frame, SEI hash failures,
+ * the stream's tools beyond the block's proven set (tools=, rpivid_hevc.c) and those
+ * outside the decoder's default set (nondefault=). Several files end with a summary line.
  *
  * Every line of ours starts with "RPIVID-CHECK"; libav* messages (the decoder's
- * "rpivid:" lines among them) are printed to stdout too. Exit status: 0 when the passes
- * agree (or the one pass ran), 1 on a mismatch, 2 on an error.
+ * "rpivid:" lines among them) are printed to stdout too. Exit status: 0 when every file
+ * passed (or only one pass ran), 1 on a mismatch, 2 on an error.
  *
  * Timing: ms/frame is the pass's wall time per frame; of that, check_ms/frame is this
  * tool's own work on the decoded frames (hashing them to compare the passes),
@@ -35,11 +59,14 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+#include <ctype.h>
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 
 #ifdef __phoenix__
 #include <unistd.h>
@@ -48,8 +75,10 @@
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/avstring.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/md5.h>
+#include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
 
@@ -69,7 +98,51 @@ typedef struct {
 } pass_t;
 
 static int hw_used, hw_fallback;
-static int print_md5, crc_mode, crc_checked, crc_bad;
+static int print_md5, crc_mode, crc_checked, crc_bad, quiet;
+static char hw_tools[512] = "-", hw_nondefault[512] = "-", hw_cpu_why[200];
+
+
+/* Add the comma-separated tool list after `key` in a decoder line to the list in out
+ * ("-" when empty): a stream that changes SPS reports its tools again, and keeps the earlier */
+static void grab_list(const char *line, const char *key, char *out, size_t len)
+{
+	const char *p = strstr(line, key);
+	char item[64];
+	size_t n, k, o;
+
+	if (p == NULL) {
+		return;
+	}
+	p += strlen(key);
+	n = strcspn(p, " );\r\n");
+	while (n > 0u) {
+		k = strcspn(p, ",");
+		k = (k < n) ? k : n;
+		if ((k != 0u) && (k < sizeof(item)) && ((k != 1u) || (p[0] != '-'))) {
+			const char *q = out;
+
+			memcpy(item, p, k);
+			item[k] = '\0';
+			/* already listed? */
+			while ((q = strstr(q, item)) != NULL) {
+				if (((q == out) || (q[-1] == ',')) && ((q[k] == '\0') || (q[k] == ','))) {
+					break;
+				}
+				q += k;
+			}
+			if (q == NULL) {
+				if (strcmp(out, "-") == 0) {
+					out[0] = '\0';
+				}
+				o = strlen(out);
+				snprintf(out + o, len - o, "%s%s", (o != 0u) ? "," : "", item);
+			}
+		}
+		k += (k < n) ? 1u : 0u;
+		p += k;
+		n -= k;
+	}
+}
 
 
 static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
@@ -95,9 +168,28 @@ static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
 	}
 	if (strstr(line, "rpivid: hardware HEVC decode") != NULL) {
 		hw_used = 1;
+		grab_list(line, "tools: ", hw_tools, sizeof(hw_tools));
+		grab_list(line, "not in the default set: ", hw_nondefault, sizeof(hw_nondefault));
+	}
+	if (strstr(line, "rpivid: tools in use: ") != NULL) {
+		grab_list(line, "tools in use: ", hw_tools, sizeof(hw_tools));
+		grab_list(line, "not in the default set: ", hw_nondefault, sizeof(hw_nondefault));
+	}
+	/* a picture the block could not take or failed: the rest of the stream went to the CPU */
+	if ((hw_cpu_why[0] == '\0') && (strstr(line, "rpivid: picture POC ") != NULL)) {
+		snprintf(hw_cpu_why, sizeof(hw_cpu_why), "%s", strstr(line, "rpivid: picture POC ") + 8);
+		hw_cpu_why[strcspn(hw_cpu_why, "\r\n")] = '\0';
+	}
+	if (strstr(line, "rpivid: CPU decode: ") != NULL) {
+		snprintf(hw_cpu_why, sizeof(hw_cpu_why), "%s", strstr(line, "rpivid: CPU decode: ") + 20);
+		hw_cpu_why[strcspn(hw_cpu_why, "\r\n")] = '\0';
 	}
 	if (strstr(line, "continuing on the CPU decoder") != NULL) {
 		hw_fallback = 1;
+	}
+	/* "rpivid:", not "rpivid": the decoder's own name prefixes every line it logs */
+	if (quiet && (strstr(line, "rpivid:") == NULL)) {
+		return;
 	}
 	fputs(line, stdout);
 	fflush(stdout);
@@ -353,77 +445,150 @@ out:
 }
 
 
-int main(int argc, char **argv)
+typedef struct {
+	int max_frames, threads, hw_threads, level, do_hw, do_cpu, crc, cpuref;
+} opts_t;
+
+typedef struct {
+	uint8_t (*md5)[16];
+	int n;
+} ref_t;
+
+
+static int hexval(int c)
 {
-	pass_t hw = { 0 }, cpu = { 0 };
-	const char *file = NULL;
-	int max_frames = 0, threads = 4, hw_threads = 1, level = -1, do_hw = 1, do_cpu = 1, crc = 0, i, bad = 0, first_bad = -1;
+	return isdigit(c) ? (c - '0') : ((c >= 'a') && (c <= 'f')) ? (c - 'a' + 10) : ((c >= 'A') && (c <= 'F')) ? (c - 'A' + 10) : -1;
+}
 
-	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "-n") && (i + 1 < argc)) {
-			max_frames = atoi(argv[++i]);
-		}
-		else if (!strcmp(argv[i], "-t") && (i + 1 < argc)) {
-			threads = atoi(argv[++i]);
-		}
-		else if (!strcmp(argv[i], "-T") && (i + 1 < argc)) {
-			hw_threads = atoi(argv[++i]);
-		}
-		else if (!strcmp(argv[i], "-l") && (i + 1 < argc)) {
-			level = atoi(argv[++i]);
-		}
-		else if (!strcmp(argv[i], "-hw")) {
-			do_cpu = 0;
-		}
-		else if (!strcmp(argv[i], "-cpu")) {
-			do_hw = 0;
-		}
-		else if (!strcmp(argv[i], "-md5")) {
-			print_md5 = 1;
-		}
-		else if (!strcmp(argv[i], "-crc")) {
-			crc = 1;
-		}
-		else if ((argv[i][0] != '-') && (file == NULL)) {
-			file = argv[i];
-		}
-		else {
-			file = NULL;
-			break;
-		}
-	}
-	if ((file == NULL) || (!do_hw && !do_cpu)) {
-		printf("usage: hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc] <file>\n");
-		return 2;
-	}
-	setvbuf(stdout, NULL, _IOLBF, 0);
-	crc_mode = crc;
-	/* the frames are hashed to compare the two passes, or to print the hashes */
-	hw.hash = cpu.hash = (do_hw && do_cpu) || print_md5;
-	av_log_set_callback(log_cb);
-	printf("RPIVID-CHECK file=%s max_frames=%d cpu_threads=%d level=%d\n", file, max_frames, threads, level);
 
-	/* the hardware pass first and alone */
-	if (do_hw && (run_pass(&hw, file, "hevc_rpivid", hw_threads, level, max_frames, crc) < 0)) {
-		return 2;
-	}
-	if (do_hw) {
-		printf("RPIVID-CHECK hw_used=%d hw_fallback=%d\n", hw_used, hw_fallback);
-	}
-	crc_checked = crc_bad = 0;
-	if (do_cpu && (run_pass(&cpu, file, "hevc", threads, 0, max_frames, crc) < 0)) {
-		return 2;
-	}
-	if (!do_hw || !do_cpu) {
-		av_free(hw.md5);
-		av_free(hw.pts);
-		av_free(cpu.md5);
-		av_free(cpu.pts);
+/* <file>.md5: ffmpeg -f framemd5 output, the md5 the last field of each non-comment line.
+ * 1 = read, 0 = no such file, -1 = unusable */
+static int ref_load(ref_t *r, const char *file)
+{
+	char path[1024], line[512];
+	FILE *f;
+	int cap = 0;
+
+	memset(r, 0, sizeof(*r));
+	snprintf(path, sizeof(path), "%s.md5", file);
+	f = fopen(path, "r");
+	if (f == NULL) {
 		return 0;
 	}
+	while (fgets(line, sizeof(line), f) != NULL) {
+		char *h;
+		size_t len;
+		int i;
 
-	for (i = 0; (i < hw.n) && (i < cpu.n); i++) {
-		if (memcmp(hw.md5[i], cpu.md5[i], 16) != 0) {
+		if (line[0] == '#') {
+			continue;
+		}
+		len = strcspn(line, "\r\n");
+		line[len] = '\0';
+		h = strrchr(line, ',');
+		h = (h != NULL) ? h + 1 : line;
+		while (*h == ' ') {
+			h++;
+		}
+		if (strlen(h) != 32u) {
+			continue;
+		}
+		if (r->n == cap) {
+			void *a;
+
+			cap = cap ? cap * 2 : 1024;
+			a = av_realloc_array(r->md5, cap, sizeof(*r->md5));
+			if (a == NULL) {
+				fclose(f);
+				return -1;
+			}
+			r->md5 = a;
+		}
+		for (i = 0; i < 16; i++) {
+			int hi = hexval(h[2 * i]), lo = hexval(h[2 * i + 1]);
+
+			if ((hi < 0) || (lo < 0)) {
+				break;
+			}
+			r->md5[r->n][i] = (uint8_t)((hi << 4) | lo);
+		}
+		if (i == 16) {
+			r->n++;
+		}
+	}
+	fclose(f);
+	return (r->n > 0) ? 1 : -1;
+}
+
+
+static void pass_free(pass_t *p)
+{
+	av_freep(&p->md5);
+	av_freep(&p->pts);
+	memset(p, 0, sizeof(*p));
+}
+
+
+/* Check one file: 0 passed, 1 mismatch (or fell back with -l and nothing to compare), 2 error,
+ * 3 the hardware decoder did not (fully) take it */
+static int check_file(const char *file, const opts_t *o)
+{
+	pass_t hw = { 0 }, cpu = { 0 };
+	ref_t ref = { 0 };
+	const char *name = strrchr(file, '/'), *result, *refname = "none";
+	int i, bad = 0, first_bad = -1, nref = 0, mismatches, fallback, ret = 0, have_ref;
+
+	name = (name != NULL) ? name + 1 : file;
+	hw_used = hw_fallback = 0;
+	crc_checked = crc_bad = 0;
+	snprintf(hw_tools, sizeof(hw_tools), "-");
+	snprintf(hw_nondefault, sizeof(hw_nondefault), "-");
+	hw_cpu_why[0] = '\0';
+
+	have_ref = (o->cpuref || !o->do_hw) ? 0 : ref_load(&ref, file);
+	if (have_ref < 0) {
+		printf("RPIVID-CHECK warning: %s.md5 unusable: comparing with the CPU decoder\n", file);
+		have_ref = 0;
+	}
+	/* the frames are hashed to compare them, or to print the hashes */
+	hw.hash = cpu.hash = (o->do_hw && (o->do_cpu || have_ref)) || print_md5;
+	printf("RPIVID-CHECK file=%s max_frames=%d cpu_threads=%d level=%d reference=%s\n", file, o->max_frames, o->threads, o->level,
+		have_ref ? "md5" : ((o->do_hw && o->do_cpu) ? "cpu" : "none"));
+
+	/* the hardware pass first and alone */
+	if (o->do_hw && (run_pass(&hw, file, "hevc_rpivid", o->hw_threads, o->level, o->max_frames, o->crc) < 0)) {
+		ret = 2;
+		goto out;
+	}
+	if (o->do_hw) {
+		printf("RPIVID-CHECK hw_used=%d hw_fallback=%d\n", hw_used, hw_fallback);
+	}
+	if (o->do_hw && have_ref) {
+		nref = ref.n;
+		if ((o->max_frames > 0) && (nref > o->max_frames)) {
+			nref = o->max_frames;
+		}
+		refname = "md5";
+	}
+	else if (o->do_cpu) {
+		int sei_bad = crc_bad, sei_checked = crc_checked;
+
+		crc_checked = crc_bad = 0;
+		if (run_pass(&cpu, file, "hevc", o->threads, 0, o->max_frames, o->crc) < 0) {
+			ret = 2;
+			goto out;
+		}
+		crc_checked = sei_checked;
+		crc_bad = sei_bad;
+		nref = cpu.n;
+		refname = "cpu";
+	}
+	if (!o->do_hw || (!o->do_cpu && !have_ref)) {
+		goto out;
+	}
+
+	for (i = 0; (i < hw.n) && (i < nref); i++) {
+		if (memcmp(hw.md5[i], have_ref ? ref.md5[i] : cpu.md5[i], 16) != 0) {
 			if (bad < 20) {
 				printf("RPIVID-CHECK mismatch frame=%d pts=%" PRId64 "\n", i, hw.pts[i]);
 			}
@@ -433,16 +598,213 @@ int main(int argc, char **argv)
 			bad++;
 		}
 	}
-	if (hw.n != cpu.n) {
-		printf("RPIVID-CHECK frame counts differ: hw %d cpu %d\n", hw.n, cpu.n);
+	if (hw.n != nref) {
+		printf("RPIVID-CHECK frame counts differ: hw %d %s %d\n", hw.n, refname, nref);
+		if (first_bad < 0) {
+			first_bad = (hw.n < nref) ? hw.n : nref;
+		}
 	}
-	printf("RPIVID-CHECK verdict=%s frames=%d bad=%d first_bad=%d hw_used=%d hw_fallback=%d speedup=%.2fx\n",
-		((bad == 0) && (hw.n == cpu.n)) ? "BIT-EXACT" : "MISMATCH", hw.n, bad, first_bad, hw_used, hw_fallback,
-		(hw.wall > 0.0) ? cpu.wall / hw.wall : 0.0);
-	i = ((bad == 0) && (hw.n == cpu.n)) ? 0 : 1;
-	av_free(hw.md5);
-	av_free(hw.pts);
-	av_free(cpu.md5);
-	av_free(cpu.pts);
-	return i;
+	if (!have_ref) {
+		/* the two-pass verdict line of earlier versions */
+		printf("RPIVID-CHECK verdict=%s frames=%d bad=%d first_bad=%d hw_used=%d hw_fallback=%d speedup=%.2fx\n",
+			((bad == 0) && (hw.n == cpu.n)) ? "BIT-EXACT" : "MISMATCH", hw.n, bad, first_bad, hw_used, hw_fallback,
+			(hw.wall > 0.0) ? cpu.wall / hw.wall : 0.0);
+	}
+	mismatches = bad + abs(hw.n - nref);
+	fallback = !hw_used || hw_fallback;
+	result = (mismatches != 0) ? "FAIL" : (fallback ? "CPU" : "PASS");
+	ret = (mismatches != 0) ? 1 : (fallback ? 3 : 0);
+	printf("RPIVID-CHECK stream=%s frames=%d mismatches=%d fallback=%d fps=%.1f result=%s ref=%s ref_frames=%d first_bad=%d "
+		"sei_checked=%d sei_bad=%d tools=%s nondefault=%s%s%s\n", name, hw.n, mismatches, fallback,
+		(hw.wall > 0.0) ? hw.n / hw.wall : 0.0, result, refname, nref, first_bad, crc_checked, crc_bad, hw_tools, hw_nondefault,
+		(hw_cpu_why[0] != '\0') ? " cpu_why=" : "", hw_cpu_why);
+
+out:
+	if (ret == 2) {
+		printf("RPIVID-CHECK stream=%s frames=%d mismatches=0 fallback=%d fps=0.0 result=ERROR\n", name, hw.n, !hw_used || hw_fallback);
+	}
+	pass_free(&hw);
+	pass_free(&cpu);
+	av_freep(&ref.md5);
+	return ret;
+}
+
+
+static int has_hevc_ext(const char *n)
+{
+	static const char *const ext[] = { ".265", ".hevc", ".h265", ".bit", ".mp4", ".mkv", ".mov" };
+	const char *d = strrchr(n, '.');
+	unsigned int i;
+
+	for (i = 0; (d != NULL) && (i < sizeof(ext) / sizeof(ext[0])); i++) {
+		if (strcmp(d, ext[i]) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+
+static int cmp_str(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+
+static int add_name(char ***list, int *n, int *cap, char *name)
+{
+	if (name == NULL) {
+		return -1;
+	}
+	if (*n == *cap) {
+		char **nl = av_realloc_array(*list, *cap ? *cap * 2 : 64, sizeof(**list));
+
+		if (nl == NULL) {
+			av_free(name);
+			return -1;
+		}
+		*list = nl;
+		*cap = *cap ? *cap * 2 : 64;
+	}
+	(*list)[(*n)++] = name;
+	return 0;
+}
+
+
+/* Append a file, or a directory's MANIFEST files (else its HEVC files in name order), to the list */
+static int add_input(char ***list, int *n, int *cap, const char *arg)
+{
+	const char *sep = (arg[0] != '\0') && (arg[strlen(arg) - 1] == '/') ? "" : "/";
+	struct stat st;
+	DIR *d;
+	struct dirent *e;
+	FILE *mf;
+	char line[512];
+	int first = *n;
+
+	if ((stat(arg, &st) == 0) && S_ISDIR(st.st_mode)) {
+		snprintf(line, sizeof(line), "%s%sMANIFEST", arg, sep);
+		mf = fopen(line, "r");
+		if (mf != NULL) {
+			while (fgets(line, sizeof(line), mf) != NULL) {
+				line[strcspn(line, " \t\r\n")] = '\0';
+				if ((line[0] == '\0') || (line[0] == '#')) {
+					continue;
+				}
+				if (add_name(list, n, cap, av_asprintf("%s%s%s", arg, sep, line)) < 0) {
+					fclose(mf);
+					return -1;
+				}
+			}
+			fclose(mf);
+			return 0;
+		}
+		d = opendir(arg);
+		if (d == NULL) {
+			return -1;
+		}
+		while ((e = readdir(d)) != NULL) {
+			if ((e->d_name[0] == '.') || !has_hevc_ext(e->d_name)) {
+				continue;
+			}
+			if (add_name(list, n, cap, av_asprintf("%s%s%s", arg, sep, e->d_name)) < 0) {
+				closedir(d);
+				return -1;
+			}
+		}
+		closedir(d);
+		qsort(*list + first, (size_t)(*n - first), sizeof(**list), cmp_str);
+		return 0;
+	}
+	return add_name(list, n, cap, av_strdup(arg));
+}
+
+
+int main(int argc, char **argv)
+{
+	opts_t o = { .threads = 4, .hw_threads = 1, .level = -1, .do_hw = 1, .do_cpu = 1 };
+	char **files = NULL;
+	const char *from = NULL;
+	int nfiles = 0, cap = 0, i, rc, npass = 0, nfail = 0, ncpu = 0, nerr = 0, usage = 0, q = -1, nchecked = 0;
+
+	for (i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "-n") && (i + 1 < argc)) {
+			o.max_frames = atoi(argv[++i]);
+		}
+		else if (!strcmp(argv[i], "-t") && (i + 1 < argc)) {
+			o.threads = atoi(argv[++i]);
+		}
+		else if (!strcmp(argv[i], "-T") && (i + 1 < argc)) {
+			o.hw_threads = atoi(argv[++i]);
+		}
+		else if (!strcmp(argv[i], "-l") && (i + 1 < argc)) {
+			o.level = atoi(argv[++i]);
+		}
+		else if (!strcmp(argv[i], "-hw")) {
+			o.do_cpu = 0;
+		}
+		else if (!strcmp(argv[i], "-cpu")) {
+			o.do_hw = 0;
+		}
+		else if (!strcmp(argv[i], "-md5")) {
+			print_md5 = 1;
+		}
+		else if (!strcmp(argv[i], "-crc")) {
+			o.crc = 1;
+		}
+		else if (!strcmp(argv[i], "-cpuref")) {
+			o.cpuref = 1;
+		}
+		else if (!strcmp(argv[i], "-q")) {
+			q = 1;
+		}
+		else if (!strcmp(argv[i], "-from") && (i + 1 < argc)) {
+			from = argv[++i];
+		}
+		else if ((argv[i][0] != '-') && (add_input(&files, &nfiles, &cap, argv[i]) == 0)) {
+			continue;
+		}
+		else {
+			usage = 1;
+			break;
+		}
+	}
+	if (usage || (nfiles == 0) || (!o.do_hw && !o.do_cpu)) {
+		printf("usage: hevc-rpivid-check [-n frames] [-t cpu_threads] [-T hw_threads] [-l level] [-hw | -cpu] [-md5] [-crc] [-cpuref] [-q]"
+			" [-from name] <file | directory>...\n");
+		return 2;
+	}
+	setvbuf(stdout, NULL, _IOLBF, 0);
+	crc_mode = o.crc;
+	quiet = (q >= 0) ? q : (nfiles > 1);
+	av_log_set_callback(log_cb);
+
+	rc = 0;
+	for (i = 0; i < nfiles; i++) {
+		const char *base = strrchr(files[i], '/');
+		int r;
+
+		base = (base != NULL) ? base + 1 : files[i];
+		if ((from != NULL) && (strcmp(base, from) != 0)) {
+			av_free(files[i]);
+			continue;
+		}
+		from = NULL;
+		nchecked++;
+		r = check_file(files[i], &o);
+
+		npass += (r == 0);
+		nfail += (r == 1);
+		nerr += (r == 2);
+		ncpu += (r == 3);
+		if ((r == 1) || (r == 2)) {
+			rc = (rc == 2) ? 2 : r;
+		}
+		av_free(files[i]);
+	}
+	av_free(files);
+	if (nfiles > 1) {
+		printf("RPIVID-CHECK summary streams=%d pass=%d fail=%d cpu=%d error=%d\n", nchecked, npass, nfail, ncpu, nerr);
+	}
+	return rc;
 }

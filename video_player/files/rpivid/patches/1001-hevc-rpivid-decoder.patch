@@ -1,7 +1,7 @@
 hevc_rpivid: the HEVC decoder with the Raspberry Pi 4 rpivid block as an hwaccel
 
 A second FFCodec, "hevc_rpivid", is FFmpeg's HEVC decoder with its new "rpivid"
-option on (1: the HW-verified tool set; 0 off, 2 all tools; -1 = 1 for hevc_rpivid,
+option on (1: the default tool set; 0 off, 2 all tools; -1 = 1 for hevc_rpivid,
 0 for hevc; FFMPEG_RPIVID=0|1|2 sets the default of hevc_rpivid). It is listed
 before "hevc" in allcodecs.c, so avcodec_find_decoder(AV_CODEC_ID_HEVC) returns it.
 
@@ -196,7 +196,7 @@ index b267f6e..424e407 100644
 +
 +        s->rpivid_level = RPIVID_LEVEL_OFF;
 +        if (!strcmp(avctx->codec->name, "hevc_rpivid")) {
-+            s->rpivid_level = RPIVID_LEVEL_VERIFIED;
++            s->rpivid_level = RPIVID_LEVEL_DEFAULT;
 +            if (e && e[0] >= '0' && e[0] <= '2' && !e[1])
 +                s->rpivid_level = e[0] - '0';
 +        }
@@ -211,7 +211,7 @@ index b267f6e..424e407 100644
      { "strict-displaywin", "stricly apply default display window size", OFFSET(apply_defdispwin),
          AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
 +#if CONFIG_HEVC_RPIVID_DECODER
-+    { "rpivid", "rpivid hardware decode: 0 off, 1 the verified tool set, 2 all tools (-1: 1 for hevc_rpivid, 0 for hevc)",
++    { "rpivid", "rpivid hardware decode: 0 off, 1 the default tool set, 2 all tools (-1: 1 for hevc_rpivid, 0 for hevc)",
 +        OFFSET(rpivid_level), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 2, PAR },
 +#endif
      { NULL },

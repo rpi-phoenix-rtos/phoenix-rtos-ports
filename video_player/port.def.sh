@@ -63,7 +63,8 @@
 #   patches/     1001: the decoder "hevc_rpivid" = "hevc" + the "rpivid" option (registered
 #                first, so avcodec_find_decoder(HEVC) -- ffplay, gtk-video -- picks it); CPU
 #                fallback for a stream, a picture or a hardware failure
-#   check/       hevc-rpivid-check: hardware vs CPU decode of a file, every frame's md5, timing
+#   check/       hevc-rpivid-check: hardware vs CPU decode (or a host framemd5) of files or a
+#                directory, every frame's md5, timing, one RPIVID-CHECK stream= line per file
 #   hosttest/    run.sh: the hwaccel's register programming against the reference player on
 #                a register-level mock (host, ASan); not part of the build
 # and the HLS demuxer's custom-I/O hunk (files/hls/patches, port-only): 2001 lets hls.c open
@@ -72,8 +73,9 @@
 #   every playlist and segment); unchanged without AVFMT_FLAG_CUSTOM_IO. 2002: seeking in fMP4
 #   playlists (6.1 never resumed after a seek: the mov demuxer's fragment index is keyed by byte
 #   position, which the seek restarts at 0) and the target segment's keyframe kept.
-# Knobs: FFMPEG_RPIVID=0 (CPU only) | 1 (default: the verified tool set) | 2 (all tools,
-# unverified), or the decoder option -rpivid N; ffplay -vcodec hevc = the plain CPU decoder.
+# Knobs: FFMPEG_RPIVID=0 (CPU only) | 1 (default: the default tool set) | 2 (every tool), or
+# the decoder option -rpivid N; FFMPEG_RPIVID_TOOLS=-amp,+tiles turns single coding tools off
+# or on (rpivid_hevc.c tools[]); ffplay -vcodec hevc = the plain CPU decoder.
 #
 # Installs (${PREFIX_PORT_INSTALL}): bin/ (stripped), prog/ (unstripped, addr2line),
 # share/video-player/ (link maps, stage.MANIFEST), ffmpeg/ (the FFmpeg libraries for other
