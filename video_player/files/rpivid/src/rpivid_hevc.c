@@ -180,7 +180,9 @@ static RPIVIDBuf *pool_get(RPIVIDPool *p)
 	if (b == NULL) {
 		return NULL;
 	}
-	if ((rpivid_dma_alloc(&b->y, p->g.luma_size) < 0) || (rpivid_dma_alloc(&b->c, p->g.chroma_size) < 0) ||
+	/* the pictures are read by the CPU (SAND->planar) and cached: uncached reads of a
+	 * 1080p picture took ~8 ms of one core */
+	if ((rpivid_dma_alloc_cached(&b->y, p->g.luma_size) < 0) || (rpivid_dma_alloc_cached(&b->c, p->g.chroma_size) < 0) ||
 			(p->with_mv && (rpivid_dma_alloc(&b->mv, p->g.colmv_size) < 0))) {
 		buf_free(b);
 		return NULL;
@@ -245,7 +247,7 @@ static const struct {
 	int on;                        /* in the default set (level 1) */
 } tools[T_NTOOLS] = {
 	[T_CTB32] = { "ctb32", "32x32 CTBs", 1 },
-	[T_CTB16] = { "ctb16", "16x16 CTBs", 1 },
+	[T_CTB16] = { "ctb16", "16x16 CTBs", 0 },
 	[T_BLOCKS] = { "blocks", "coding blocks >= 16 or transform blocks other than 4..32", 1 },
 	[T_TU_DEPTH_INTRA] = { "tu_depth_intra", "transform tree depth > 0 in intra CUs", 1 },
 	[T_TU_DEPTH_INTER] = { "tu_depth_inter", "transform tree depth > 0 in inter CUs", 1 },
@@ -722,10 +724,7 @@ static void fill_pic(RPIVIDContext *ctx, const HEVCContext *s)
 	}
 	p->log2_parallel_merge_level = (uint8_t)pps->log2_parallel_merge_level;
 	p->slice_temporal_mvp = s->sh.slice_temporal_mvp_enabled_flag;
-	/* a one-slice picture keeps the exact form tools/hevc-decode proved (rpivid_cmd.h);
-	 * a picture of several slices follows the Linux driver throughout */
 	p->one_slice = (uint8_t)ctx->one_slice;
-	p->compat_intra_no_msgs = (uint8_t)ctx->one_slice;
 }
 
 
@@ -1077,6 +1076,8 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	}
 
 	/* the planar frame, also from a failed decode: what the block wrote beats a stale buffer */
+	rpivid_dma_sync_for_cpu(&cur->buf->y, g->luma_size);
+	rpivid_dma_sync_for_cpu(&cur->buf->c, g->chroma_size);
 	if (sps->bit_depth == 8) {
 		rpivid_sand8_to_planar(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
 			cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);

@@ -304,13 +304,13 @@ int rpivid_hw_irq(const rpivid_hw_t *hw)
 }
 
 
-int rpivid_dma_alloc(rpivid_dma_t *d, size_t size)
+static int dma_map(rpivid_dma_t *d, size_t size, int flags)
 {
 	size_t pg = (size_t)sysconf(_SC_PAGESIZE);
 	void *p;
 
 	size = (size + pg - 1u) & ~(pg - 1u);
-	p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_UNCACHED | MAP_CONTIGUOUS | MAP_ANONYMOUS, -1, 0);
+	p = mmap(NULL, size, PROT_READ | PROT_WRITE, flags | MAP_CONTIGUOUS | MAP_ANONYMOUS, -1, 0);
 	if (p == MAP_FAILED) {
 		memset(d, 0, sizeof(*d));
 		return -ENOMEM;
@@ -320,6 +320,66 @@ int rpivid_dma_alloc(rpivid_dma_t *d, size_t size)
 	d->pa = (uint64_t)va2pa(p);
 	d->size = size;
 	return 0;
+}
+
+
+#ifdef __aarch64__
+/* Clean and invalidate [va, va + len) by VA. DC CIVAC, not DC IVAC: only the former is
+ * allowed at EL0 (SCTLR_EL1.UCI), and the CPU never dirties these lines, so the clean
+ * writes nothing back. */
+static void dcache_civac(const void *va, size_t len)
+{
+	uint64_t ctr;
+	uintptr_t line, a, end;
+
+	__asm__ volatile("mrs %0, ctr_el0" : "=r"(ctr));
+	line = (uintptr_t)4 << ((ctr >> 16) & 0xfu); /* CTR_EL0.DminLine: log2(words) */
+	a = (uintptr_t)va & ~(line - 1u);
+	end = (uintptr_t)va + len;
+
+	__asm__ volatile("dsb sy" ::: "memory");
+	for (; a < end; a += line) {
+		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+
+int rpivid_dma_alloc_cached(rpivid_dma_t *d, size_t size)
+{
+	int rc = dma_map(d, size, 0);
+
+	if (rc == 0) {
+		/* the zeroes reach memory before the block writes the buffer */
+		dcache_civac(d->cpu, d->size);
+	}
+	return rc;
+}
+
+
+void rpivid_dma_sync_for_cpu(const rpivid_dma_t *d, size_t len)
+{
+	dcache_civac(d->cpu, (len < d->size) ? len : d->size);
+}
+#else
+int rpivid_dma_alloc_cached(rpivid_dma_t *d, size_t size)
+{
+	return dma_map(d, size, MAP_UNCACHED);
+}
+
+
+void rpivid_dma_sync_for_cpu(const rpivid_dma_t *d, size_t len)
+{
+	(void)d;
+	(void)len;
+	rpivid_dma_fence();
+}
+#endif
+
+
+int rpivid_dma_alloc(rpivid_dma_t *d, size_t size)
+{
+	return dma_map(d, size, MAP_UNCACHED);
 }
 
 
@@ -646,6 +706,19 @@ int rpivid_dma_alloc(rpivid_dma_t *d, size_t size)
 	d->pa = (uint64_t)(uintptr_t)d->cpu;
 	d->size = size;
 	return 0;
+}
+
+
+int rpivid_dma_alloc_cached(rpivid_dma_t *d, size_t size)
+{
+	return rpivid_dma_alloc(d, size);
+}
+
+
+void rpivid_dma_sync_for_cpu(const rpivid_dma_t *d, size_t len)
+{
+	(void)d;
+	(void)len;
 }
 
 

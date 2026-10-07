@@ -337,13 +337,13 @@ static void slice_msgs(rpivid_cmd_t *c, const rpivid_slice_t *sl)
 		deblock |= 1u << 10;
 	}
 	qpoff = (((uint32_t)sl->slice_cr_qp_offset & 31u) << 5) | ((uint32_t)sl->slice_cb_qp_offset & 31u);
+	/* Every slice sends all its messages, an I slice too, as the driver does. An I
+	 * picture that sent none (the form tools/hevc-decode used) was decoded with the
+	 * previous picture's deblocking state: on the Pi (build 54) every such failure
+	 * followed a picture with deblocking off or offset, from the same stream or the
+	 * previous one decoded in the process */
 	msg(c, deblock);
 	msg(c, qpoff);
-
-	if ((p->compat_intra_no_msgs != 0u) && (sl->slice_type == SLICE_I) && (c->start_ts == 0u) &&
-			(deblock == (1u << 9)) && (qpoff == 0u)) {
-		c->nmsgs = 0;
-	}
 }
 
 

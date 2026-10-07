@@ -71,6 +71,15 @@ int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t 
 int rpivid_dma_alloc(rpivid_dma_t *d, size_t size);
 void rpivid_dma_free(rpivid_dma_t *d);
 
+/* Contiguous cached memory for buffers the block writes and the CPU only reads (the
+ * output pictures): zeroed and written back, so no dirty line can later be evicted over
+ * what the block wrote. The CPU must not write it; call rpivid_dma_sync_for_cpu() after
+ * every decode into it and before reading it. Freed with rpivid_dma_free(). */
+int rpivid_dma_alloc_cached(rpivid_dma_t *d, size_t size);
+
+/* Drop the CPU's cached copy of the first len bytes of a rpivid_dma_alloc_cached() buffer */
+void rpivid_dma_sync_for_cpu(const rpivid_dma_t *d, size_t len);
+
 /* Order prior writes to uncached memory before the block reads it, and the block's
  * completion before the CPU reads its output */
 void rpivid_dma_fence(void);
