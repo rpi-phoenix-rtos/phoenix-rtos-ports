@@ -4,11 +4,11 @@ On top of 0030/0031 (platform/graphics/ffmpeg/, BSD-2-Clause): with the video_pl
 hevc_rpivid, the rpivid block decodes each picture into a V3D BO of the render server and the
 decoder returns that buffer as an AV_PIX_FMT_DRM_PRIME frame (libavcodec/rpivid_drm.h:
 DRM_FORMAT_NV12, DRM_FORMAT_MOD_BROADCOM_SAND128_COL_HEIGHT). The compositor imports each
-buffer once as an EGLImage (EGL_EXT_image_dma_buf_import_modifiers) and draws it with
-TextureMapper::drawTextureExternalOES: Mesa's v3d de-tiles it on the GPU and converts the
-colours (the frame's colour space and range as EGL hints). This replaces the CPU SAND->planar
-copy in the decoder (6.3 ms per 1080p picture on the Pi 4) and the three glTexImage2D uploads
-in the compositor (~5 ms, tiled by Mesa on the CPU). Coordination repo:
+buffer once as an EGLImage (EGL_EXT_image_dma_buf_import_modifiers) into a
+GL_TEXTURE_EXTERNAL_OES texture: Mesa's v3d de-tiles it on the GPU and converts the colours (the
+frame's colour space and range as EGL hints). This replaces the CPU SAND->planar copy in the
+decoder (6.3 ms per 1080p picture on the Pi 4) and the three glTexImage2D uploads in the
+compositor (~5 ms, tiled by Mesa on the CPU). Coordination repo:
 docs/gpu-new-lane/M10b-video-zero-copy.md.
 
   CoordinatedPlatformLayerBufferFFmpeg  requestZeroCopy(): before avcodec_open2 of hevc_rpivid,
@@ -17,40 +17,62 @@ docs/gpu-new-lane/M10b-video-zero-copy.md.
                                 (rpivid_bo_drm_install(), librpivid_bo_drm.a) and the display
                                 has EGL_EXT_image_dma_buf_import_modifiers.
                                 A DRM_PRIME frame is drawn from a per-compositing-thread cache
-                                of EGLImages + GL_TEXTURE_EXTERNAL_OES textures, one per buffer
-                                (named by its dma-buf's st_dev/st_ino, the BO handle; entries
-                                idle for 3 s are dropped): a texture per picture would make Mesa
-                                allocate a ~3 MB tiled shadow every frame. The layer buffer
-                                holds the frame until the compositor drops it, which keeps the
-                                decoder from writing the buffer (it also waits for the GPU's last
-                                read). An import failure, or Skia painting (canvas, snapshots),
-                                takes the CPU readback (rpivid_drm_frame_to_planar). Ordinary
-                                frames take the upload path as before, frame by frame: after a
-                                block failure the decoder goes on with system-memory frames.
+                                of EGLImages + external textures, one per buffer (named by its
+                                dma-buf's st_dev/st_ino, the BO handle, one fstat per picture;
+                                entries idle for 3 s are dropped): a texture per picture would
+                                make Mesa allocate a ~3 MB tiled shadow every frame. Both
+                                compositors: Skia composition (the WPE default, GPU raster)
+                                takes skiaImage(), the texture wrapped as an SkImage
+                                (BorrowTextureFrom, GL_TEXTURE_EXTERNAL_OES); TextureMapper
+                                composition takes paintToTextureMapper() and
+                                drawTextureExternalOES. The layer buffer holds the frame until
+                                the compositor drops it, which keeps the decoder from writing
+                                the buffer (it also waits for the GPU's last read). A frame that
+                                cannot be imported takes the CPU readback
+                                (rpivid_drm_frame_to_planar). Ordinary frames take the upload
+                                path as before, frame by frame (after a block failure the
+                                decoder goes on with system-memory frames). Logged once per
+                                process: the path each compositor takes ("WPEB-MEDIA zero-copy
+                                path=external-oes|readback compositor=skia|texturemapper") and
+                                every reason a frame is not imported.
   MediaPlayerPrivateFFmpeg      asks for it; "decoder ... zero_copy=0|1"; the stat line adds
                                 zc=<the last picture presented was a GPU buffer> and
-                                zc_painted=<pictures drawn that way>; upload_ms stays the
+                                zc_painted=<pictures drawn from it>; upload_ms stays the
                                 compositor's CPU time per painted picture (zero copy: the cache
-                                lookup or the one-time import, and the draw)
+                                lookup or the one-time import)
 
-WPE_PHOENIX_MEDIA_ZERO_COPY=1 turns it on (opt-in: build 60 painted fewer frames with it). Without hevc_rpivid's zero-copy API in the
-FFmpeg prefix (no libavcodec/rpivid_drm.h or rpivid_bo_drm.h) the code compiles to the old path.
+WPE_PHOENIX_MEDIA_ZERO_COPY=1 turns it on (opt-in: build 60's import path covered only
+TextureMapper composition, so every frame took the readback). Without hevc_rpivid's zero-copy
+API in the FFmpeg prefix (no libavcodec/rpivid_drm.h or rpivid_bo_drm.h) the code compiles to the
+old path.
 
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
-index 84a0ffb0..90e4b4e5 100644
+index 84a0ffb0..d88c8534 100644
 --- a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
 +++ b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.cpp
-@@ -30,7 +30,9 @@
+@@ -30,7 +30,11 @@
  #include "PlatformDisplay.h"
  #include "TextureMapper.h"
  #include "TextureMapperGLHeaders.h"
++#include <atomic>
++#include <cstdarg>
 +#include <mutex>
  #include <wtf/MonotonicTime.h>
 +#include <wtf/Vector.h>
  
  #if USE(SKIA)
  WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
-@@ -44,10 +46,27 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
+@@ -39,15 +43,37 @@ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ #include <skia/core/SkPixmap.h>
+ #include <skia/core/SkYUVAInfo.h>
+ #include <skia/core/SkYUVAPixmaps.h>
++#include <skia/gpu/ganesh/GrBackendSurface.h>
++#include <skia/gpu/ganesh/GrDirectContext.h>
+ #include <skia/gpu/ganesh/SkImageGanesh.h>
++#include <skia/gpu/ganesh/gl/GrGLBackendSurface.h>
++#include <skia/gpu/ganesh/gl/GrGLTypes.h>
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_END
++#include "ColorSpaceSkia.h"
  #endif
  
  extern "C" {
@@ -78,7 +100,7 @@ index 84a0ffb0..90e4b4e5 100644
  namespace WebCore {
  
  bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
-@@ -57,15 +76,79 @@ bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
+@@ -57,15 +83,79 @@ bool CoordinatedPlatformLayerBufferFFmpeg::supportsPixelFormat(int format)
      case AV_PIX_FMT_YUVJ420P:
      case AV_PIX_FMT_NV12:
          return true;
@@ -158,7 +180,7 @@ index 84a0ffb0..90e4b4e5 100644
      AVFrame* reference = av_frame_clone(&frame);
      if (!reference)
          return nullptr;
-@@ -87,23 +170,230 @@ CoordinatedPlatformLayerBufferFFmpeg::~CoordinatedPlatformLayerBufferFFmpeg()
+@@ -87,23 +177,272 @@ CoordinatedPlatformLayerBufferFFmpeg::~CoordinatedPlatformLayerBufferFFmpeg()
      // ever drawn (on the player's thread) has none.
      if (m_textures[0])
          glDeleteTextures(m_textures.size(), m_textures.data());
@@ -206,6 +228,8 @@ index 84a0ffb0..90e4b4e5 100644
 +#if HAVE_RPIVID_ZERO_COPY
 +namespace {
 +
++using ZeroCopyKey = FFmpegZeroCopyKey;
++
 +// The EGLImages of the decoders' picture buffers and their GL_TEXTURE_EXTERNAL_OES textures,
 +// one per buffer: a texture made per picture would make Mesa allocate a new tiled shadow of
 +// the picture (~3 MB at 1080p, through the render server) every frame. Per compositing
@@ -214,12 +238,7 @@ index 84a0ffb0..90e4b4e5 100644
 +// buffer's identity; the import keeps the BO alive, so entries unused for a while (a decoder
 +// closed, a video gone) are dropped.
 +struct ZeroCopyImage {
-+    dev_t dev { 0 };
-+    ino_t ino { 0 };
-+    int width { 0 };
-+    int height { 0 };
-+    int colorspace { 0 };
-+    int range { 0 };
++    ZeroCopyKey key;
 +    EGLImage image { EGL_NO_IMAGE };
 +    GLuint texture { 0 };
 +    MonotonicTime lastUse;
@@ -227,7 +246,6 @@ index 84a0ffb0..90e4b4e5 100644
 +
 +struct ZeroCopyCache {
 +    Vector<ZeroCopyImage> entries;
-+    bool importFailureLogged { false };
 +};
 +
 +static constexpr size_t zeroCopyCacheMax = 48;
@@ -262,44 +280,67 @@ index 84a0ffb0..90e4b4e5 100644
 +    }
 +}
 +
-+// The texture of the frame's buffer, imported on first use; 0 when it cannot be imported
-+static GLuint zeroCopyTexture(const AVFrame& frame)
++// Each reason a zero-copy frame is not drawn from its buffer, logged once per process
++static void logZeroCopyOnce(std::atomic<bool>& logged, const char* format, ...) WTF_ATTRIBUTE_PRINTF(2, 3);
++static void logZeroCopyOnce(std::atomic<bool>& logged, const char* format, ...)
 +{
++    if (logged.exchange(true))
++        return;
++    char line[256];
++    va_list args;
++    va_start(args, format);
++    vsnprintf(line, sizeof(line), format, args);
++    va_end(args);
++    fprintf(stderr, "WPEB-MEDIA zero-copy %s\n", line);
++}
++
++// The cache name of the frame's buffer (one fstat): false, logged, when it cannot be imported
++static bool zeroCopyKey(const AVFrame& frame, ZeroCopyKey& key)
++{
++    static std::atomic<bool> loggedShape, loggedCrop, loggedStat;
 +    auto* descriptor = reinterpret_cast<const AVDRMFrameDescriptor*>(frame.data[0]);
 +    if (!descriptor || descriptor->nb_objects != 1 || descriptor->nb_layers != 1 || descriptor->layers[0].nb_planes != 2
-+        || descriptor->objects[0].fd < 0 || frame.crop_left || frame.crop_top)
-+        return 0;
++        || descriptor->objects[0].fd < 0) {
++        logZeroCopyOnce(loggedShape, "not imported: objects=%d layers=%d planes=%d fd=%d (no dma-buf): CPU readback",
++            descriptor ? descriptor->nb_objects : -1, descriptor ? descriptor->nb_layers : -1,
++            descriptor ? descriptor->layers[0].nb_planes : -1, descriptor ? descriptor->objects[0].fd : -1);
++        return false;
++    }
++    if (frame.crop_left || frame.crop_top) {
++        logZeroCopyOnce(loggedCrop, "not imported: crop left %zu top %zu: CPU readback", frame.crop_left, frame.crop_top);
++        return false;
++    }
 +    struct stat st;
-+    if (fstat(descriptor->objects[0].fd, &st) < 0)
-+        return 0;
++    if (fstat(descriptor->objects[0].fd, &st) < 0) {
++        logZeroCopyOnce(loggedStat, "not imported: fstat(dma-buf fd %d) failed (errno %d): CPU readback", descriptor->objects[0].fd, errno);
++        return false;
++    }
++    key = { static_cast<uint64_t>(st.st_dev), static_cast<uint64_t>(st.st_ino), frame.width, frame.height, frame.colorspace,
++        frame.color_range == AVCOL_RANGE_JPEG ? 1 : 0 };
++    return true;
++}
 +
++// The texture of the buffer named by key, imported on first use (frame: that buffer's frame);
++// 0 when it cannot be imported. Also drops what nothing drew for a while.
++static GLuint bufferTexture(const AVFrame& frame, const ZeroCopyKey& key, bool& imported)
++{
++    static std::atomic<bool> loggedImport, loggedTexture;
++    imported = false;
 +    if (!zeroCopyCache)
 +        zeroCopyCache = new ZeroCopyCache;
 +    auto& cache = *zeroCopyCache;
 +    auto now = MonotonicTime::now();
-+    int range = frame.color_range == AVCOL_RANGE_JPEG ? 1 : 0;
-+    // drop what nothing drew for a while, and find this buffer
 +    ZeroCopyImage* found = nullptr;
 +    for (size_t i = cache.entries.size(); i-- > 0;) {
-+        auto& entry = cache.entries[i];
-+        if (entry.dev == st.st_dev && entry.ino == st.st_ino && entry.width == frame.width && entry.height == frame.height
-+            && entry.colorspace == frame.colorspace && entry.range == range) {
-+            found = &entry;
++        if (cache.entries[i].key == key || now - cache.entries[i].lastUse <= zeroCopyIdle)
 +            continue;
-+        }
-+        if (now - entry.lastUse > zeroCopyIdle) {
-+            releaseZeroCopyImage(entry);
-+            cache.entries.removeAt(i);
-+            found = nullptr; // indices moved: look again below
-+        }
++        releaseZeroCopyImage(cache.entries[i]);
++        cache.entries.removeAt(i);
 +    }
-+    if (!found) {
-+        for (auto& entry : cache.entries) {
-+            if (entry.dev == st.st_dev && entry.ino == st.st_ino && entry.width == frame.width && entry.height == frame.height
-+                && entry.colorspace == frame.colorspace && entry.range == range) {
-+                found = &entry;
-+                break;
-+            }
++    for (auto& entry : cache.entries) {
++        if (entry.key == key) {
++            found = &entry;
++            break;
 +        }
 +    }
 +    if (found) {
@@ -307,6 +348,7 @@ index 84a0ffb0..90e4b4e5 100644
 +        return found->texture;
 +    }
 +
++    auto* descriptor = reinterpret_cast<const AVDRMFrameDescriptor*>(frame.data[0]);
 +    const auto& layer = descriptor->layers[0];
 +    uint64_t modifier = descriptor->objects[0].format_modifier;
 +    Vector<EGLAttrib> attributes {
@@ -324,17 +366,15 @@ index 84a0ffb0..90e4b4e5 100644
 +        EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, static_cast<EGLAttrib>(modifier & 0xffffffff),
 +        EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT, static_cast<EGLAttrib>(modifier >> 32),
 +        EGL_YUV_COLOR_SPACE_HINT_EXT, yuvColorSpaceHint(frame),
-+        EGL_SAMPLE_RANGE_HINT_EXT, range ? EGL_YUV_FULL_RANGE_EXT : EGL_YUV_NARROW_RANGE_EXT,
++        EGL_SAMPLE_RANGE_HINT_EXT, key.range ? EGL_YUV_FULL_RANGE_EXT : EGL_YUV_NARROW_RANGE_EXT,
 +        EGL_NONE
 +    };
 +    auto& display = PlatformDisplay::sharedDisplay();
 +    EGLImage image = display.createEGLImage(EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attributes);
 +    if (!image) {
-+        if (!cache.importFailureLogged) {
-+            cache.importFailureLogged = true;
-+            fprintf(stderr, "WPEB-MEDIA zero-copy import failed (EGL 0x%x) %dx%d modifier=0x%016llx: CPU readback\n", eglGetError(),
-+                frame.width, frame.height, static_cast<unsigned long long>(modifier));
-+        }
++        logZeroCopyOnce(loggedImport, "import failed (EGL 0x%x) %dx%d fourcc=0x%08x modifier=0x%016llx pitch=%td/%td offset=%td: CPU readback",
++            eglGetError(), frame.width, frame.height, layer.format, static_cast<unsigned long long>(modifier), layer.planes[0].pitch,
++            layer.planes[1].pitch, layer.planes[1].offset);
 +        return 0;
 +    }
 +    GLuint texture = 0;
@@ -350,10 +390,7 @@ index 84a0ffb0..90e4b4e5 100644
 +    if (error != GL_NO_ERROR) {
 +        glDeleteTextures(1, &texture);
 +        display.destroyEGLImage(image);
-+        if (!cache.importFailureLogged) {
-+            cache.importFailureLogged = true;
-+            fprintf(stderr, "WPEB-MEDIA zero-copy texture failed (GL 0x%x): CPU readback\n", error);
-+        }
++        logZeroCopyOnce(loggedTexture, "texture failed (GL 0x%x): CPU readback", error);
 +        return 0;
 +    }
 +    if (cache.entries.size() >= zeroCopyCacheMax) {
@@ -365,19 +402,46 @@ index 84a0ffb0..90e4b4e5 100644
 +        releaseZeroCopyImage(cache.entries[oldest]);
 +        cache.entries.removeAt(oldest);
 +    }
-+    cache.entries.append({ st.st_dev, st.st_ino, frame.width, frame.height, frame.colorspace, range, image, texture, now });
++    cache.entries.append({ key, image, texture, now });
++    imported = true;
 +    return texture;
 +}
 +
 +} // namespace
 +#endif
 +
++unsigned CoordinatedPlatformLayerBufferFFmpeg::zeroCopyTexture(bool& imported)
++{
++    imported = false;
++#if HAVE_RPIVID_ZERO_COPY
++    if (m_zeroCopyFailed)
++        return 0;
++    // one fstat per picture: a repaint of it names its buffer by the key
++    if (!m_hasZeroCopyKey) {
++        if (!zeroCopyKey(*m_frame, m_zeroCopyKey)) {
++            m_zeroCopyFailed = true;
++            return 0;
++        }
++        m_hasZeroCopyKey = true;
++    }
++    GLuint texture = bufferTexture(*m_frame, m_zeroCopyKey, imported);
++    if (!texture)
++        m_zeroCopyFailed = true;
++    return texture;
++#else
++    return 0;
++#endif
++}
++
 +bool CoordinatedPlatformLayerBufferFFmpeg::paintZeroCopy(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity)
 +{
 +#if HAVE_RPIVID_ZERO_COPY
-+    GLuint texture = zeroCopyTexture(*m_frame);
++    bool imported;
++    GLuint texture = zeroCopyTexture(imported);
 +    if (!texture)
 +        return false;
++    static std::atomic<bool> logged;
++    logZeroCopyOnce(logged, "path=external-oes compositor=texturemapper (first picture %dx%d)", m_frame->width, m_frame->height);
 +    textureMapper.drawTextureExternalOES(texture, m_flags, targetRect, modelViewMatrix, opacity);
 +    return true;
 +#else
@@ -392,7 +456,7 @@ index 84a0ffb0..90e4b4e5 100644
  // Limited-range ("TV") YCbCr to RGB, as CoordinatedPlatformLayerBufferYUV's matrices.
  static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
  {
-@@ -134,14 +424,22 @@ static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
+@@ -134,14 +473,28 @@ static const std::array<GLfloat, 16>& yuvToRgbMatrix(const AVFrame& frame)
  void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& textureMapper, const FloatRect& targetRect, const TransformationMatrix& modelViewMatrix, float opacity)
  {
      auto start = MonotonicTime::now();
@@ -402,6 +466,12 @@ index 84a0ffb0..90e4b4e5 100644
 +        return;
 +    }
 +    // a system-memory picture, or the readback of a zero-copy one that could not be imported
++#if HAVE_RPIVID_ZERO_COPY
++    if (isZeroCopyFrame(*m_frame)) {
++        static std::atomic<bool> logged;
++        logZeroCopyOnce(logged, "path=readback compositor=texturemapper (first picture %dx%d)", m_frame->width, m_frame->height);
++    }
++#endif
 +    const AVFrame* frame = systemMemoryFrame();
 +    if (!frame)
 +        return;
@@ -419,7 +489,7 @@ index 84a0ffb0..90e4b4e5 100644
              int bytesPerPixel = interleaved ? 2 : 1;
              glBindTexture(GL_TEXTURE_2D, m_textures[i]);
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-@@ -149,8 +447,8 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
+@@ -149,8 +502,8 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
              glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
              glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -430,7 +500,7 @@ index 84a0ffb0..90e4b4e5 100644
          }
          glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
          glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-@@ -159,10 +457,10 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
+@@ -159,10 +512,10 @@ void CoordinatedPlatformLayerBufferFFmpeg::paintToTextureMapper(TextureMapper& t
  
      auto flags = m_flags;
      if (planes == 2)
@@ -444,7 +514,50 @@ index 84a0ffb0..90e4b4e5 100644
  }
  
  #if USE(SKIA)
-@@ -194,29 +492,33 @@ sk_sp<SkImage> CoordinatedPlatformLayerBufferFFmpeg::skiaImage()
+@@ -187,6 +540,42 @@ static SkYUVColorSpace skiaColorSpace(const AVFrame& frame)
+ 
+ sk_sp<SkImage> CoordinatedPlatformLayerBufferFFmpeg::skiaImage()
+ {
++#if HAVE_RPIVID_ZERO_COPY
++    // Skia composition (the WPE default, and GPU raster): the buffer's external texture wrapped
++    // as an SkImage, sampled through samplerExternalOES (Mesa de-tiles and converts)
++    if (isZeroCopyFrame(*m_frame) && !m_zeroCopyFailed) {
++        auto start = MonotonicTime::now();
++        bool imported;
++        GLuint texture = zeroCopyTexture(imported);
++        if (texture && m_skiaImage && texture == m_skiaTexture)
++            return m_skiaImage; // touched in the cache: kept while drawn
++        auto* grContext = PlatformDisplay::sharedDisplay().skiaGrContext();
++        if (texture && grContext) {
++            if (imported)
++                grContext->resetContext(kTextureBinding_GrGLBackendState); // our glBindTexture
++            GrGLTextureInfo externalTexture;
++            externalTexture.fTarget = GL_TEXTURE_EXTERNAL_OES;
++            externalTexture.fID = texture;
++            externalTexture.fFormat = GL_RGBA8;
++            auto backendTexture = GrBackendTextures::MakeGL(m_frame->width, m_frame->height, skgpu::Mipmapped::kNo, externalTexture);
++            m_skiaImage = SkImages::BorrowTextureFrom(grContext, backendTexture, kTopLeft_GrSurfaceOrigin, kRGBA_8888_SkColorType,
++                kOpaque_SkAlphaType, sRGBColorSpaceSingleton());
++            if (m_skiaImage) {
++                m_skiaTexture = texture;
++                static std::atomic<bool> logged;
++                logZeroCopyOnce(logged, "path=external-oes compositor=skia (first picture %dx%d)", m_frame->width, m_frame->height);
++                countPaint(start, true);
++                return m_skiaImage;
++            }
++            static std::atomic<bool> loggedSkia;
++            logZeroCopyOnce(loggedSkia, "not drawn: Skia cannot wrap the external texture (GL_OES_EGL_image_external_essl3?): CPU readback");
++        }
++        m_zeroCopyFailed = true;
++        m_skiaImage = nullptr;
++        static std::atomic<bool> loggedReadback;
++        logZeroCopyOnce(loggedReadback, "path=readback compositor=skia (first picture %dx%d)", m_frame->width, m_frame->height);
++    }
++#endif
+     if (m_skiaImage)
+         return m_skiaImage;
+ 
+@@ -194,29 +583,33 @@ sk_sp<SkImage> CoordinatedPlatformLayerBufferFFmpeg::skiaImage()
      auto* grContext = PlatformDisplay::sharedDisplay().skiaGrContext();
      if (!grContext)
          return nullptr;
@@ -488,7 +601,7 @@ index 84a0ffb0..90e4b4e5 100644
  }
  #endif
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h
-index b4841b95..dacbf564 100644
+index b4841b95..9928be26 100644
 --- a/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h
 +++ b/Source/WebCore/platform/graphics/ffmpeg/CoordinatedPlatformLayerBufferFFmpeg.h
 @@ -33,6 +33,8 @@
@@ -500,7 +613,7 @@ index b4841b95..dacbf564 100644
  struct AVFrame;
  
  namespace WebCore {
-@@ -44,12 +46,20 @@ struct FFmpegFrameCounters final : public ThreadSafeRefCounted<FFmpegFrameCounte
+@@ -44,12 +46,32 @@ struct FFmpegFrameCounters final : public ThreadSafeRefCounted<FFmpegFrameCounte
      static Ref<FFmpegFrameCounters> create() { return adoptRef(*new FFmpegFrameCounters); }
      std::atomic<uint64_t> painted { 0 };
      std::atomic<uint64_t> uploadMicroseconds { 0 };
@@ -511,6 +624,18 @@ index b4841b95..dacbf564 100644
 -// compositor. The planes are uploaded on the compositing thread when the frame is drawn:
 -// by Skia from the plane pixmaps (Skia composition, the WPE default), or into three R8
 -// textures drawn by TextureMapper's YUV shader. The colour conversion runs on the GPU either way.
++// The name of a zero-copy frame's GPU buffer in the compositor's import cache: its dma-buf's
++// st_dev/st_ino (the render server's BO handle), size and colour hints
++struct FFmpegZeroCopyKey {
++    uint64_t dev { 0 };
++    uint64_t ino { 0 };
++    int width { 0 };
++    int height { 0 };
++    int colorspace { 0 };
++    int range { 0 };
++    bool operator==(const FFmpegZeroCopyKey&) const = default;
++};
++
 +// A decoded picture on its way to the compositor:
 +// - in system memory (8-bit 4:2:0: three planes, or NV12): the planes are uploaded on the
 +//   compositing thread when the frame is drawn, by Skia from the plane pixmaps (Skia
@@ -525,7 +650,7 @@ index b4841b95..dacbf564 100644
  class CoordinatedPlatformLayerBufferFFmpeg final : public CoordinatedPlatformLayerBuffer {
  public:
      // Takes a reference to the frame; nullptr when its pixel format is not one of the above.
-@@ -59,16 +69,26 @@ public:
+@@ -59,16 +81,33 @@ public:
  
      static bool supportsPixelFormat(int);
  
@@ -548,14 +673,21 @@ index b4841b95..dacbf564 100644
 +    // on first use: a fallback, and Skia painting); nullptr if that fails
 +    const AVFrame* systemMemoryFrame();
 +    bool paintZeroCopy(TextureMapper&, const FloatRect&, const TransformationMatrix&, float opacity);
++    // the GL_TEXTURE_EXTERNAL_OES texture of a zero-copy frame's buffer (compositing thread), 0 if
++    // it cannot be imported (then the readback is used); imported: made by this call
++    unsigned zeroCopyTexture(bool& imported);
  
      AVFrame* m_frame { nullptr };
 +    AVFrame* m_readback { nullptr };
++    FFmpegZeroCopyKey m_zeroCopyKey;
++    bool m_hasZeroCopyKey { false };
++    bool m_zeroCopyFailed { false };
++    unsigned m_skiaTexture { 0 };
      Ref<FFmpegFrameCounters> m_counters;
      bool m_painted { false };
      std::array<unsigned, 3> m_textures { 0, 0, 0 };
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
-index a20a8afc..e3d37c9c 100644
+index a20a8afc..48b154f6 100644
 --- a/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
 +++ b/Source/WebCore/platform/graphics/ffmpeg/MediaPlayerPrivateFFmpeg.cpp
 @@ -649,15 +649,20 @@ AVCodecContext* MediaPlayerPrivateFFmpeg::openDecoder(int index)
