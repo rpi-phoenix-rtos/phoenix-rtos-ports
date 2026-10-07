@@ -1,0 +1,14 @@
+/*
+ * The symbols webkit-browser exports to the shared object it dlopen()s (ld --dynamic-list): the
+ * injected bundle every web process loads, libwebkit2gtkinjectedbundle.so
+ * (WebKitInjectedBundleMain.cpp). As webkit_wpe's launcher/wpe-browser.exports: a dynamic symbol
+ * table holding exactly these symbols, kept under --gc-sections; build-gtk.sh checks that it
+ * covers the bundle's imports.
+ */
+{
+	abort;
+	/* WebKit::WebProcessExtensionManager::singleton() */
+	_ZN6WebKit26WebProcessExtensionManager9singletonEv;
+	/* WebKit::WebProcessExtensionManager::initialize(WebKit::InjectedBundle*, API::Object*) */
+	_ZN6WebKit26WebProcessExtensionManager10initializeEPNS_14InjectedBundleEPN3API6ObjectE;
+};

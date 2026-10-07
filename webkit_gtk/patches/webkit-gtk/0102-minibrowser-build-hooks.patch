@@ -1,0 +1,58 @@
+Subject: MiniBrowser/gtk: the start URL and the location entry's text-to-URI rule can come from the build
+
+The Phoenix desktop browser (phoenix-rtos-ports webkit_gtk, files/launcher) builds MiniBrowser's
+window, tab, downloads-bar and search-box sources with its own main(). Two build-time hooks, both
+inert unless defined:
+  BROWSER_DEFAULT_URL   what new tabs and Home open (the local start page, not www.webkitgtk.org)
+  BROWSER_ENTRY_TO_URI  a function name: maps the location entry's text to the URI to load
+                        (plain words become a search, a bare host name gets https://)
+
+diff --git a/Tools/MiniBrowser/gtk/BrowserWindow.c b/Tools/MiniBrowser/gtk/BrowserWindow.c
+index e5c3084c..686faf81 100644
+--- a/Tools/MiniBrowser/gtk/BrowserWindow.c
++++ b/Tools/MiniBrowser/gtk/BrowserWindow.c
+@@ -95,15 +95,26 @@ static void browserWindowSetStatusText(BrowserWindow *window, const char *text)
+     browser_tab_set_status_text(window->activeTab, text);
+ }
+ 
++#ifdef BROWSER_ENTRY_TO_URI
++/* Provided by the program that defines it: what the location entry's text loads (a search for
++ * plain words, a scheme for a bare host name). Returns a newly allocated string. */
++char *BROWSER_ENTRY_TO_URI(const char *text);
++#endif
++
+ static void activateUriEntryCallback(BrowserWindow *window)
+ {
+-    browser_window_load_uri(window,
+ #if GTK_CHECK_VERSION(3, 98, 0)
+-        gtk_editable_get_text(GTK_EDITABLE(window->uriEntry))
++    const char *text = gtk_editable_get_text(GTK_EDITABLE(window->uriEntry));
++#else
++    const char *text = gtk_entry_get_text(GTK_ENTRY(window->uriEntry));
++#endif
++#ifdef BROWSER_ENTRY_TO_URI
++    char *uri = BROWSER_ENTRY_TO_URI(text);
++    browser_window_load_uri(window, uri);
++    g_free(uri);
+ #else
+-        gtk_entry_get_text(GTK_ENTRY(window->uriEntry))
++    browser_window_load_uri(window, text);
+ #endif
+-    );
+ }
+ 
+ static void reloadOrStopCallback(GSimpleAction *action, GVariant *parameter, gpointer userData)
+diff --git a/Tools/MiniBrowser/gtk/BrowserWindow.h b/Tools/MiniBrowser/gtk/BrowserWindow.h
+index 1fd07efb..1adc8c23 100644
+--- a/Tools/MiniBrowser/gtk/BrowserWindow.h
++++ b/Tools/MiniBrowser/gtk/BrowserWindow.h
+@@ -42,7 +42,9 @@ G_BEGIN_DECLS
+ #define BROWSER_IS_WINDOW(obj)         (G_TYPE_CHECK_INSTANCE_TYPE((obj), BROWSER_TYPE_WINDOW))
+ #define BROWSER_IS_WINDOW_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),  BROWSER_TYPE_WINDOW))
+ #define BROWSER_WINDOW_GET_CLASS(obj)  (G_TYPE_INSTANCE_GET_CLASS((obj),  BROWSER_TYPE_WINDOW, BrowserWindowClass))
++#ifndef BROWSER_DEFAULT_URL
+ #define BROWSER_DEFAULT_URL            "http://www.webkitgtk.org/"
++#endif
+ #define BROWSER_ABOUT_SCHEME           "minibrowser-about"
+ 
+ typedef struct _BrowserWindow        BrowserWindow;
