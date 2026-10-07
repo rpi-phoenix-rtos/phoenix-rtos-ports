@@ -29,8 +29,10 @@
  *
  * The reference: <file>.md5 next to the file when there is one (ffmpeg -fps_mode
  * passthrough -f framemd5 output of the host: only the hardware pass runs), else the
- * CPU decoder. A directory stands for its HEVC files (.265 .hevc .h265 .bit .mp4 .mkv
- * .mov), in name order. Every file ends with one line
+ * CPU decoder. A directory stands for the files its MANIFEST names (the first word of
+ * each line not starting with '#', in that order: tools/hevc-decode/rpivid-check/gen-set.sh
+ * writes one), else for its HEVC files (.265 .hevc .h265 .bit .mp4 .mkv .mov) in name
+ * order. Every file ends with one line
  *
  *     RPIVID-CHECK stream=<name> frames=<n> mismatches=<m> fallback=<0|1> fps=<x> result=<r> ...
  *
@@ -100,22 +102,46 @@ static int print_md5, crc_mode, crc_checked, crc_bad, quiet;
 static char hw_tools[512] = "-", hw_nondefault[512] = "-", hw_cpu_why[200];
 
 
-/* The comma-separated tool list after `key` in a decoder line, into out */
+/* Add the comma-separated tool list after `key` in a decoder line to the list in out
+ * ("-" when empty): a stream that changes SPS reports its tools again, and keeps the earlier */
 static void grab_list(const char *line, const char *key, char *out, size_t len)
 {
 	const char *p = strstr(line, key);
-	size_t n;
+	char item[64];
+	size_t n, k, o;
 
 	if (p == NULL) {
 		return;
 	}
 	p += strlen(key);
 	n = strcspn(p, " );\r\n");
-	if (n >= len) {
-		n = len - 1u;
+	while (n > 0u) {
+		k = strcspn(p, ",");
+		k = (k < n) ? k : n;
+		if ((k != 0u) && (k < sizeof(item)) && ((k != 1u) || (p[0] != '-'))) {
+			const char *q = out;
+
+			memcpy(item, p, k);
+			item[k] = '\0';
+			/* already listed? */
+			while ((q = strstr(q, item)) != NULL) {
+				if (((q == out) || (q[-1] == ',')) && ((q[k] == '\0') || (q[k] == ','))) {
+					break;
+				}
+				q += k;
+			}
+			if (q == NULL) {
+				if (strcmp(out, "-") == 0) {
+					out[0] = '\0';
+				}
+				o = strlen(out);
+				snprintf(out + o, len - o, "%s%s", (o != 0u) ? "," : "", item);
+			}
+		}
+		k += (k < n) ? 1u : 0u;
+		p += k;
+		n -= k;
 	}
-	memcpy(out, p, n);
-	out[n] = '\0';
 }
 
 
@@ -149,6 +175,11 @@ static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
 		grab_list(line, "tools in use: ", hw_tools, sizeof(hw_tools));
 		grab_list(line, "not in the default set: ", hw_nondefault, sizeof(hw_nondefault));
 	}
+	/* a picture the block could not take or failed: the rest of the stream went to the CPU */
+	if ((hw_cpu_why[0] == '\0') && (strstr(line, "rpivid: picture POC ") != NULL)) {
+		snprintf(hw_cpu_why, sizeof(hw_cpu_why), "%s", strstr(line, "rpivid: picture POC ") + 8);
+		hw_cpu_why[strcspn(hw_cpu_why, "\r\n")] = '\0';
+	}
 	if (strstr(line, "rpivid: CPU decode: ") != NULL) {
 		snprintf(hw_cpu_why, sizeof(hw_cpu_why), "%s", strstr(line, "rpivid: CPU decode: ") + 20);
 		hw_cpu_why[strcspn(hw_cpu_why, "\r\n")] = '\0';
@@ -156,7 +187,8 @@ static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
 	if (strstr(line, "continuing on the CPU decoder") != NULL) {
 		hw_fallback = 1;
 	}
-	if (quiet && (strstr(line, "rpivid") == NULL)) {
+	/* "rpivid:", not "rpivid": the decoder's own name prefixes every line it logs */
+	if (quiet && (strstr(line, "rpivid:") == NULL)) {
 		return;
 	}
 	fputs(line, stdout);
@@ -619,15 +651,54 @@ static int cmp_str(const void *a, const void *b)
 }
 
 
-/* Append a file, or a directory's HEVC files in name order, to the list */
+static int add_name(char ***list, int *n, int *cap, char *name)
+{
+	if (name == NULL) {
+		return -1;
+	}
+	if (*n == *cap) {
+		char **nl = av_realloc_array(*list, *cap ? *cap * 2 : 64, sizeof(**list));
+
+		if (nl == NULL) {
+			av_free(name);
+			return -1;
+		}
+		*list = nl;
+		*cap = *cap ? *cap * 2 : 64;
+	}
+	(*list)[(*n)++] = name;
+	return 0;
+}
+
+
+/* Append a file, or a directory's MANIFEST files (else its HEVC files in name order), to the list */
 static int add_input(char ***list, int *n, int *cap, const char *arg)
 {
+	const char *sep = (arg[0] != '\0') && (arg[strlen(arg) - 1] == '/') ? "" : "/";
 	struct stat st;
 	DIR *d;
 	struct dirent *e;
+	FILE *mf;
+	char line[512];
 	int first = *n;
 
 	if ((stat(arg, &st) == 0) && S_ISDIR(st.st_mode)) {
+		snprintf(line, sizeof(line), "%s%sMANIFEST", arg, sep);
+		mf = fopen(line, "r");
+		if (mf != NULL) {
+			while (fgets(line, sizeof(line), mf) != NULL) {
+				line[strcspn(line, " \t\r\n")] = '\0';
+				if ((line[0] == '\0') || (line[0] == '#')) {
+					continue;
+				}
+				if (add_name(list, n, cap, av_asprintf("%s%s%s", arg, sep, line)) < 0) {
+					fclose(mf);
+					return -1;
+				}
+			}
+			fclose(mf);
+			return 0;
+		}
 		d = opendir(arg);
 		if (d == NULL) {
 			return -1;
@@ -636,42 +707,16 @@ static int add_input(char ***list, int *n, int *cap, const char *arg)
 			if ((e->d_name[0] == '.') || !has_hevc_ext(e->d_name)) {
 				continue;
 			}
-			if (*n == *cap) {
-				char **nl = av_realloc_array(*list, *cap ? *cap * 2 : 64, sizeof(**list));
-
-				if (nl == NULL) {
-					closedir(d);
-					return -1;
-				}
-				*list = nl;
-				*cap = *cap ? *cap * 2 : 64;
-			}
-			(*list)[*n] = av_asprintf("%s%s%s", arg, (arg[strlen(arg) - 1] == '/') ? "" : "/", e->d_name);
-			if ((*list)[*n] == NULL) {
+			if (add_name(list, n, cap, av_asprintf("%s%s%s", arg, sep, e->d_name)) < 0) {
 				closedir(d);
 				return -1;
 			}
-			(*n)++;
 		}
 		closedir(d);
 		qsort(*list + first, (size_t)(*n - first), sizeof(**list), cmp_str);
 		return 0;
 	}
-	if (*n == *cap) {
-		char **nl = av_realloc_array(*list, *cap ? *cap * 2 : 64, sizeof(**list));
-
-		if (nl == NULL) {
-			return -1;
-		}
-		*list = nl;
-		*cap = *cap ? *cap * 2 : 64;
-	}
-	(*list)[*n] = av_strdup(arg);
-	if ((*list)[*n] == NULL) {
-		return -1;
-	}
-	(*n)++;
-	return 0;
+	return add_name(list, n, cap, av_strdup(arg));
 }
 
 

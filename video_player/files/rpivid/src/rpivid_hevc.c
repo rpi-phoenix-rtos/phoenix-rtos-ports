@@ -31,6 +31,7 @@
 
 #include "avcodec.h"
 #include "get_bits.h"
+#include "golomb.h"
 #include "hevcdec.h"
 #include "hwaccel_internal.h"
 #include "internal.h"
@@ -264,7 +265,7 @@ static const struct {
 	[T_MERGE_LEVEL] = { "merge_level", "parallel merge level other than 2", 1 },
 	[T_TILES] = { "tiles", "tiles", 0 },
 	[T_SLICES] = { "slices", "several slice segments per picture", 1 },
-	[T_DEPENDENT_SLICES] = { "dependent_slices", "dependent slice segments", 0 },
+	[T_DEPENDENT_SLICES] = { "dependent_slices", "dependent slice segments (in a picture)", 0 },
 };
 
 
@@ -474,10 +475,28 @@ static int64_t pps_tools(const HEVCPPS *pps, char *why, size_t whylen)
 	if (pps->log2_parallel_merge_level != 2) {
 		m |= TOOL(T_MERGE_LEVEL);
 	}
-	if (pps->dependent_slice_segments_enabled_flag) {
-		m |= TOOL(T_DEPENDENT_SLICES);
-	}
 	return m;
+}
+
+
+/* A slice segment NAL unit after the first of its picture: is it a dependent one?
+ * (7.3.6.1: first_slice_segment_in_pic_flag, no_output_of_prior_pics_flag for IRAP
+ * pictures, slice_pic_parameter_set_id, dependent_slice_segment_flag if the PPS allows it) */
+static int dependent_segment(const HEVCContext *s, const H2645NAL *nal)
+{
+	const HEVCPPS *pps;
+	GetBitContext gb;
+	unsigned int id;
+
+	if ((nal->size <= 2) || (init_get_bits8(&gb, nal->data + 2, nal->size - 2) < 0) || get_bits1(&gb)) {
+		return 0;
+	}
+	if ((nal->type >= HEVC_NAL_BLA_W_LP) && (nal->type <= HEVC_NAL_RSV_IRAP_VCL23)) {
+		skip_bits1(&gb);
+	}
+	id = get_ue_golomb_long(&gb);
+	pps = (id < HEVC_MAX_PPS_COUNT) ? s->ps.pps_list[id] : NULL;
+	return (pps != NULL) && pps->dependent_slice_segments_enabled_flag && get_bits1(&gb);
 }
 
 
@@ -735,6 +754,9 @@ int ff_rpivid_hevc_picture_ok(AVCodecContext *avctx)
 			if ((nal->size > 2) && ((nal->data[2] & 0x80u) != 0u)) {
 				pics++;
 			}
+			else if (dependent_segment(s, nal)) {
+				m |= TOOL(T_DEPENDENT_SLICES);
+			}
 		}
 	}
 	/* a packet is one access unit (a picture) but count pictures all the same */
@@ -745,6 +767,10 @@ int ff_rpivid_hevc_picture_ok(AVCodecContext *avctx)
 			av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d: %d slice segments (tool %s off)\n", s->poc, vcl, tools[T_SLICES].name);
 			return -1;
 		}
+	}
+	if (tools_ok((uint32_t)m, ctx->enabled, why, sizeof(why)) < 0) {
+		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d: %s\n", s->poc, why);
+		return -1;
 	}
 	tools_used(avctx, ctx, ctx->sps_tools | (uint32_t)m);
 	if (ctx->bs.size < need) {
