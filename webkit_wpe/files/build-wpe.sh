@@ -401,6 +401,14 @@ stage_deps() {
 			"${TC}-objcopy" --redefine-sym pthread_create=phx_ffmpeg_pthread_create "${FF}/lib/lib${l}.a" "${VN}/lib/lib${l}.a"
 			pc_into "${FF}/lib/pkgconfig/lib${l}.pc"
 		done
+		# hevc_rpivid's zero-copy picture buffers (V3D BOs of the render server; webkit-video/0033):
+		# its archive joins the link group with every other deps archive, libdrm is Mesa's
+		if [ -f "${FF}/lib/librpivid_bo_drm.a" ] && [ -f "${FF}/include/rpivid_bo_drm.h" ]; then
+			cp_into include "${FF}/include/rpivid_bo_drm.h"
+			cp_into lib "${FF}/lib/librpivid_bo_drm.a"
+		else
+			echo "build-wpe.sh: warning: ${FF} has no librpivid_bo_drm.a: <video> without zero copy" >&2
+		fi
 	fi
 
 	# every .pc: prefix = this view (pkg-config --define-prefix also does this), and the

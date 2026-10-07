@@ -66,12 +66,19 @@
 	#                             MediaCapabilities.decodingInfo() answers (coordination repo
 	#                             docs/browser/MSE-DESIGN.md stage 0); needs video_player's hls
 	#                             demuxer and its files/hls hunks
+	#   patches/webkit-video/0033 USE video only: zero-copy HEVC frames (hevc_rpivid's rpivid_out=drm_prime:
+	#                             the block's V3D BOs as AV_PIX_FMT_DRM_PRIME frames, imported once per
+	#                             buffer as EGLImages and drawn through GL_TEXTURE_EXTERNAL_OES; Mesa
+	#                             de-tiles on the GPU); needs video_player's librpivid_bo_drm.a (else
+	#                             it compiles to the upload path); WPE_PHOENIX_MEDIA_ZERO_COPY=0: off
+	#                             (coordination repo docs/gpu-new-lane/M10b-video-zero-copy.md)
 	#   patches/webkit-mse/0032   USE mse only (needs USE video): Media Source Extensions over the same
 	#                             FFmpeg decoders (ENABLE_MEDIA_SOURCE: an MSE engine, MediaSource and
 	#                             SourceBuffer backends, a fragmented-MP4 parser; type answers that
 	#                             steer adaptive players to HEVC and H.264 <= 720p; MSE-DESIGN.md
 	#                             stage 1). Kept apart from webkit-video: turning MSE on changes
 	#                             cmakeconfig.h, so a video build without it keeps its tree
+	#   patches/webkit-mse/0034   USE mse only: the MSE engine asks for 0033's zero-copy frames too
 	#   files/build-wpe.sh        the build (also run by tools/browser/wpe/build.sh for scratch
 	#                             builds): host ruby if missing, a private dependency prefix,
 	#                             the libphoenix compat objects, CMake + ninja, the link checks
