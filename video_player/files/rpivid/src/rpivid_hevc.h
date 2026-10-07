@@ -25,12 +25,16 @@
 
 /* How much of the stream syntax goes to the block:
  *   0  none (CPU decoder)
- *   1  what the block was proved bit-exact on (the x265 tool set: CTB 64, one slice
- *      segment per picture, no tiles, WPP, SAO, TMVP, weighted prediction, 8/10 bit)
- *   2  everything the command programming implements (tiles, several slices, scaling
- *      lists, PCM, AMP, other block sizes, QP and deblocking offsets): unverified */
+ *   1  the default tool set: what the block was proved bit-exact on (the x265 tool set:
+ *      CTB 64, one slice segment per picture, no tiles, WPP, SAO, TMVP, weighted
+ *      prediction, 8/10 bit) and the further tools on by default in rpivid_hevc.c's
+ *      tools[] (other block sizes, transform tree depth, AMP, scaling lists, several
+ *      slices, QP and deblocking variants, ...)
+ *   2  every tool the command programming implements (also tiles, dependent slices,
+ *      PCM, transquant bypass, constrained intra prediction, long-term references)
+ * FFMPEG_RPIVID_TOOLS=-name,+name turns single tools off or on (rpivid_hevc.c). */
 #define RPIVID_LEVEL_OFF      0
-#define RPIVID_LEVEL_VERIFIED 1
+#define RPIVID_LEVEL_DEFAULT  1
 #define RPIVID_LEVEL_ALL      2
 
 /* From get_format(), with the SPS active and a software format chosen: take the

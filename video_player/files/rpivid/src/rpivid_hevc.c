@@ -70,7 +70,9 @@ typedef struct RPIVIDFrame {
 typedef struct RPIVIDContext {
 	rpivid_hw_t *hw;
 	RPIVIDPool *pool;
-	int level;
+	uint32_t enabled;              /* the tools (T_*) the block may be given */
+	uint32_t sps_tools;            /* the active SPS's */
+	uint32_t used;                 /* every tool the stream used so far */
 	rpivid_dma_t bs;               /* the picture's slice NAL units */
 	size_t bs_used;
 	rpivid_dma_t dummy_mv;         /* a zeroed collocated MV buffer for a missing picture */
@@ -84,6 +86,7 @@ typedef struct RPIVIDContext {
 	int nslots;
 	int write_mv;
 	int nslices;
+	int one_slice;                 /* the picture is one slice segment (picture_ok) */
 	int missing_refs;
 	uint64_t slice_ns;             /* the picture's decode_slice calls: bitstream copy, slice commands */
 	const char *frame_err;
@@ -209,12 +212,164 @@ static void rpivid_frame_free(FFRefStructOpaque opaque, void *data)
 }
 
 
-/* ---- what the block takes ---- */
+/* ---- what the block takes ----
+ *
+ * Hard limits -- the block's own, as the Raspberry Pi Linux hevc_dec driver states them
+ * (Main and Main 10 4:2:0, 32..4096 luma samples a side, CTB <= 64, TB <= 32) -- send a
+ * stream to the CPU at any level. Inside them every coding tool beyond the set the block
+ * was first proved bit-exact on (x265's defaults: CTB 64, CB >= 8, TB 4..32, a transform
+ * tree of depth 0, one slice segment per picture, CU QP delta at depth 1, sign data
+ * hiding, deblocking with no offsets, parallel merge level 2; WPP, SAO, TMVP, weighted
+ * prediction, 8 and 10 bit are part of that set) is a tool of its own below, so a tool
+ * that hevc-rpivid-check finds wrong on the Pi turns off alone: in tools[] (its default)
+ * or at run time, FFMPEG_RPIVID_TOOLS="-amp,-tiles" (+name turns one on, "none" leaves
+ * the proven set, "all" every tool).
+ *
+ * Each tool is a field the block's programming already carries (SPS0/SPS1/PPS register
+ * fields, the scaling factor array, the slice messages, the entry-point sequence of
+ * slices and tiles: rpivid_cmd.c, written as the Linux driver programs the block); "on"
+ * puts it in the default set, the others are for level 2 (rare in real-world streams). */
 
-#define NOPE(...) do { snprintf(why, whylen, __VA_ARGS__); return 0; } while (0)
+enum {
+	T_CTB32, T_CTB16, T_BLOCKS, T_TU_DEPTH_INTRA, T_TU_DEPTH_INTER, T_AMP, T_SCALING_LIST, T_PCM, T_LONG_TERM,
+	T_NO_STRONG_SMOOTHING, T_CU_QP_DELTA, T_NO_SIGN_HIDING, T_TRANSFORM_SKIP, T_TRANSQUANT_BYPASS, T_CONSTRAINED_INTRA,
+	T_CABAC_INIT, T_CHROMA_QP_OFFSET, T_DEBLOCKING, T_MERGE_LEVEL, T_TILES, T_SLICES, T_DEPENDENT_SLICES, T_NTOOLS
+};
 
-static int sps_ok(const HEVCSPS *sps, int level, char *why, size_t whylen)
+#define TOOL(t) (1u << (t))
+
+static const struct {
+	const char *name;
+	const char *what;
+	int on;                        /* in the default set (level 1) */
+} tools[T_NTOOLS] = {
+	[T_CTB32] = { "ctb32", "32x32 CTBs", 1 },
+	[T_CTB16] = { "ctb16", "16x16 CTBs", 1 },
+	[T_BLOCKS] = { "blocks", "coding blocks >= 16 or transform blocks other than 4..32", 1 },
+	[T_TU_DEPTH_INTRA] = { "tu_depth_intra", "transform tree depth > 0 in intra CUs", 1 },
+	[T_TU_DEPTH_INTER] = { "tu_depth_inter", "transform tree depth > 0 in inter CUs", 1 },
+	[T_AMP] = { "amp", "asymmetric motion partitions", 1 },
+	[T_SCALING_LIST] = { "scaling_list", "scaling lists (default or coded)", 1 },
+	[T_PCM] = { "pcm", "PCM coding units", 0 },
+	[T_LONG_TERM] = { "long_term", "long-term reference pictures", 0 },
+	[T_NO_STRONG_SMOOTHING] = { "no_strong_smoothing", "strong intra smoothing off", 1 },
+	[T_CU_QP_DELTA] = { "cu_qp_delta", "CU QP delta off or at a depth other than 1", 1 },
+	[T_NO_SIGN_HIDING] = { "no_sign_hiding", "sign data hiding off", 1 },
+	[T_TRANSFORM_SKIP] = { "transform_skip", "transform skip", 1 },
+	[T_TRANSQUANT_BYPASS] = { "transquant_bypass", "transquant bypass (lossless CUs)", 0 },
+	[T_CONSTRAINED_INTRA] = { "constrained_intra", "constrained intra prediction", 0 },
+	[T_CABAC_INIT] = { "cabac_init", "cabac_init_flag (swapped P/B CABAC init tables)", 1 },
+	[T_CHROMA_QP_OFFSET] = { "chroma_qp_offset", "picture or slice chroma QP offsets", 1 },
+	[T_DEBLOCKING] = { "deblocking", "deblocking off, offsets or per-slice control", 1 },
+	[T_MERGE_LEVEL] = { "merge_level", "parallel merge level other than 2", 1 },
+	[T_TILES] = { "tiles", "tiles", 0 },
+	[T_SLICES] = { "slices", "several slice segments per picture", 1 },
+	[T_DEPENDENT_SLICES] = { "dependent_slices", "dependent slice segments", 0 },
+};
+
+
+static uint32_t tools_of_level(int level)
 {
+	uint32_t m = 0;
+	int t;
+
+	for (t = 0; t < T_NTOOLS; t++) {
+		if ((level >= RPIVID_LEVEL_ALL) || tools[t].on) {
+			m |= TOOL(t);
+		}
+	}
+	return m;
+}
+
+
+/* The level's tools as FFMPEG_RPIVID_TOOLS changes them */
+static uint32_t tools_enabled(void *logctx, int level)
+{
+	const char *e = getenv("FFMPEG_RPIVID_TOOLS");
+	uint32_t m = tools_of_level(level);
+	char item[32];
+	size_t n;
+	int t;
+
+	while ((e != NULL) && (*e != '\0')) {
+		int on = 1;
+
+		e += strspn(e, ", ");
+		n = strcspn(e, ", ");
+		if ((n == 0u) || (n >= sizeof(item))) {
+			e += n;
+			continue;
+		}
+		memcpy(item, e, n);
+		item[n] = '\0';
+		e += n;
+		if ((item[0] == '+') || (item[0] == '-')) {
+			on = (item[0] == '+');
+			memmove(item, item + 1, n);
+		}
+		if (strcmp(item, "none") == 0) {
+			m = on ? 0u : m;
+			continue;
+		}
+		if (strcmp(item, "all") == 0) {
+			m = on ? tools_of_level(RPIVID_LEVEL_ALL) : 0u;
+			continue;
+		}
+		for (t = 0; (t < T_NTOOLS) && (strcmp(item, tools[t].name) != 0); t++) {
+		}
+		if (t == T_NTOOLS) {
+			av_log(logctx, AV_LOG_WARNING, "rpivid: FFMPEG_RPIVID_TOOLS: no tool \"%s\"\n", item);
+		}
+		else if (on) {
+			m |= TOOL(t);
+		}
+		else {
+			m &= ~TOOL(t);
+		}
+	}
+	return m;
+}
+
+
+/* "a,b,c" of the tools in m ("-" for none), then " (not in the default set: c)" when
+ * some of them are not (hevc-rpivid-check reads both lists) */
+static const char *tool_list(char *buf, size_t len, uint32_t m)
+{
+	uint32_t nd = m & ~tools_of_level(RPIVID_LEVEL_DEFAULT);
+	size_t o = 0;
+	int t, pass;
+
+	buf[0] = '\0';
+	for (pass = 0; pass < 2; pass++) {
+		uint32_t sel = (pass == 0) ? m : nd;
+		int k = 0;
+
+		if ((pass == 1) && (nd != 0u)) {
+			o += (size_t)snprintf(buf + o, len - o, " (not in the default set: ");
+		}
+		for (t = 0; (t < T_NTOOLS) && (o < len); t++) {
+			if ((sel & TOOL(t)) != 0u) {
+				o += (size_t)snprintf(buf + o, len - o, "%s%s", (k++ != 0) ? "," : "", tools[t].name);
+			}
+		}
+		if ((pass == 0) && (k == 0) && (o < len)) {
+			o += (size_t)snprintf(buf + o, len - o, "-");
+		}
+		if ((pass == 1) && (nd != 0u) && (o < len)) {
+			o += (size_t)snprintf(buf + o, len - o, ")");
+		}
+	}
+	return buf;
+}
+
+
+#define NOPE(...) do { snprintf(why, whylen, __VA_ARGS__); return -1; } while (0)
+
+/* The SPS's tools beyond the proven set, or -1 (why) outside the block's limits */
+static int64_t sps_tools(const HEVCSPS *sps, char *why, size_t whylen)
+{
+	uint32_t m = 0;
+
 	if ((sps->chroma_format_idc != 1) || sps->separate_colour_plane_flag) {
 		NOPE("chroma format %d (the block decodes 4:2:0)", sps->chroma_format_idc);
 	}
@@ -237,40 +392,46 @@ static int sps_ok(const HEVCSPS *sps, int level, char *why, size_t whylen)
 	if ((sps->log2_ctb_size > 6) || (sps->log2_max_trafo_size > 5) || (sps->log2_max_trafo_size > sps->log2_ctb_size)) {
 		NOPE("block sizes CTB %d TB %d", 1 << sps->log2_ctb_size, 1 << sps->log2_max_trafo_size);
 	}
-	if (level >= RPIVID_LEVEL_ALL) {
-		return 1;
+
+	if (sps->log2_ctb_size == 5) {
+		m |= TOOL(T_CTB32);
 	}
-	/* the verified set */
-	if ((sps->log2_ctb_size != 6) || (sps->log2_min_cb_size != 3) || (sps->log2_min_tb_size != 2) ||
-			(sps->log2_max_trafo_size != 5)) {
-		NOPE("CTB %d, CB >= %d, TB %d..%d (verified: CTB 64, CB >= 8, TB 4..32)", 1 << sps->log2_ctb_size,
-			1 << sps->log2_min_cb_size, 1 << sps->log2_min_tb_size, 1 << sps->log2_max_trafo_size);
+	else if (sps->log2_ctb_size == 4) {
+		m |= TOOL(T_CTB16);
 	}
-	if ((sps->max_transform_hierarchy_depth_inter != 0) || (sps->max_transform_hierarchy_depth_intra != 0)) {
-		NOPE("transform hierarchy depth %d/%d (verified: 0/0)", sps->max_transform_hierarchy_depth_intra,
-			sps->max_transform_hierarchy_depth_inter);
+	if ((sps->log2_min_cb_size != 3) || (sps->log2_min_tb_size != 2) || (sps->log2_max_trafo_size != 5)) {
+		m |= TOOL(T_BLOCKS);
+	}
+	if (sps->max_transform_hierarchy_depth_intra != 0) {
+		m |= TOOL(T_TU_DEPTH_INTRA);
+	}
+	if (sps->max_transform_hierarchy_depth_inter != 0) {
+		m |= TOOL(T_TU_DEPTH_INTER);
 	}
 	if (sps->amp_enabled_flag) {
-		NOPE("asymmetric motion partitions (not verified)");
+		m |= TOOL(T_AMP);
 	}
 	if (sps->scaling_list_enable_flag) {
-		NOPE("scaling lists (not verified)");
+		m |= TOOL(T_SCALING_LIST);
 	}
 	if (sps->pcm_enabled_flag) {
-		NOPE("PCM (not verified)");
+		m |= TOOL(T_PCM);
 	}
 	if (sps->long_term_ref_pics_present_flag) {
-		NOPE("long-term reference pictures (not verified)");
+		m |= TOOL(T_LONG_TERM);
 	}
 	if (!sps->sps_strong_intra_smoothing_enable_flag) {
-		NOPE("strong intra smoothing off (not verified)");
+		m |= TOOL(T_NO_STRONG_SMOOTHING);
 	}
-	return 1;
+	return m;
 }
 
 
-static int pps_ok(const HEVCPPS *pps, int level, char *why, size_t whylen)
+/* The PPS's tools beyond the proven set, or -1 (why) outside the block's limits */
+static int64_t pps_tools(const HEVCPPS *pps, char *why, size_t whylen)
 {
+	uint32_t m = 0;
+
 	if (pps->pps_range_extensions_flag && (pps->cross_component_prediction_enabled_flag || pps->chroma_qp_offset_list_enabled_flag ||
 			pps->log2_sao_offset_scale_luma || pps->log2_sao_offset_scale_chroma || (pps->log2_max_transform_skip_block_size > 2))) {
 		NOPE("range extension coding tools (PPS)");
@@ -282,31 +443,69 @@ static int pps_ok(const HEVCPPS *pps, int level, char *why, size_t whylen)
 			(pps->entropy_coding_sync_enabled_flag && ((pps->num_tile_columns > 1) || (pps->num_tile_rows > 1))))) {
 		NOPE("%dx%d tiles%s", pps->num_tile_columns, pps->num_tile_rows, pps->entropy_coding_sync_enabled_flag ? " with WPP" : "");
 	}
-	if (level >= RPIVID_LEVEL_ALL) {
-		return 1;
-	}
+
 	if (pps->tiles_enabled_flag) {
-		NOPE("tiles (not verified)");
+		m |= TOOL(T_TILES);
 	}
 	if (!pps->cu_qp_delta_enabled_flag || (pps->diff_cu_qp_delta_depth != 1)) {
-		NOPE("CU QP delta %d depth %d (verified: on, depth 1)", pps->cu_qp_delta_enabled_flag, pps->diff_cu_qp_delta_depth);
+		m |= TOOL(T_CU_QP_DELTA);
 	}
-	if (!pps->sign_data_hiding_flag || pps->transform_skip_enabled_flag || pps->transquant_bypass_enable_flag ||
-			pps->constrained_intra_pred_flag || pps->cabac_init_present_flag) {
-		NOPE("sign hiding %d, transform skip %d, transquant bypass %d, constrained intra %d, cabac_init %d (verified: 1 0 0 0 0)",
-			pps->sign_data_hiding_flag, pps->transform_skip_enabled_flag, pps->transquant_bypass_enable_flag,
-			pps->constrained_intra_pred_flag, pps->cabac_init_present_flag);
+	if (!pps->sign_data_hiding_flag) {
+		m |= TOOL(T_NO_SIGN_HIDING);
+	}
+	if (pps->transform_skip_enabled_flag) {
+		m |= TOOL(T_TRANSFORM_SKIP);
+	}
+	if (pps->transquant_bypass_enable_flag) {
+		m |= TOOL(T_TRANSQUANT_BYPASS);
+	}
+	if (pps->constrained_intra_pred_flag) {
+		m |= TOOL(T_CONSTRAINED_INTRA);
+	}
+	if (pps->cabac_init_present_flag) {
+		m |= TOOL(T_CABAC_INIT);
 	}
 	if (pps->cb_qp_offset || pps->cr_qp_offset || pps->pic_slice_level_chroma_qp_offsets_present_flag) {
-		NOPE("chroma QP offsets (not verified)");
+		m |= TOOL(T_CHROMA_QP_OFFSET);
 	}
 	if (pps->disable_dbf || pps->beta_offset || pps->tc_offset || pps->deblocking_filter_override_enabled_flag) {
-		NOPE("deblocking off / offsets / per-slice override (not verified)");
+		m |= TOOL(T_DEBLOCKING);
 	}
 	if (pps->log2_parallel_merge_level != 2) {
-		NOPE("parallel merge level %d (verified: 2)", pps->log2_parallel_merge_level);
+		m |= TOOL(T_MERGE_LEVEL);
 	}
-	return 1;
+	if (pps->dependent_slice_segments_enabled_flag) {
+		m |= TOOL(T_DEPENDENT_SLICES);
+	}
+	return m;
+}
+
+
+/* 0, or -1 with why naming the first tool of need that is not enabled */
+static int tools_ok(uint32_t need, uint32_t enabled, char *why, size_t whylen)
+{
+	int t;
+
+	for (t = 0; t < T_NTOOLS; t++) {
+		if (((need & ~enabled) & TOOL(t)) != 0u) {
+			snprintf(why, whylen, "%s (tool %s off)", tools[t].what, tools[t].name);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+
+/* The stream's tools so far grew: say which (hevc-rpivid-check reports them) */
+static void tools_used(AVCodecContext *avctx, RPIVIDContext *ctx, uint32_t m)
+{
+	char list[512];
+
+	if ((m & ~ctx->used) == 0u) {
+		return;
+	}
+	ctx->used |= m;
+	av_log(avctx, AV_LOG_INFO, "rpivid: tools in use: %s\n", tool_list(list, sizeof(list), ctx->used));
 }
 
 
@@ -357,23 +556,34 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level)
 	const HEVCSPS *sps = s->ps.sps;
 	RPIVIDContext *ctx;
 	rpivid_geom_t g;
-	char why[192];
+	char why[192], list[512];
+	uint32_t enabled, need;
+	int64_t m;
 	int i, rc;
 
 	if ((level <= RPIVID_LEVEL_OFF) || (sps == NULL) || (avctx->hwaccel != NULL)) {
 		return -1;
 	}
-	if (!sps_ok(sps, level, why, sizeof(why))) {
+	enabled = tools_enabled(avctx, level);
+	m = sps_tools(sps, why, sizeof(why));
+	if ((m < 0) || (tools_ok((uint32_t)m, enabled, why, sizeof(why)) < 0)) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: CPU decode: %s\n", why);
 		return -1;
 	}
+	need = (uint32_t)m;
+	/* the PPSs of this SPS received so far; a later one is checked by its first picture */
 	for (i = 0; i < HEVC_MAX_PPS_COUNT; i++) {
 		const HEVCPPS *pps = s->ps.pps_list[i];
 
-		if ((pps != NULL) && (s->ps.sps_list[pps->sps_id] == sps) && !pps_ok(pps, level, why, sizeof(why))) {
+		if ((pps == NULL) || (s->ps.sps_list[pps->sps_id] != sps)) {
+			continue;
+		}
+		m = pps_tools(pps, why, sizeof(why));
+		if ((m < 0) || (tools_ok((uint32_t)m, enabled, why, sizeof(why)) < 0)) {
 			av_log(avctx, AV_LOG_INFO, "rpivid: CPU decode: %s\n", why);
 			return -1;
 		}
+		need |= (uint32_t)m;
 	}
 
 	ctx = av_mallocz(sizeof(*ctx));
@@ -397,14 +607,17 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level)
 		return -1;
 	}
 	rpivid_cmd_init(&ctx->cmd);
-	ctx->level = level;
+	ctx->enabled = enabled;
+	ctx->sps_tools = (uint32_t)sps_tools(sps, why, sizeof(why));
+	ctx->used = need;
 	ctx->t_start = (uint64_t)av_gettime_relative();
 
 	avctx->internal->hwaccel_priv_data = ctx;
 	avctx->hwaccel = &ff_hevc_rpivid_hwaccel.p;
-	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit (%s), HEVC clock %u MHz, completion %s\n", sps->width,
-		sps->height, sps->bit_depth, (level >= RPIVID_LEVEL_ALL) ? "all tools, UNVERIFIED ones included" : "verified tool set",
-		rpivid_hw_clock(ctx->hw) / 1000000u, rpivid_hw_irq(ctx->hw) ? "by interrupt" : "POLLED (no interrupt)");
+	/* "tools: " lists what the stream uses beyond the proven set (hevc-rpivid-check reports it) */
+	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit, tools: %s, HEVC clock %u MHz, completion %s\n", sps->width,
+		sps->height, sps->bit_depth, tool_list(list, sizeof(list), need), rpivid_hw_clock(ctx->hw) / 1000000u,
+		rpivid_hw_irq(ctx->hw) ? "by interrupt" : "POLLED (no interrupt)");
 	return 0;
 }
 
@@ -490,7 +703,10 @@ static void fill_pic(RPIVIDContext *ctx, const HEVCContext *s)
 	}
 	p->log2_parallel_merge_level = (uint8_t)pps->log2_parallel_merge_level;
 	p->slice_temporal_mvp = s->sh.slice_temporal_mvp_enabled_flag;
-	p->compat_intra_no_msgs = 1;
+	/* a one-slice picture keeps the exact form tools/hevc-decode proved (rpivid_cmd.h);
+	 * a picture of several slices follows the Linux driver throughout */
+	p->one_slice = (uint8_t)ctx->one_slice;
+	p->compat_intra_no_msgs = (uint8_t)ctx->one_slice;
 }
 
 
@@ -501,9 +717,11 @@ int ff_rpivid_hevc_picture_ok(AVCodecContext *avctx)
 	RPIVIDFrame *f = s->ref->hwaccel_picture_private;
 	size_t need = 64;
 	char why[192];
-	int i, vcl = 0;
+	int64_t m;
+	int i, vcl = 0, pics = 0;
 
-	if (!pps_ok(s->ps.pps, ctx->level, why, sizeof(why))) {
+	m = pps_tools(s->ps.pps, why, sizeof(why));
+	if ((m < 0) || (tools_ok((uint32_t)m, ctx->enabled, why, sizeof(why)) < 0)) {
 		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d: %s\n", s->poc, why);
 		return -1;
 	}
@@ -513,12 +731,22 @@ int ff_rpivid_hevc_picture_ok(AVCodecContext *avctx)
 		if ((nal->nuh_layer_id == 0) && (nal->type <= HEVC_NAL_RSV_VCL31)) {
 			vcl++;
 			need += (size_t)nal->raw_size + 64u;
+			/* first_slice_segment_in_pic_flag: the first bit after the NAL unit header */
+			if ((nal->size > 2) && ((nal->data[2] & 0x80u) != 0u)) {
+				pics++;
+			}
 		}
 	}
-	if ((vcl > 1) && (ctx->level < RPIVID_LEVEL_ALL)) {
-		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d: %d slice segments (verified: 1)\n", s->poc, vcl);
-		return -1;
+	/* a packet is one access unit (a picture) but count pictures all the same */
+	ctx->one_slice = (vcl <= ((pics > 0) ? pics : 1));
+	if (!ctx->one_slice) {
+		m |= TOOL(T_SLICES);
+		if ((ctx->enabled & TOOL(T_SLICES)) == 0u) {
+			av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d: %d slice segments (tool %s off)\n", s->poc, vcl, tools[T_SLICES].name);
+			return -1;
+		}
 	}
+	tools_used(avctx, ctx, ctx->sps_tools | (uint32_t)m);
 	if (ctx->bs.size < need) {
 		rpivid_dma_free(&ctx->bs);
 		if (rpivid_dma_alloc(&ctx->bs, need + need / 2u) < 0) {
@@ -632,8 +860,8 @@ static int decode_slice(AVCodecContext *avctx, const uint8_t *buf, uint32_t size
 	if (ctx->frame_err != NULL) {
 		return 0;
 	}
-	if ((ctx->nslices > 0) && (ctx->level < RPIVID_LEVEL_ALL)) {
-		ctx->frame_err = "more than one slice segment";
+	if ((ctx->nslices > 0) && (ctx->one_slice || ((ctx->enabled & TOOL(T_SLICES)) == 0u))) {
+		ctx->frame_err = "more slice segments than picture_ok counted";
 		return 0;
 	}
 	if ((cur == NULL) || (cur->buf == NULL)) {

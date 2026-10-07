@@ -13,7 +13,8 @@
 #   - the reference: the coordination repo's tools/hevc-decode/hevc-m2.c (hevc-play) against
 #     the same mock (its register accessors routed to the mock, its frame pacing off, one pass).
 # Then, per clip (default: every .265/.mp4 in tools/hevc-decode/testdata), both decoders run
-# on the mock and their canonical register logs (mock.c) are compared:
+# on the mock -- the hwaccel on the proven tool set (FFMPEG_RPIVID_TOOLS=none), the subset the
+# reference implements -- and their canonical register logs (mock.c) are compared:
 #   SAME      the hwaccel drives the block exactly like the reference: every command-buffer
 #             entry, every phase-2 register, every slice's bitstream bytes
 #   PREFIX    the same for every picture the reference decoded before it gave up (its own
@@ -119,7 +120,9 @@ n_same=0 n_diff=0 n_skip=0 n_cpu=0
 for c in "${clips[@]}"; do
 	b="$(basename "${c}")" ref="${work}/${b}.ref.log" hw="${work}/${b}.hw.log"
 	MOCK_LOG="${ref}" "${work}/hevc-play-ref" "${c}" >"${work}/${b}.ref.out" 2>&1 || true
-	MOCK_LOG="${hw}" "${work}/hevc-rpivid-check" -hw "${c}" >"${work}/${b}.hw.out" 2>&1 || true
+	# the proven tool set only (FFMPEG_RPIVID_TOOLS=none): the reference implements that
+	# subset, and e.g. ignores PPS deblocking offsets that the hwaccel sends (idr64.265)
+	FFMPEG_RPIVID_TOOLS=none MOCK_LOG="${hw}" "${work}/hevc-rpivid-check" -hw "${c}" >"${work}/${b}.hw.out" 2>&1 || true
 	touch "${ref}" "${hw}"
 	if grep -q 'ERROR: AddressSanitizer' "${work}/${b}.hw.out"; then
 		echo "ASAN      ${b}"; grep -A12 'ERROR: AddressSanitizer' "${work}/${b}.hw.out" | head -20; exit 1
@@ -146,7 +149,7 @@ for c in "${clips[@]}"; do
 		n_diff=$((n_diff + 1))
 	fi
 	if [ "${mt}" = 1 ]; then
-		MOCK_LOG="${hw}.mt" "${work}/hevc-rpivid-check" -hw -T "${threads}" "${c}" >"${work}/${b}.hw-mt.out" 2>&1 || true
+		FFMPEG_RPIVID_TOOLS=none MOCK_LOG="${hw}.mt" "${work}/hevc-rpivid-check" -hw -T "${threads}" "${c}" >"${work}/${b}.hw-mt.out" 2>&1 || true
 		touch "${hw}.mt"
 		if grep -q 'ERROR: AddressSanitizer' "${work}/${b}.hw-mt.out"; then
 			echo "ASAN      ${b} (${threads} threads)"; grep -A12 'ERROR: AddressSanitizer' "${work}/${b}.hw-mt.out" | head -20; exit 1
@@ -169,7 +172,7 @@ if [ "${loop}" = 1 ]; then
 		ffmpeg -nostdin -v error -y -i "${c}" -f rawvideo -pix_fmt "${pf}" "${work}/${b}.golden"
 		for t in 1 "${threads}"; do
 			MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_LOG=/dev/null \
-				"${work}/hevc-rpivid-check" -l 2 -T "${t}" "${c}" >"${work}/${b}.loop${t}.out" 2>&1 || true
+				"${work}/hevc-rpivid-check" -cpuref -l 2 -T "${t}" "${c}" >"${work}/${b}.loop${t}.out" 2>&1 || true
 			# hw_used=1: a hardware pass that fell back to the CPU (e.g. the block's lock file held
 			# by a concurrent run) would be bit-exact against the CPU pass trivially
 			v="$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]* first_bad=[0-9-]* hw_used=[0-9]' "${work}/${b}.loop${t}.out" || echo 'verdict=none')"

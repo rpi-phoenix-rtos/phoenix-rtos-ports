@@ -62,6 +62,11 @@ typedef struct {
 	 * would all be the defaults (deblocking on, no offsets, no chroma QP offsets) --
 	 * the form tools/hevc-decode proved bit-exact; otherwise the driver's three */
 	uint8_t compat_intra_no_msgs;
+
+	/* The picture is one slice segment: its slice_loop_filter_across_slices_enabled_flag
+	 * (meaningless without a slice boundary) is sent set, the proven form; with several
+	 * slices every slice sends its own, as the driver does */
+	uint8_t one_slice;
 } rpivid_pic_t;
 
 /* Per slice segment */

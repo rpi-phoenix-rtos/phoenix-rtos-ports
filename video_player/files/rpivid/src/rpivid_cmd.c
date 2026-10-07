@@ -327,10 +327,9 @@ static void slice_msgs(rpivid_cmd_t *c, const rpivid_slice_t *sl)
 		msg(c, cmd_slice);
 	}
 
-	/* slice_loop_filter_across_slices_enabled_flag governs a slice's left and upper
-	 * boundaries with earlier slices: the first slice has none, and it is sent set as in
-	 * the proven single-slice programming */
-	lfas = (c->start_ts == 0u) || (sl->loop_filter_across_slices != 0u);
+	/* slice_loop_filter_across_slices_enabled_flag governs the boundaries between slices:
+	 * a one-slice picture has none, and sends it set as in the proven programming */
+	lfas = (p->one_slice != 0u) || (sl->loop_filter_across_slices != 0u);
 	deblock = ((uint32_t)sl->beta_offset_div2 & 15u) | (((uint32_t)sl->tc_offset_div2 & 15u) << 4) |
 		((sl->deblocking_disabled != 0u) ? (1u << 8) : 0u) | (lfas ? (1u << 9) : 0u);
 	/* across-tiles filtering means nothing without tiles; left clear as the proven form has it */
