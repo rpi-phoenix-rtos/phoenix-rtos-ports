@@ -178,10 +178,10 @@ index 554fe496..6e43e654 100644
  enum class MediaPlayerWirelessPlaybackTargetType : uint8_t {
 diff --git a/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp b/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp
 new file mode 100644
-index 00000000..e8179213
+index 00000000..4aeb9493
 --- /dev/null
 +++ b/Source/WebCore/platform/graphics/ffmpeg/FFmpegFMP4Parser.cpp
-@@ -0,0 +1,792 @@
+@@ -0,0 +1,799 @@
 +/*
 + * Copyright (C) 2026 Phoenix Systems
 + *
@@ -219,6 +219,9 @@ index 00000000..e8179213
 +
 +// The largest top-level box held back for completion: a media segment's mdat is a few MB
 +static constexpr uint64_t kMaxBoxSize = 256 * 1024 * 1024;
++// The most samples one media segment may describe (a 6 s segment holds a few hundred): a trun's
++// sample count is not otherwise bounded when its samples take their sizes from the defaults
++static constexpr size_t kMaxFragmentSamples = 1 << 20;
 +
 +// trun / tfhd flags (ISO/IEC 14496-12 §8.8.7, §8.8.8)
 +static constexpr uint32_t kTfhdBaseDataOffset = 0x000001;
@@ -906,6 +909,10 @@ index 00000000..e8179213
 +            size_t perSample = 4 * (!!(flags & kTrunDuration) + !!(flags & kTrunSize) + !!(flags & kTrunFlags) + !!(flags & kTrunCompositionOffset));
 +            if (reader.failed() || (perSample && count > reader.remaining() / perSample))
 +                return fail("malformed trun");
++            // the samples must fit in the largest mdat taken (with default sizes nothing above
++            // bounds the count)
++            if (count > kMaxFragmentSamples - m_fragment.size() || (!(flags & kTrunSize) && static_cast<uint64_t>(count) * defaultSize > kMaxBoxSize))
++                return fail("trun with " + std::to_string(count) + " samples");
 +            if (!hasBaseTime) {
 +                // no tfdt: this fragment continues where the track's previous one ended
 +                baseTime = m_nextDecodeTime[index];
