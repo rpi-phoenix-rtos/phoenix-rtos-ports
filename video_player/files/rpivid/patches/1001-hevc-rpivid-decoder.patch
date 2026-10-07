@@ -10,7 +10,9 @@ ff_hevc_rpivid_hwaccel (libavcodec/rpivid_hevc.c, BSD-3-Clause, from the port's
 files/rpivid/src): an hwaccel that decodes into the system-memory frames the decoder
 allocated, so players see a software decoder. A stream the block cannot take stays
 on the CPU; a picture it cannot take, or a picture the block fails, switches the
-rest of the stream to the CPU (the pictures it decoded serve as references).
+rest of the stream to the CPU. The CPU decoder lacks the block-decoded pictures'
+motion fields (TMVP), so it starts at the next IRAP: the pictures up to it (and the
+RASL pictures of a CRA) are dropped, and the caller keeps showing its last picture.
 
 The option "rpivid_out" (FFMPEG_RPIVID_OUT): planar (the default, as above) or
 drm_prime: get_format() then answers AV_PIX_FMT_DRM_PRIME and the hwaccel allocates
@@ -94,7 +96,7 @@ index ad39021..43d88e4 100644
      if (!*hwaccel_picture_private)
          return AVERROR(ENOMEM);
 diff --git a/libavcodec/hevcdec.c b/libavcodec/hevcdec.c
-index b267f6e..f6f495b 100644
+index b267f6e..2aab391 100644
 --- a/libavcodec/hevcdec.c
 +++ b/libavcodec/hevcdec.c
 @@ -50,6 +50,9 @@
@@ -139,21 +141,40 @@ index b267f6e..f6f495b 100644
          int c_count = (sps->chroma_format_idc != 0) ? 3 : 1;
          int c_idx;
  
-@@ -2941,6 +2959,23 @@ static int hevc_frame_end(HEVCContext *s)
+@@ -2941,6 +2959,42 @@ static int hevc_frame_end(HEVCContext *s)
      return 0;
  }
  
 +#if CONFIG_HEVC_RPIVID_DECODER
-+/* Leave the rpivid block for the rest of the stream. The pictures it decoded are in
-+ * system memory, so they serve the CPU decoder as references (drm_prime output: they are
-+ * copied into system memory first). */
-+static int rpivid_fallback(HEVCContext *s, const char *why)
++/* Leave the rpivid block for the rest of the stream, on the CPU decoder. Its pictures lack
++ * what the CPU decoder keeps of a picture it decoded (the motion field TMVP reads), so a
++ * picture predicted from them would be wrong: unless the current picture is an IRAP (drop:
++ * 0), it is dropped, and so is every picture up to the next IRAP (and the RASL pictures of a
++ * CRA); the caller shows the last picture it got until then. The pictures the decoder holds
++ * stay valid for output (drm_prime output: they are copied into system memory first). */
++static int rpivid_fallback(HEVCContext *s, const char *why, int drop)
 +{
 +    int zc = ff_rpivid_hevc_zero_copy(s->avctx), ret = 0;
 +
-+    av_log(s->avctx, AV_LOG_WARNING, "rpivid: continuing on the CPU decoder (%s)\n", why);
++    av_log(s->avctx, AV_LOG_WARNING, "rpivid: continuing on the CPU decoder (%s)%s\n", why,
++           drop ? ": pictures dropped until the next random access point" : "");
 +    ff_hwaccel_uninit(s->avctx);
 +    s->rpivid_failed = 1;
++    if (drop) {
++        if (s->ref) {
++            /* without reordering the picture went to the output at its start */
++            if (s->output_frame->buf[0] && s->ref->frame->buf[0] &&
++                s->output_frame->buf[0]->buffer == s->ref->frame->buf[0]->buffer)
++                av_frame_unref(s->output_frame);
++            ff_hevc_unref_frame(s->ref, ~0);
++        }
++        s->ref = s->collocated_ref = NULL;
++        s->is_decoded = 0;
++        s->rpivid_skip = 1;
++        s->max_ra = INT_MAX;   /* the RASL pictures of the next CRA reference what was dropped */
++    } else if (s->nal_unit_type == HEVC_NAL_CRA_NUT) {
++        s->max_ra = s->poc;    /* this CRA's RASL pictures reference the block's pictures */
++    }
 +    if (zc && (ret = ff_rpivid_hevc_drm_to_cpu(s->avctx)) < 0)
 +        av_log(s->avctx, AV_LOG_ERROR, "rpivid: the pictures held could not be moved to system memory\n");
 +    return ret;
@@ -163,21 +184,45 @@ index b267f6e..f6f495b 100644
  static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
  {
      HEVCLocalContext *lc = s->HEVClc;
-@@ -3075,6 +3110,13 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
+@@ -3029,6 +3083,17 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
+             (s->avctx->skip_frame >= AVDISCARD_NONKEY && !IS_IRAP(s))) {
+             break;
+         }
++#if CONFIG_HEVC_RPIVID_DECODER
++        /* after leaving the rpivid block: nothing until the next IRAP (rpivid_fallback) */
++        if (s->rpivid_skip) {
++            if (!IS_IRAP(s))
++                break;
++            if (s->sh.first_slice_in_pic_flag) {
++                s->rpivid_skip = 0;
++                av_log(s->avctx, AV_LOG_INFO, "rpivid: decoding again from POC %d (a random access point)\n", s->poc);
++            }
++        }
++#endif
+ 
+         if (s->sh.first_slice_in_pic_flag) {
+             if (s->max_ra == INT_MAX) {
+@@ -3075,6 +3140,19 @@ static int decode_nal_unit(HEVCContext *s, const H2645NAL *nal)
              }
          }
  
 +#if CONFIG_HEVC_RPIVID_DECODER
 +        /* a picture the block cannot take is still whole: decode it on the CPU */
 +        if (s->sh.first_slice_in_pic_flag && ff_rpivid_hevc_active(s->avctx) &&
-+            ff_rpivid_hevc_picture_ok(s->avctx) < 0 &&
-+            (ret = rpivid_fallback(s, "a picture the block cannot decode")) < 0)
-+            goto fail;
++            ff_rpivid_hevc_picture_ok(s->avctx) < 0) {
++            /* an IRAP the CPU decodes whole; anything else waits for one */
++            int drop = !IS_IRAP(s);
++
++            if ((ret = rpivid_fallback(s, "a picture the block cannot decode", drop)) < 0)
++                goto fail;
++            if (drop)
++                break;
++        }
 +#endif
          if (s->sh.first_slice_in_pic_flag && s->avctx->hwaccel) {
              ret = FF_HW_CALL(s->avctx, start_frame, NULL, 0);
              if (ret < 0)
-@@ -3363,7 +3405,17 @@ static int hevc_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
+@@ -3363,7 +3441,18 @@ static int hevc_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
              ff_hevc_unref_frame(s->ref, ~0);
              return ret;
          }
@@ -185,7 +230,8 @@ index b267f6e..f6f495b 100644
 +#if CONFIG_HEVC_RPIVID_DECODER
 +        if (ff_rpivid_hevc_active(avctx)) {
 +            if (ff_rpivid_hevc_failed(avctx)) {
-+                if ((ret = rpivid_fallback(s, "the block failed a picture")) < 0)
++                /* the picture is wrong: dropped, as is everything up to the next IRAP */
++                if ((ret = rpivid_fallback(s, "the block failed a picture", 1)) < 0)
 +                    return ret;
 +            } else if (s->ref && !ff_rpivid_hevc_zero_copy(avctx))
 +                s->is_decoded = 1; /* a system memory picture: the SEI checksum applies */
@@ -196,16 +242,17 @@ index b267f6e..f6f495b 100644
          /* verify the SEI checksum */
          if (avctx->err_recognition & AV_EF_CRCCHECK && s->ref && s->is_decoded &&
              s->sei.picture_hash.is_md5) {
-@@ -3555,6 +3607,8 @@ static int hevc_update_thread_context(AVCodecContext *dst,
+@@ -3555,6 +3644,9 @@ static int hevc_update_thread_context(AVCodecContext *dst,
          if ((ret = set_sps(s, s0->ps.sps, src->pix_fmt)) < 0)
              return ret;
  
 +    s->rpivid_failed = s0->rpivid_failed;
++    s->rpivid_skip   = s0->rpivid_skip;
 +
      s->seq_decode = s0->seq_decode;
      s->seq_output = s0->seq_output;
      s->pocTid0    = s0->pocTid0;
-@@ -3614,6 +3668,24 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
+@@ -3614,6 +3706,24 @@ static av_cold int hevc_decode_init(AVCodecContext *avctx)
      HEVCContext *s = avctx->priv_data;
      int ret;
  
@@ -230,7 +277,7 @@ index b267f6e..f6f495b 100644
      if (avctx->active_thread_type & FF_THREAD_SLICE) {
          s->threads_number = avctx->thread_count;
          ret = ff_slice_thread_init_progress(avctx);
-@@ -3677,6 +3749,15 @@ static const AVOption options[] = {
+@@ -3677,6 +3787,15 @@ static const AVOption options[] = {
          AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
      { "strict-displaywin", "stricly apply default display window size", OFFSET(apply_defdispwin),
          AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, PAR },
@@ -246,7 +293,7 @@ index b267f6e..f6f495b 100644
      { NULL },
  };
  
-@@ -3732,3 +3813,27 @@ const FFCodec ff_hevc_decoder = {
+@@ -3732,3 +3851,27 @@ const FFCodec ff_hevc_decoder = {
                                 NULL
                             },
  };
@@ -275,16 +322,17 @@ index b267f6e..f6f495b 100644
 +};
 +#endif
 diff --git a/libavcodec/hevcdec.h b/libavcodec/hevcdec.h
-index 6ef7d4f..b752349 100644
+index 6ef7d4f..9c64eb4 100644
 --- a/libavcodec/hevcdec.h
 +++ b/libavcodec/hevcdec.h
-@@ -593,6 +593,10 @@ typedef struct HEVCContext {
+@@ -593,6 +593,11 @@ typedef struct HEVCContext {
                              ///< as a format defined in 14496-15
      int apply_defdispwin;
  
 +    int rpivid_level;       ///< rpivid hardware decode: -1 auto, RPIVID_LEVEL_* (rpivid_hevc.h)
 +    int rpivid_failed;      ///< the block failed this stream: CPU decode from now on
 +    int rpivid_out;         ///< RPIVID_OUT_* (rpivid_drm.h): the frames of block-decoded pictures; -1 auto
++    int rpivid_skip;        ///< left the block: pictures are dropped until the next IRAP
 +
      int nal_length_size;    ///< Number of bytes used for nal length (1, 2 or 4)
      int nuh_layer_id;
