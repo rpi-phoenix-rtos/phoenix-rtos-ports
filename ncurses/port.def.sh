@@ -32,10 +32,11 @@
 # Static only, no progs/tests/cxx/ada/manpages — this is a reusable libncurses.a
 # for dependent ports (nano, mc, python curses).
 #
-# --with-terminfo-dirs: the database search list is compiled into the library and
-# defaults to ${datadir}/terminfo -- the build host's prefix, which then shipped in
-# every program linking it. /usr/share/terminfo is where a database would go; the
-# image has none, so the lookup fails and the fallbacks answer, as before.
+# --with-terminfo-dirs and --with-default-terminfo-dir: the database search list and the
+# default $TERMINFO are compiled into the library and both default to ${datadir}/terminfo
+# -- the build host's prefix, which then shipped in every program linking it.
+# /usr/share/terminfo is where a database would go; the image has none, so the lookup
+# fails and the fallbacks answer, as before.
 p_prepare() {
 	if [ ! -f "$PREFIX_PORT_WORKDIR/config.status" ]; then
 		(cd "$PREFIX_PORT_WORKDIR" && "./configure" \
@@ -47,6 +48,7 @@ p_prepare() {
 			--without-pkg-config \
 			--with-fallbacks="xterm,xterm-256color,vt100,vt220,linux,ansi,dumb,screen" \
 			--with-terminfo-dirs=/usr/share/terminfo \
+			--with-default-terminfo-dir=/usr/share/terminfo \
 			CFLAGS="${CFLAGS} -O2 -fPIC" CPPFLAGS="${CFLAGS}" LDFLAGS="${LDFLAGS}" \
 			RANLIB="${CROSS}ranlib")
 	fi
