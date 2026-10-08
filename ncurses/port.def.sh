@@ -77,4 +77,21 @@ p_build() {
 	for h in curses.h ncurses.h term.h termcap.h unctrl.h ncurses_dll.h eti.h nc_tparm.h; do
 		[ -f "${PREFIX_H}/ncurses/${h}" ] && cp -a "${PREFIX_H}/ncurses/${h}" "${PREFIX_H}/" || true
 	done
+
+	# A small terminfo database in /usr/share/terminfo (the compiled-in search path), so a
+	# TERM outside the fallbacks above (xterm-color, foot, tmux, ...) works too: with only
+	# the fallbacks, `TERM=xterm-color mc` failed with "can't load termcap". Compiled from
+	# this release's own terminfo.src by the build host's tic (the cross build makes no
+	# programs); the binary format is the same for every ncurses 6.
+	if [ -n "${PREFIX_ROOTFS:-}" ]; then
+		local ti="${PREFIX_ROOTFS}/usr/share/terminfo"
+		local terms="ansi,dumb,linux,vt100,vt102,vt220,xterm,xterm-color,xterm-16color,xterm-256color"
+		terms="${terms},xterm-direct,screen,screen-256color,tmux,tmux-256color,foot,foot-direct"
+		terms="${terms},alacritty,st-256color,putty,konsole,gnome-256color,rxvt"
+		command -v tic >/dev/null || b_die "ncurses: the build host has no tic (Debian/Ubuntu package ncurses-bin)"
+		mkdir -p "${ti}"
+		tic -x -o "${ti}" -e "${terms}" "${PREFIX_PORT_WORKDIR}/misc/terminfo.src" ||
+			b_die "ncurses: tic failed to compile the terminfo database"
+		[ -f "${ti}/x/xterm-color" ] || b_die "ncurses: ${ti}/x/xterm-color was not written"
+	fi
 }
