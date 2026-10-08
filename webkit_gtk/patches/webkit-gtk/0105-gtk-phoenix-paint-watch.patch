@@ -1,0 +1,391 @@
+Subject: GTK on Phoenix: the paint watch, where each web-process frame spends its time in the UI
+
+WebKitGTK 3 shows a page differently from WPE (shared patch 0020's UI half watches WPE's): the UI
+process imports each dma-buf frame of the web process as an EGLImage-backed GL texture and draws
+it into GDK's own GL-composited window. Per frame: AcceleratedBackingStore::frame() takes it (no
+rendering fence on Phoenix, patch 0016, so the fence monitor queues a redraw of the view at
+once); GDK's frame clock paints the window at its next cycle; paint() makes the frame current
+(swapBuffersIfNeeded(): the texture on a buffer's first use, the previous frame released) and
+draws it with gdk_cairo_draw_from_gl(), then sends FrameDone; GDK draws the other widgets,
+uploads what cairo drew, and calls eglSwapBuffers(). The web process composites its next frame
+only after FrameDone, so every one of those steps is on the frame's critical path.
+
+This records each of them, on the main thread (where all of them run), for webkit-browser
+--present-stats, which forwards the toplevel's frame clock (before-paint, after-paint) and asks
+for a report:
+
+  webkit_gtk_phoenix_paint_watch_before_paint()
+  webkit_gtk_phoenix_paint_watch_after_paint(line, size)  1 + "n= wait= before= swap= draw= after=
+                                                            rx_to_after= dt=" when a frame was drawn
+  webkit_gtk_phoenix_paint_watch_report(line, size)       counts (received, drawn, superseded,
+                                                            dropped, frame_done, repaints, ...) and
+                                                            <name>_ms=<avg>/<max> since the last one
+
+It also keeps shared patch 0020's UI-process counts (frames received, drawn, frame-done sent; the
+pending age), so wpe_phoenix_frame_watch(1, ...) describes the GTK UI process as it does WPE's,
+and logs once what GDK will do with the texture:
+
+  WPEB-WEBKIT gtk-paint import pid=<p> size=<w>x<h> fourcc=AB24 modifier=0x... alpha_bits=<n>
+
+(with alpha, gdk_cairo_draw_from_gl() first uploads the cairo surface under the view as a
+texture of its own, every paint, then blends the frame over it). OS(PHOENIX) only; the cost is
+a few clock_gettime() calls per frame.
+
+diff --git a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
+index 9f8e67cd..3e301609 100644
+--- a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
++++ b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
+@@ -62,6 +62,15 @@
+ #include <gdk/x11/gdkx.h>
+ #endif
+ 
++#if OS(PHOENIX)
++#include "PhoenixFrameWatch.h"
++#include <epoxy/gl.h>
++#include <inttypes.h>
++#include <stdio.h>
++#include <time.h>
++#include <unistd.h>
++#endif
++
+ WTF_IGNORE_WARNINGS_IN_THIRD_PARTY_CODE_BEGIN
+ IGNORE_CLANG_WARNINGS_BEGIN("cast-align")
+ #include <skia/core/SkBitmap.h>
+@@ -75,6 +84,144 @@ using namespace WebCore;
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedBackingStore);
+ 
++#if OS(PHOENIX)
++// Phoenix-RTOS: the paint watch (AcceleratedBackingStore.h). Per frame of the web process:
++//   received   frame(): the web process sent it; with no rendering fence (patch 0016 keeps the
++//              fences in the web process) the fence monitor queues a redraw of the view at once
++//   paint      paint(), inside GDK's paint of the window on its frame clock: swapBuffersIfNeeded()
++//              makes the frame current (its GL texture on first use, the previous frame released),
++//              Buffer::paint() draws it with gdk_cairo_draw_from_gl(), then FrameDone goes back
++//   after      the frame clock's after-paint: GDK has drawn the other widgets, uploaded what cairo
++//              drew and called eglSwapBuffers()
++// The web process renders its next frame only after FrameDone, so one frame is in flight and a
++// frame replaced before it was drawn ("superseded") should not exist; it is counted all the same.
++// Main thread only (IPC messages, GDK's paint and frame clock, the program's report timer).
++namespace PhoenixPaintWatch {
++
++static int64_t nowUs()
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<int64_t>(ts.tv_sec) * 1000000 + ts.tv_nsec / 1000;
++}
++
++// a duration's count, sum and maximum over one report interval
++struct Duration {
++    uint64_t count { 0 };
++    int64_t sumUs { 0 };
++    int64_t maxUs { 0 };
++
++    void add(int64_t us)
++    {
++        if (us < 0)
++            return;
++        count++;
++        sumUs += us;
++        maxUs = std::max(maxUs, us);
++    }
++    double averageMs() const { return count ? sumUs / 1000.0 / count : 0; }
++    double maxMs() const { return maxUs / 1000.0; }
++};
++
++struct Counts {
++    uint64_t received { 0 };
++    uint64_t superseded { 0 }; // a frame arrived while the previous one was still pending
++    uint64_t unknownBuffer { 0 }; // a frame in a buffer this process does not have: FrameDone at once
++    uint64_t dropped { 0 }; // the pending frame thrown away when the view changed surface
++    uint64_t drawn { 0 }; // paints that made a new frame current and drew it
++    uint64_t repaints { 0 }; // paints that drew the current frame again (GDK redrew the view)
++    uint64_t fenceWaits { 0 }; // paints with a frame pending behind its rendering fence
++    uint64_t framesDone { 0 };
++    uint64_t imports { 0 }; // GL textures made from a buffer's EGLImage (first use of a buffer)
++    uint64_t cycles { 0 }; // frame clock cycles (before-paint)
++    uint64_t cyclesWithFrame { 0 };
++};
++
++struct State {
++    Counts total;
++    Counts reported; // `total` at the previous report
++    int64_t reportedUs { 0 };
++    // this interval
++    Duration wait; // received -> the frame clock cycle that drew it began
++    Duration receiveToDraw; // received -> its paint() began
++    Duration beforeDraw; // the cycle began -> paint(): GDK's begin-paint, the widgets drawn before the view
++    Duration swap; // swapBuffersIfNeeded(): texture on first use, the previous frame released
++    Duration draw; // Buffer::paint(): gdk_cairo_draw_from_gl()
++    Duration afterDraw; // paint() returned -> after-paint: the rest of GDK's paint and eglSwapBuffers()
++    Duration cycle; // before-paint -> after-paint, every cycle
++    Duration frameInterval; // between two drawn frames
++    uint64_t intervalHistogram[4] { }; // < 25, < 42, < 58, >= 58 ms: 1, 2, 3, 4+ refreshes at 60 Hz
++    // the cycle in progress
++    int64_t cycleStartUs { 0 };
++    bool cycleDrewFrame { false };
++    // the last frame drawn
++    int64_t frameReceivedUs { 0 };
++    int64_t drawStartUs { 0 };
++    int64_t swapEndUs { 0 };
++    int64_t drawEndUs { 0 };
++    int64_t previousDrawEndUs { 0 };
++};
++
++static State state;
++
++static void didReceiveFrame()
++{
++    state.total.received++;
++    PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.framesReceived, &PhoenixFrameWatch::uiProcess.frameReceivedMs);
++}
++
++static void didDrawFrame(int64_t receivedUs, int64_t startUs, int64_t swapEndUs, int64_t endUs)
++{
++    state.total.drawn++;
++    auto& shared = PhoenixFrameWatch::uiProcess;
++    shared.framesRendered.fetch_add(1, std::memory_order_relaxed);
++    shared.pendingMs.store(0, std::memory_order_relaxed);
++
++    // the cycle's start is known only when the program forwards the frame clock
++    const bool inCycle = state.cycleStartUs && state.cycleStartUs >= receivedUs;
++    if (inCycle) {
++        state.wait.add(state.cycleStartUs - receivedUs);
++        state.beforeDraw.add(startUs - state.cycleStartUs);
++    }
++    state.cycleDrewFrame = true;
++    state.receiveToDraw.add(startUs - receivedUs);
++    state.swap.add(swapEndUs - startUs);
++    state.draw.add(endUs - swapEndUs);
++    if (state.drawEndUs) {
++        const int64_t interval = endUs - state.drawEndUs;
++        state.frameInterval.add(interval);
++        state.intervalHistogram[interval < 25000 ? 0 : interval < 42000 ? 1 : interval < 58000 ? 2 : 3]++;
++    }
++    state.previousDrawEndUs = state.drawEndUs;
++    state.frameReceivedUs = receivedUs;
++    state.drawStartUs = startUs;
++    state.swapEndUs = swapEndUs;
++    state.drawEndUs = endUs;
++}
++
++static void didImportTexture(const IntSize& size, const DMABufBufferAttributes& attributes)
++{
++    state.total.imports++;
++    static bool logged;
++    if (logged)
++        return;
++    logged = true;
++    // gdk_cairo_draw_from_gl() blends a texture that has alpha over the cairo surface below the
++    // view, which it first uploads as a texture of its own, every paint (GTK 3 gdk/gdkgl.c). GDK
++    // asks the texture as here, on GL ES 3.1 and later; before that it assumes alpha. (-1: not
++    // asked; glGetTexLevelParameteriv() is not in GL ES 3.0, and epoxy aborts on a missing entry)
++    GLint alphaBits = -1;
++    if (epoxy_gl_version() >= 31)
++        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_ALPHA_SIZE, &alphaBits);
++    const uint32_t fourcc = attributes.fourcc.value;
++    WTFLogAlways("WPEB-WEBKIT gtk-paint import pid=%d size=%dx%d fourcc=%c%c%c%c modifier=0x%016" PRIx64 " alpha_bits=%d", getpid(),
++        size.width(), size.height(), fourcc & 0xff, (fourcc >> 8) & 0xff, (fourcc >> 16) & 0xff, (fourcc >> 24) & 0xff,
++        attributes.modifier, alphaBits);
++}
++
++} // namespace PhoenixPaintWatch
++#endif // OS(PHOENIX)
++
+ OptionSet<RendererBufferTransportMode> AcceleratedBackingStore::rendererBufferTransportMode()
+ {
+     static OptionSet<RendererBufferTransportMode> mode;
+@@ -470,6 +617,9 @@ void AcceleratedBackingStore::BufferEGLImage::didUpdateContents(Buffer*, const R
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+     glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, m_image);
++#if OS(PHOENIX)
++    PhoenixPaintWatch::didImportTexture(m_size, m_dmaBufAttributes);
++#endif
+ }
+ #endif
+ 
+@@ -763,19 +913,36 @@ void AcceleratedBackingStore::didDestroyBuffer(uint64_t id)
+ void AcceleratedBackingStore::frame(uint64_t bufferID, Rects&& damageRects, WTF::UnixFileDescriptor&& renderingFenceFD)
+ {
+     ASSERT(!m_pendingBuffer);
++#if OS(PHOENIX)
++    PhoenixPaintWatch::didReceiveFrame();
++    if (m_pendingBuffer)
++        PhoenixPaintWatch::state.total.superseded++;
++#endif
+     auto* buffer = m_buffers.get(bufferID);
+     if (!buffer) {
++#if OS(PHOENIX)
++        PhoenixPaintWatch::state.total.unknownBuffer++;
++#endif
+         frameDone();
+         return;
+     }
+ 
+     m_pendingBuffer = buffer;
++#if OS(PHOENIX)
++    // before the fence monitor: without a fence it queues the redraw from inside this call
++    m_pendingReceivedUs = PhoenixPaintWatch::nowUs();
++    PhoenixFrameWatch::mark(PhoenixFrameWatch::uiProcess.pendingMs);
++#endif
+     m_pendingDamageRects = WTF::move(damageRects);
+     m_fenceMonitor.addFileDescriptor(WTF::move(renderingFenceFD));
+ }
+ 
+ void AcceleratedBackingStore::frameDone()
+ {
++#if OS(PHOENIX)
++    PhoenixPaintWatch::state.total.framesDone++;
++    PhoenixFrameWatch::count(PhoenixFrameWatch::uiProcess.framesDoneSent);
++#endif
+     if (RefPtr legacyMainFrameProcess = m_legacyMainFrameProcess.get())
+         legacyMainFrameProcess->send(Messages::AcceleratedSurface::FrameDone(), m_surfaceID);
+ }
+@@ -821,6 +988,10 @@ void AcceleratedBackingStore::update(const LayerTreeContext& context)
+ 
+     if (m_surfaceID) {
+         if (m_pendingBuffer) {
++#if OS(PHOENIX)
++            PhoenixPaintWatch::state.total.dropped++;
++            PhoenixFrameWatch::uiProcess.pendingMs.store(0, std::memory_order_relaxed);
++#endif
+             frameDone();
+             m_pendingBuffer = nullptr;
+             m_pendingDamageRects = { };
+@@ -877,11 +1048,26 @@ bool AcceleratedBackingStore::snapshot(GtkSnapshot* gtkSnapshot)
+ #else
+ bool AcceleratedBackingStore::paint(cairo_t* cr, const IntRect& clipRect)
+ {
++#if OS(PHOENIX)
++    const int64_t startUs = PhoenixPaintWatch::nowUs();
++    const int64_t receivedUs = m_pendingReceivedUs;
++    if (m_pendingBuffer && m_fenceMonitor.hasFileDescriptor())
++        PhoenixPaintWatch::state.total.fenceWaits++;
++#endif
+     bool didSwapBuffers = swapBuffersIfNeeded();
+     if (!m_committedBuffer)
+         return false;
+ 
++#if OS(PHOENIX)
++    const int64_t swapEndUs = PhoenixPaintWatch::nowUs();
++#endif
+     m_committedBuffer->paint(cr, clipRect);
++#if OS(PHOENIX)
++    if (didSwapBuffers)
++        PhoenixPaintWatch::didDrawFrame(receivedUs, startUs, swapEndUs, PhoenixPaintWatch::nowUs());
++    else
++        PhoenixPaintWatch::state.total.repaints++;
++#endif
+     if (didSwapBuffers)
+         frameDone();
+ 
+@@ -904,3 +1090,76 @@ RefPtr<NativeImage> AcceleratedBackingStore::bufferAsNativeImageForTesting() con
+ }
+ 
+ } // namespace WebKit
++
++#if OS(PHOENIX)
++void webkit_gtk_phoenix_paint_watch_before_paint(void)
++{
++    auto& state = WebKit::PhoenixPaintWatch::state;
++    state.total.cycles++;
++    state.cycleStartUs = WebKit::PhoenixPaintWatch::nowUs();
++    state.cycleDrewFrame = false;
++    if (!state.reportedUs)
++        state.reportedUs = state.cycleStartUs; // the first report's interval
++}
++
++int webkit_gtk_phoenix_paint_watch_after_paint(char* line, size_t size)
++{
++    auto& state = WebKit::PhoenixPaintWatch::state;
++    if (!state.cycleStartUs)
++        return 0;
++    const int64_t nowUs = WebKit::PhoenixPaintWatch::nowUs();
++    state.cycle.add(nowUs - state.cycleStartUs);
++    if (!state.cycleDrewFrame)
++        return 0;
++    state.total.cyclesWithFrame++;
++    state.afterDraw.add(nowUs - state.drawEndUs);
++    // one frame, in ms: received -> cycle -> paint -> swap/draw -> after-paint, and since the previous frame
++    auto ms = [](int64_t us) { return us / 1000.0; };
++    snprintf(line, size, "n=%" PRIu64 " wait=%.1f before=%.1f swap=%.1f draw=%.1f after=%.1f rx_to_after=%.1f dt=%.1f",
++        state.total.drawn, ms(state.cycleStartUs - state.frameReceivedUs), ms(state.drawStartUs - state.cycleStartUs),
++        ms(state.swapEndUs - state.drawStartUs), ms(state.drawEndUs - state.swapEndUs), ms(nowUs - state.drawEndUs),
++        ms(nowUs - state.frameReceivedUs), state.previousDrawEndUs ? ms(state.drawEndUs - state.previousDrawEndUs) : -1.0);
++    return 1;
++}
++
++void webkit_gtk_phoenix_paint_watch_report(char* line, size_t size)
++{
++    using WebKit::PhoenixPaintWatch::Duration;
++    auto& state = WebKit::PhoenixPaintWatch::state;
++    const auto& now = state.total;
++    const auto& then = state.reported;
++    const int64_t nowUs = WebKit::PhoenixPaintWatch::nowUs();
++    const double secs = state.reportedUs ? (nowUs - state.reportedUs) / 1e6 : 0;
++    auto delta = [](uint64_t a, uint64_t b) { return static_cast<unsigned long long>(a - b); };
++    const struct {
++        const char* name;
++        Duration* duration;
++    } durations[] = { { "wait", &state.wait }, { "rx_to_draw", &state.receiveToDraw }, { "before", &state.beforeDraw }, { "swap", &state.swap },
++        { "draw", &state.draw }, { "after", &state.afterDraw }, { "cycle", &state.cycle }, { "dt", &state.frameInterval } };
++    // " <name>_ms=<average>/<maximum>" each
++    char averages[512];
++    size_t used = 0;
++    for (const auto& [name, duration] : durations) {
++        const int n = snprintf(averages + used, sizeof(averages) - used, " %s_ms=%.1f/%.1f", name, duration->averageMs(), duration->maxMs());
++        if (n < 0 || static_cast<size_t>(n) >= sizeof(averages) - used)
++            break;
++        used += n;
++    }
++    snprintf(line, size, "secs=%.1f received=%llu drawn=%llu superseded=%llu dropped=%llu unknown=%llu frame_done=%llu repaints=%llu"
++        " fence_waits=%llu imports=%llu cycles=%llu cycles_frame=%llu%s dt_hist=%llu/%llu/%llu/%llu total_drawn=%llu",
++        secs, delta(now.received, then.received), delta(now.drawn, then.drawn), delta(now.superseded, then.superseded),
++        delta(now.dropped, then.dropped), delta(now.unknownBuffer, then.unknownBuffer), delta(now.framesDone, then.framesDone),
++        delta(now.repaints, then.repaints), delta(now.fenceWaits, then.fenceWaits), delta(now.imports, then.imports),
++        delta(now.cycles, then.cycles), delta(now.cyclesWithFrame, then.cyclesWithFrame), averages,
++        static_cast<unsigned long long>(state.intervalHistogram[0]), static_cast<unsigned long long>(state.intervalHistogram[1]),
++        static_cast<unsigned long long>(state.intervalHistogram[2]), static_cast<unsigned long long>(state.intervalHistogram[3]),
++        static_cast<unsigned long long>(now.drawn));
++
++    state.reported = state.total;
++    state.reportedUs = nowUs;
++    for (const auto& entry : durations)
++        *entry.duration = { };
++    for (auto& count : state.intervalHistogram)
++        count = 0;
++}
++#endif // OS(PHOENIX)
+diff --git a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
+index be0abb4d..24b4363f 100644
+--- a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
++++ b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
+@@ -267,6 +267,26 @@ private:
+     RefPtr<Buffer> m_committedBuffer;
+     Rects m_pendingDamageRects;
+     HashMap<uint64_t, RefPtr<Buffer>> m_buffers;
++#if OS(PHOENIX)
++    // the paint watch (below): when the pending frame came from the web process
++    int64_t m_pendingReceivedUs { 0 };
++#endif
+ };
+ 
+ } // namespace WebKit
++
++#if OS(PHOENIX)
++// Phoenix-RTOS: the paint watch of the GTK UI process, for webkit-browser --present-stats. Where
++// each frame of the web process spends its time between arriving here and leaving in GDK's
++// eglSwapBuffers(): the wait for GDK's frame clock, this view's draw (the frame's GL texture into
++// GDK's window), the rest of GDK's paint (the other widgets, its own texture uploads, the swap).
++// The program forwards the toplevel's frame clock (before-paint, after-paint) and asks for a
++// report line; everything runs on the main thread.
++extern "C" {
++void webkit_gtk_phoenix_paint_watch_before_paint(void);
++// 1 when this paint drew a new frame; then `line` has that frame's breakdown
++int webkit_gtk_phoenix_paint_watch_after_paint(char* line, size_t size);
++// the counts, averages and maxima since the previous report
++void webkit_gtk_phoenix_paint_watch_report(char* line, size_t size);
++}
++#endif
