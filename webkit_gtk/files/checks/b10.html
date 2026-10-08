@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<!-- B10 gate page (coordination repo docs/browser/B10-WEBKITGTK.md section 9): the desktop
+     dialogs WebKitGTK brings and a self-contained download. No network needed.
+     b10.html?download=1 starts the download by itself once loaded (G3 without a click).
+     SPDX-License-Identifier: BSD-3-Clause -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>B10 checks</title>
+<style>
+  body { font: 16px "DejaVu Sans", sans-serif; margin: 24px; }
+  section { margin: 0 0 18px; padding: 10px 14px; border: 1px solid #c0bfbc; border-radius: 6px; }
+  h2 { font-size: 17px; margin: 0 0 8px; }
+  #log { font: 13px "DejaVu Sans Mono", monospace; white-space: pre; }
+</style>
+</head>
+<body>
+<h1>B10 checks</h1>
+<section><h2>G4: a drop-down list (GtkMenu popup)</h2>
+  <select id="sel" onchange="note('select value=' + this.value)">
+    <option>one</option><option>two</option><option>three</option>
+  </select>
+  <input list="dl" placeholder="datalist: type t" oninput="note('datalist text=' + this.value)">
+  <datalist id="dl"><option value="tabs"><option value="tiles"><option value="toolbar"></datalist>
+</section>
+<section><h2>Pickers and dialogs</h2>
+  <input type="color" onchange="note('color=' + this.value)">
+  <input type="date" onchange="note('date=' + this.value)">
+  <input type="file" onchange="note('file=' + (this.files[0] ? this.files[0].name + ' ' + this.files[0].size : '-'))">
+  <button onclick="alert('alert from the page'); note('alert closed')">alert</button>
+  <button onclick="note('confirm=' + confirm('confirm?'))">confirm</button>
+  <button onclick="note('prompt=' + prompt('prompt?', 'text'))">prompt</button>
+  <form onsubmit="note('form submitted'); return false"><input required placeholder="required: validation bubble"><button>submit</button></form>
+</section>
+<section><h2>G3: download (1 MiB, generated here)</h2>
+  <a id="dlink" download="b10-download.bin">download b10-download.bin (1048576 bytes)</a>
+</section>
+<section><h2>G5: video</h2>
+  <a href="file:///usr/share/wpe-browser/b8.html">b8.html (the WPE build's video page, same media engine)</a>
+</section>
+<div id="log"></div>
+<script>
+  function note(text) {
+    document.getElementById('log').textContent += text + '\n';
+    console.log('B10 ' + text);
+  }
+  // 1 MiB of a known pattern: byte i is (i * 31 + 7) & 255
+  const bytes = new Uint8Array(1048576);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31 + 7) & 255;
+  const link = document.getElementById('dlink');
+  link.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  if (new URLSearchParams(location.search).get('download') === '1')
+    setTimeout(() => { note('auto download'); link.click(); }, 500);
+</script>
+</body>
+</html>
