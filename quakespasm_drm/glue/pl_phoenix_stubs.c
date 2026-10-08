@@ -22,9 +22,6 @@ typedef int sys_socket_t;       /* normally from net_sys.h (platform-gated) */
 #include "net_dgrm.h"
 #include "net_udp.h"
 
-#include <time.h>
-#include <pthread.h>
-
 /* --- network driver tables (were in net_bsd.c, which this port excludes). ---
  * Register the Loopback driver (single-player "map"/"newgame" via Loop_Connect) AND
  * the Datagram net driver over the UDP LAN driver, so LAN multiplayer works (task #26).
@@ -113,14 +110,4 @@ char *PL_GetClipboardData(void)
 const char *Sys_ConsoleInput(void)
 {
 	return NULL;
-}
-
-/* Phoenix libc lacks pthread_getcpuclockid (referenced by Mesa's thread utils);
- * a monotonic-clock stand-in is fine for Mesa's timing. */
-int pthread_getcpuclockid(pthread_t thread, clockid_t *clock_id)
-{
-	(void)thread;
-	if (clock_id)
-		*clock_id = CLOCK_MONOTONIC;
-	return 0;
 }
