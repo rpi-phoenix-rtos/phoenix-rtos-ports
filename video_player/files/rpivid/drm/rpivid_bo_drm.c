@@ -114,6 +114,10 @@ static int bo_alloc(void *opaque, size_t size, RpividDrmBuffer *b)
 	b->fd = fd;
 	b->handle = cb.handle;
 	b->priv = NULL;
+	/* where the block will write (stderr, as the players log): the decoder refuses a buffer
+	 * beyond its reach, and a stall or corruption report can be matched against these */
+	fprintf(stderr, "rpivid-bo: BO handle %u: PA 0x%llx-0x%llx (%zu bytes)\n", cb.handle, (unsigned long long)b->pa,
+		(unsigned long long)(b->pa + size - 1u), size);
 	return 0;
 }
 

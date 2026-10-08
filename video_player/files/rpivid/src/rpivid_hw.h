@@ -25,6 +25,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The block's DMA reach: it sits on the SCB bus, whose dma-ranges map bus addresses 1:1 onto
+ * the first 16 GiB (Linux bcm2711-rpi-ds.dtsi; its hevc_dec driver sets a 36-bit DMA mask, and
+ * an address register holds pa >> 6). All of a Pi 4's RAM is below it: the checks against it
+ * are guards. */
+#define RPIVID_DMA_LIMIT (1ull << 34)
+
 typedef struct {
 	void *cpu;
 	uint64_t pa;
@@ -51,10 +57,26 @@ typedef struct {
 	uint32_t p1_runs;              /* phase-1 runs (> 1: a PU/coefficient buffer was enlarged) */
 	uint32_t stale;                /* completions already pending when a phase was started (cleared) */
 	uint32_t status, cfstatus, cfnum;
+	uint32_t timeout_phase;        /* -ETIMEDOUT: the phase that did not finish */
+	uint32_t clock_off;            /* -ETIMEDOUT: 1 if the block's clock was then switched off */
 } rpivid_hw_stat_t;
 
-/* Take the block. On failure returns a negative errno and a reason in why. */
+/* Take the block. On failure returns a negative errno and a reason in why.
+ *
+ * A block that stopped responding (a phase timed out) is not used again until reboot, by
+ * any process: the process that saw it records it in /tmp/.rpivid.dead (/tmp is a RAM file
+ * system made at boot) and switches the block's clock off; later opens fail at once (-EIO),
+ * before touching the mailbox or a register. FFMPEG_RPIVID_RESET=1: one open per boot instead
+ * switches the clock off and on and tries the block again (rpivid_hw_note says so); if that
+ * also fails, the block stays off. */
 int rpivid_hw_open(rpivid_hw_t **out, char *why, size_t whylen);
+
+/* What the open did beyond the usual, for the log ("" if nothing) */
+const char *rpivid_hw_note(const rpivid_hw_t *hw);
+
+/* 1 once the block stopped responding in this process: the memory it was given may still be
+ * written by it, so buffers it may write are not freed (rpivid_dma_free leaves them mapped) */
+int rpivid_hw_dead(void);
 
 void rpivid_hw_close(rpivid_hw_t *hw);
 
@@ -64,11 +86,11 @@ uint32_t rpivid_hw_clock(const rpivid_hw_t *hw);
 /* 1: a decode sleeps on the block's interrupt; 0: it polls the interrupt controller */
 int rpivid_hw_irq(const rpivid_hw_t *hw);
 
-/* Decode one picture. 0, -ETIMEDOUT (a phase did not finish: the block may be wedged and
- * should not be used again), -EIO (phase 1 rejected the stream), -ENOMEM. */
+/* Decode one picture. 0, -ETIMEDOUT (a phase did not finish: the block is not used again,
+ * see rpivid_hw_open), -EIO (phase 1 rejected the stream), -ENOMEM. */
 int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st);
 
-/* Contiguous uncached memory the block can address (zeroed) */
+/* Contiguous uncached memory the block can address (zeroed; below RPIVID_DMA_LIMIT) */
 int rpivid_dma_alloc(rpivid_dma_t *d, size_t size);
 void rpivid_dma_free(rpivid_dma_t *d);
 
