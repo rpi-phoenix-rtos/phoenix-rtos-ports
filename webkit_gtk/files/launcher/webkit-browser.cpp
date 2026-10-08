@@ -531,6 +531,9 @@ static void activate(GApplication* application, gpointer)
     settings = webkit_settings_new();
     webkit_settings_set_enable_smooth_scrolling(settings, TRUE);
     webkit_settings_set_enable_developer_extras(settings, FALSE);
+    /* console.log() of the pages to stdout, as wpe-browser: the check pages report through it
+     * ("B8PAGE ...", "B10 ...") */
+    webkit_settings_set_enable_write_console_messages_to_stdout(settings, TRUE);
     webkit_settings_set_hardware_acceleration_policy(settings,
         optCPURendering ? WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER : WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
 #if ENABLE_WEBGL
