@@ -80,6 +80,9 @@ extern "C" void g_io_openssl_load(GIOModule*);
 
 /* --- log ------------------------------------------------------------------------------------ */
 
+/* bumped with every change a Pi gate depends on: printed in "ui start" */
+static const char launcherRevision[] = "b10-r3";
+
 static double startMs;
 static char processRole[16] = "ui";
 
@@ -376,6 +379,25 @@ static gboolean firstLoadTimeout(gpointer)
 }
 
 /*
+ * GDK 3's way to the EGL display of a wl_display (gdk_wayland_get_display): the platform entry
+ * points through eglGetProcAddress(). Not epoxy's eglGetPlatformDisplay(): epoxy resolves EGL 1.5
+ * entry points only once a display is current (epoxy_conservative_egl_version() assumes 1.4
+ * without one) and aborts with "No provider of eglGetPlatformDisplay found".
+ */
+static EGLDisplay getWaylandEGLDisplay(struct wl_display* wlDisplay)
+{
+    if (auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYPROC>(eglGetProcAddress("eglGetPlatformDisplay"))) {
+        if (EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wlDisplay, nullptr))
+            return display;
+    }
+    if (auto getPlatformDisplayEXT = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(eglGetProcAddress("eglGetPlatformDisplayEXT"))) {
+        if (EGLDisplay display = getPlatformDisplayEXT(EGL_PLATFORM_WAYLAND_EXT, wlDisplay, nullptr))
+            return display;
+    }
+    return eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(wlDisplay));
+}
+
+/*
  * The GL check of the gate (B10 G0): whether GDK gives this window an EGL context, as WebKit's
  * hardware acceleration needs (AcceleratedBackingStore::canUseHardwareAcceleration). One line:
  *   WKGB gdk-gl ok use_es=1 version=3.1
@@ -390,7 +412,7 @@ static void probeEGL(GdkDisplay* display)
     struct wl_display* wlDisplay = gdk_wayland_display_get_wl_display(display);
     const char* clientExtensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
     bool platformWayland = clientExtensions && (strstr(clientExtensions, "EGL_KHR_platform_wayland") || strstr(clientExtensions, "EGL_EXT_platform_wayland"));
-    EGLDisplay eglDisplay = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wlDisplay, nullptr);
+    EGLDisplay eglDisplay = getWaylandEGLDisplay(wlDisplay);
     EGLint error = eglGetError();
     EGLint major = 0, minor = 0;
     bool initialized = false, bindES = false, bindGL = false, createContext = false;
@@ -407,6 +429,70 @@ static void probeEGL(GdkDisplay* display)
     }
     LOG("egl-probe platform_wayland=%d display=%d initialize=%d version=%d.%d bind_es=%d bind_gl=%d create_context=%d error=0x%x vendor=%s",
         platformWayland, eglDisplay != EGL_NO_DISPLAY, initialized, major, minor, bindES, bindGL, createContext, error, vendor ? vendor : "-");
+}
+
+/*
+ * The same GL question asked before GTK and WebKit start, on a Wayland connection of its own:
+ * every step GDK 3 and WebKit's AcceleratedBackingStore take, each with its result, so that a
+ * "Disabled hardware acceleration because GTK failed to initialize GL" (which WebKit decides
+ * while the web context is created, before any window) is explained by the line above it:
+ *   WKGB egl-early wayland=1 client_ext=<platform_wayland,platform_surfaceless> display=1
+ *        initialize=1 version=1.5 apis=<EGL_CLIENT_APIS> bind_es=1 bind_gl=0 create_context_ext=1
+ *        configs=<n> context_es3=1 context_es2=1 error=0x3000 vendor=<...>
+ * The connection stays open (closing it could let GDK's display reuse its address, which Mesa
+ * keys its EGL displays on); the EGL display is terminated.
+ */
+static void earlyEGLProbe()
+{
+    struct wl_display* wlDisplay = wl_display_connect(nullptr);
+    if (!wlDisplay) {
+        LOG("egl-early wayland=0 (no compositor at WAYLAND_DISPLAY=%s)", g_getenv("WAYLAND_DISPLAY"));
+        return;
+    }
+    const char* client = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    bool platformWayland = client && (strstr(client, "EGL_KHR_platform_wayland") || strstr(client, "EGL_EXT_platform_wayland"));
+    bool platformSurfaceless = client && strstr(client, "EGL_MESA_platform_surfaceless");
+    EGLDisplay display = getWaylandEGLDisplay(wlDisplay);
+    EGLint error = eglGetError();
+    EGLint major = 0, minor = 0, configs = 0;
+    bool initialized = false, bindES = false, bindGL = false, createContextExt = false, es3 = false, es2 = false;
+    const char* vendor = "-";
+    const char* apis = "-";
+    if (display != EGL_NO_DISPLAY) {
+        initialized = eglInitialize(display, &major, &minor);
+        error = eglGetError();
+        if (initialized) {
+            vendor = eglQueryString(display, EGL_VENDOR);
+            apis = eglQueryString(display, EGL_CLIENT_APIS);
+            createContextExt = epoxy_has_egl_extension(display, "EGL_KHR_create_context");
+            bindGL = eglBindAPI(EGL_OPENGL_API);
+            bindES = eglBindAPI(EGL_OPENGL_ES_API);
+            error = eglGetError();
+            /* GDK 3's window config (find_eglconfig_for_window): RGB window surfaces, 8 bits */
+            const EGLint configAttributes[] = { EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER,
+                EGL_RED_SIZE, 1, EGL_GREEN_SIZE, 1, EGL_BLUE_SIZE, 1, EGL_ALPHA_SIZE, 8, EGL_NONE };
+            EGLConfig config = nullptr;
+            if (eglChooseConfig(display, configAttributes, &config, 1, &configs) && configs > 0) {
+                const EGLint es3Attributes[] = { EGL_CONTEXT_MAJOR_VERSION_KHR, 3, EGL_CONTEXT_MINOR_VERSION_KHR, 0, EGL_NONE };
+                const EGLint es2Attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+                EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, es3Attributes);
+                es3 = context != EGL_NO_CONTEXT;
+                if (es3)
+                    eglDestroyContext(display, context);
+                context = eglCreateContext(display, config, EGL_NO_CONTEXT, es2Attributes);
+                es2 = context != EGL_NO_CONTEXT;
+                if (es2)
+                    eglDestroyContext(display, context);
+            }
+            error = eglGetError();
+        }
+    }
+    LOG("egl-early wayland=1 client_ext=%s%s display=%d initialize=%d version=%d.%d apis=%s bind_es=%d bind_gl=%d create_context_ext=%d configs=%d context_es3=%d context_es2=%d error=0x%x vendor=%s",
+        platformWayland ? "platform_wayland" : "-", platformSurfaceless ? ",platform_surfaceless" : "",
+        display != EGL_NO_DISPLAY, initialized, major, minor, apis ? apis : "-", bindES, bindGL, createContextExt, configs, es3, es2,
+        error, vendor ? vendor : "-");
+    if (initialized)
+        eglTerminate(display);
 }
 
 static void logGdkGL(GtkWidget* window)
@@ -658,8 +744,11 @@ static int uiMain(int argc, char** argv)
     }
 
     applyProcessModel();
-    LOG("ui start pid=%d executable=%s wayland=%s gdk_gl=%s", static_cast<int>(getpid()), getenv("WPE_PHOENIX_EXECUTABLE"),
-        g_getenv("WAYLAND_DISPLAY"), g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop");
+    /* launcher=: which revision of this file the binary carries (build 66 shipped an older one) */
+    LOG("ui start pid=%d executable=%s wayland=%s gdk_gl=%s launcher=%s", static_cast<int>(getpid()), getenv("WPE_PHOENIX_EXECUTABLE"),
+        g_getenv("WAYLAND_DISPLAY"), g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop", launcherRevision);
+    if (!optCPURendering)
+        earlyEGLProbe();
 
     GtkApplication* application = gtk_application_new("org.phoenix_rtos.WebBrowser", G_APPLICATION_NON_UNIQUE);
     g_signal_connect(application, "startup", G_CALLBACK(startup), nullptr);
