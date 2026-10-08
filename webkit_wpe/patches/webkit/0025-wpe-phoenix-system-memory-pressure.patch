@@ -1,0 +1,378 @@
+Subject: WebKit on Phoenix: the UI process watches the system's free memory and sends memory pressure events
+
+On Linux the UI process runs a MemoryPressureMonitor thread (UIProcess/linux/): it reads
+/proc/meminfo every 1-5 s and, with 90 % of the memory used, sends each web and network process a
+memory pressure event (AuxiliaryProcess::DidReceiveMemoryPressureEvent; critical at 95 %), on
+which they release their caches. On Phoenix all of it was compiled out (OS(LINUX)), so no process
+ever heard that the system was running out: the only trigger left was each web process's own
+footprint (patch 0024's periodic monitor, 1 GB / 1.5 GB of a 3 GB limit), blind to the other
+processes. A YouTube session (C17) then took the system to 0 KB free, every allocation failed at
+once, and the desktop was left unusable.
+
+On Phoenix the monitor reads the kernel's page counters with meminfo() (the panel's memory plugin
+and sysconf(_SC_AVPHYS_PAGES) do the same; free includes the file cache the kernel gives up on
+demand) and keeps the Linux plumbing as it is:
+
+  warning   free below 20 % of RAM                     non-critical event
+  critical  free below 10 % of RAM or below 300 MB     critical event
+
+polled every 5 s with less than half the memory in use, down to every 1 s above 85 % (Linux's
+intervals). Each event also runs the UI process's own handler (installed on Phoenix as on Linux):
+it empties the back/forward and web process caches, shuts prewarmed web processes down and drops
+GTK's view snapshots -- whole processes exiting, the one release that returns memory to the
+system, as mimalloc does not decommit on Phoenix (patch 0005). WEBKIT_DISABLE_MEMORY_PRESSURE_MONITOR=1
+turns it all off, as on Linux. Each change of level is printed on stderr, next to 0024's lines:
+
+  WPEB-MEMPRESSURE pid=P system level=normal|warning|critical free_mb=F total_mb=T
+
+diff --git a/Source/WebKit/Shared/AuxiliaryProcess.cpp b/Source/WebKit/Shared/AuxiliaryProcess.cpp
+index 8f37bd2..22280e4 100644
+--- a/Source/WebKit/Shared/AuxiliaryProcess.cpp
++++ b/Source/WebKit/Shared/AuxiliaryProcess.cpp
+@@ -51,6 +51,10 @@
+ #endif
+ #endif
+ 
++#if OS(PHOENIX)
++#include <wtf/MemoryPressureHandler.h>
++#endif
++
+ #if PLATFORM(COCOA)
+ #include "CoreIPCSecureCoding.h"
+ #endif
+@@ -296,7 +300,7 @@ void AuxiliaryProcess::didReceiveInvalidMessage(IPC::Connection&, IPC::MessageNa
+     CRASH();
+ }
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+ void AuxiliaryProcess::didReceiveMemoryPressureEvent(bool isCritical)
+ {
+     MemoryPressureHandler::singleton().triggerMemoryPressureEvent(isCritical);
+diff --git a/Source/WebKit/Shared/AuxiliaryProcess.h b/Source/WebKit/Shared/AuxiliaryProcess.h
+index 637e3d9..24dceaa 100644
+--- a/Source/WebKit/Shared/AuxiliaryProcess.h
++++ b/Source/WebKit/Shared/AuxiliaryProcess.h
+@@ -149,7 +149,7 @@ protected:
+     bool dispatchMessage(IPC::Connection&, IPC::Decoder&);
+     bool dispatchSyncMessage(IPC::Connection&, IPC::Decoder&, UniqueRef<IPC::Encoder>&);
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+     void didReceiveMemoryPressureEvent(bool isCritical);
+ #endif
+ 
+diff --git a/Source/WebKit/Shared/AuxiliaryProcess.messages.in b/Source/WebKit/Shared/AuxiliaryProcess.messages.in
+index e66188b..008380e 100644
+--- a/Source/WebKit/Shared/AuxiliaryProcess.messages.in
++++ b/Source/WebKit/Shared/AuxiliaryProcess.messages.in
+@@ -35,7 +35,7 @@ messages -> AuxiliaryProcess WantsDispatchMessage {
+     [DeferSendingIfSuspendedWithCoalescingKeys=(domain, key)] PreferenceDidUpdate(String domain, String key, std::optional<String> encodedValue)
+ #endif
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+     void DidReceiveMemoryPressureEvent(bool isCritical)
+ #endif
+ }
+diff --git a/Source/WebKit/UIProcess/WebProcessPool.cpp b/Source/WebKit/UIProcess/WebProcessPool.cpp
+index c15cfd4..550585a 100644
+--- a/Source/WebKit/UIProcess/WebProcessPool.cpp
++++ b/Source/WebKit/UIProcess/WebProcessPool.cpp
+@@ -141,7 +141,7 @@
+ #include <JavaScriptCore/RemoteInspector.h>
+ #endif
+ 
+-#if OS(LINUX)
++#if OS(LINUX) || OS(PHOENIX)
+ #include "MemoryPressureMonitor.h"
+ #endif
+ 
+@@ -292,7 +292,7 @@ WebProcessPool::WebProcessPool(API::ProcessPoolConfiguration& configuration)
+ 
+     platformInitialize(needsGlobalStaticInitialization);
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+     if (!MemoryPressureMonitor::disabled())
+         MemoryPressureMonitor::singleton().start();
+ #endif
+@@ -447,7 +447,7 @@ void WebProcessPool::fullKeyboardAccessModeChanged(bool fullKeyboardAccessEnable
+     sendToAllProcesses(Messages::WebProcess::FullKeyboardAccessModeChanged(fullKeyboardAccessEnabled));
+ }
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+ void WebProcessPool::sendMemoryPressureEvent(bool isCritical)
+ {
+     sendToAllProcesses(Messages::AuxiliaryProcess::DidReceiveMemoryPressureEvent(isCritical));
+diff --git a/Source/WebKit/UIProcess/WebProcessPool.h b/Source/WebKit/UIProcess/WebProcessPool.h
+index 240957e..a28cf5e 100644
+--- a/Source/WebKit/UIProcess/WebProcessPool.h
++++ b/Source/WebKit/UIProcess/WebProcessPool.h
+@@ -372,7 +372,7 @@ public:
+ #endif
+ 
+     void fullKeyboardAccessModeChanged(bool fullKeyboardAccessEnabled);
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+     void sendMemoryPressureEvent(bool isCritical);
+ #endif
+     void textCheckerStateChanged();
+diff --git a/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp b/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp
+index 44fc9f5..7c3b869 100644
+--- a/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp
++++ b/Source/WebKit/UIProcess/glib/WebProcessPoolGLib.cpp
+@@ -161,7 +161,7 @@ void WebProcessPool::platformInitialize(NeedsGlobalStaticInitialization)
+     }
+ #endif
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+     if (!MemoryPressureMonitor::disabled())
+         installMemoryPressureHandler();
+ #endif
+@@ -230,7 +230,7 @@ void WebProcessPool::platformInitializeWebProcess(const WebProcessProxy& process
+     parameters.availableInputDevices = availableInputDevices();
+     parameters.memoryCacheDisabled = m_memoryCacheDisabled || LegacyGlobalSettings::singleton().cacheModel() == CacheModel::DocumentViewer;
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+     if (MemoryPressureMonitor::disabled())
+         parameters.shouldSuppressMemoryPressureHandler = true;
+ #endif
+diff --git a/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.cpp b/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.cpp
+index a065bb0..2f8367c 100644
+--- a/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.cpp
++++ b/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.cpp
+@@ -515,4 +515,185 @@ IGNORE_CLANG_WARNINGS_END
+ 
+ } // namespace WebKit
+ 
+-#endif // OS(LINUX)
++#elif OS(PHOENIX)
++
++#include "WebProcessPool.h"
++#include <algorithm>
++#include <mutex>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#include <wtf/MemoryPressureHandler.h>
++#include <wtf/Threading.h>
++
++namespace WebKit {
++
++// Phoenix-RTOS has no /proc/meminfo and no cgroups. The system's free memory comes from the
++// kernel's page allocator through meminfo(), the counters libphoenix's sysconf(_SC_AVPHYS_PAGES)
++// and the panel's memory plugin read. The free count includes the kernel's cache of unreferenced
++// file objects, which the allocator gives up on demand, so it is the memory that can still be
++// allocated (the largest contiguous block may be much smaller; meminfo() does not report it).
++//
++// Each poll compares the free memory with two levels. Below one, every web and network process
++// gets a memory pressure event (AuxiliaryProcess::didReceiveMemoryPressureEvent) and the UI
++// process runs its own handler:
++//   warning   free below 20 % of RAM                     a non-critical event
++//   critical  free below 10 % of RAM or below 300 MB     a critical event
++// A web process releases its caches (WebCore's memory and back/forward caches, decoded images,
++// fonts, a JavaScriptCore collection); the UI process empties its back/forward and web process
++// caches, shuts prewarmed web processes down and drops view snapshots. Each process's handler
++// then holds further events off for 5 to 30 s (wtf/unix/MemoryPressureHandlerUnix.cpp).
++//
++// Released heap stays in the process: mimalloc does not decommit on Phoenix (patch 0005), so an
++// event stops the growth by letting the caches' memory be reused. Only a process that exits (a
++// prewarmed or cached web process shut down here) returns memory to the system.
++//
++// The build has no release logging: each level change is printed on stderr, next to patch
++// 0024's lines,
++//   WPEB-MEMPRESSURE pid=P system level=normal|warning|critical free_mb=F total_mb=T
++
++static const Seconds s_minPollingInterval { 1_s };
++static const Seconds s_maxPollingInterval { 5_s };
++static const double s_minUsedMemoryPercentageForPolling = 50;
++static const double s_maxUsedMemoryPercentageForPolling = 85;
++static const uint64_t s_warningFreePercentage = 20;
++static const uint64_t s_criticalFreePercentage = 10;
++static const uint64_t s_criticalFreeBytes = 300 * MB;
++
++enum class SystemMemoryLevel : uint8_t {
++    Normal,
++    Warning,
++    Critical,
++};
++
++struct SystemMemory {
++    uint64_t total { 0 };
++    uint64_t free { 0 };
++};
++
++static std::optional<SystemMemory> systemMemory()
++{
++    meminfo_t info;
++    memset(&info, 0, sizeof(info));
++    // the counters only, not the page, map entry or memory map tables
++    info.page.mapsz = -1;
++    info.entry.mapsz = -1;
++    info.entry.kmapsz = -1;
++    info.maps.mapsz = -1;
++    meminfo(&info);
++
++    // The kernel always sets page.sz (sizeof(page_t)): zero means the call did nothing. The byte
++    // counts are unsigned int, so they wrap above 4 GiB of RAM (a 4 GB Pi 4 manages 3.8 GiB).
++    if (!info.page.sz)
++        return std::nullopt;
++    SystemMemory memory;
++    memory.free = info.page.free;
++    memory.total = memory.free + info.page.alloc;
++    if (!memory.total)
++        return std::nullopt;
++    return memory;
++}
++
++static SystemMemoryLevel systemMemoryLevel(const SystemMemory& memory)
++{
++    if (memory.free < std::max(memory.total * s_criticalFreePercentage / 100, s_criticalFreeBytes))
++        return SystemMemoryLevel::Critical;
++    if (memory.free < memory.total * s_warningFreePercentage / 100)
++        return SystemMemoryLevel::Warning;
++    return SystemMemoryLevel::Normal;
++}
++
++static const char* systemMemoryLevelName(SystemMemoryLevel level)
++{
++    switch (level) {
++    case SystemMemoryLevel::Normal:
++        return "normal";
++    case SystemMemoryLevel::Warning:
++        return "warning";
++    case SystemMemoryLevel::Critical:
++        return "critical";
++    }
++    return "?";
++}
++
++static inline Seconds pollIntervalForUsedMemoryPercentage(double usedPercentage)
++{
++    // as on Linux: poll less often while most of the memory is free
++    if (usedPercentage < s_minUsedMemoryPercentageForPolling)
++        return s_maxPollingInterval;
++
++    if (usedPercentage >= s_maxUsedMemoryPercentageForPolling)
++        return s_minPollingInterval;
++
++    return s_minPollingInterval + (s_maxPollingInterval - s_minPollingInterval) *
++        ((s_maxUsedMemoryPercentageForPolling - usedPercentage) / (s_maxUsedMemoryPercentageForPolling - s_minUsedMemoryPercentageForPolling));
++}
++
++MemoryPressureMonitor& MemoryPressureMonitor::singleton()
++{
++    static NeverDestroyed<MemoryPressureMonitor> memoryMonitor;
++    return memoryMonitor;
++}
++
++void MemoryPressureMonitor::start()
++{
++    if (m_started)
++        return;
++
++    m_started = true;
++
++    Thread::create("MemoryPressureMonitor"_s, [] {
++        Seconds pollInterval = s_maxPollingInterval;
++        SystemMemoryLevel lastLevel = SystemMemoryLevel::Normal;
++        bool reportedFailure = false;
++        while (true) {
++            sleep(pollInterval);
++
++            auto memory = systemMemory();
++            if (!memory) {
++                if (!reportedFailure)
++                    WTFLogAlways("Failed to get the memory usage");
++                reportedFailure = true;
++                pollInterval = s_maxPollingInterval;
++                continue;
++            }
++
++            SystemMemoryLevel level = systemMemoryLevel(*memory);
++            if (level != lastLevel) {
++                fprintf(stderr, "WPEB-MEMPRESSURE pid=%d system level=%s free_mb=%llu total_mb=%llu\n", static_cast<int>(getpid()),
++                    systemMemoryLevelName(level), static_cast<unsigned long long>(memory->free / MB), static_cast<unsigned long long>(memory->total / MB));
++                lastLevel = level;
++            }
++
++            if (level != SystemMemoryLevel::Normal) {
++                bool isCritical = level == SystemMemoryLevel::Critical;
++                RunLoop::mainSingleton().dispatch([isCritical] {
++                    MemoryPressureHandler::singleton().triggerMemoryPressureEvent(isCritical);
++                    for (auto& processPool : WebProcessPool::allProcessPools())
++                        processPool->sendMemoryPressureEvent(isCritical);
++                });
++            }
++
++            double usedPercentage = 100.0 * static_cast<double>(memory->total - memory->free) / static_cast<double>(memory->total);
++            pollInterval = pollIntervalForUsedMemoryPercentage(usedPercentage);
++        }
++    })->detach();
++}
++
++bool MemoryPressureMonitor::s_disabled = false;
++
++bool MemoryPressureMonitor::disabled()
++{
++    static std::once_flag flag;
++    std::call_once(flag, []() {
++        auto envvar = getenv("WEBKIT_DISABLE_MEMORY_PRESSURE_MONITOR");
++        s_disabled = envvar && !strcmp(envvar, "1");
++    });
++    return s_disabled;
++}
++
++} // namespace WebKit
++
++#endif // OS(LINUX) && !OS(ANDROID), OS(PHOENIX)
+diff --git a/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.h b/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.h
+index 1baf546..f1b70e1 100644
+--- a/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.h
++++ b/Source/WebKit/UIProcess/linux/MemoryPressureMonitor.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+ 
+ #include <wtf/NeverDestroyed.h>
+ #include <wtf/Noncopyable.h>
+@@ -49,6 +49,7 @@ private:
+     static bool s_disabled;
+ };
+ 
++#if OS(LINUX)
+ class CGroupMemoryController {
+ public:
+     CGroupMemoryController() = default;
+@@ -80,7 +81,8 @@ private:
+     void disposeMemoryController();
+     size_t getCgroupFileValue(FILE*);
+ };
++#endif // OS(LINUX)
+ 
+ } // namespace WebKit
+ 
+-#endif // OS(LINUX)
++#endif // (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+diff --git a/Source/WebKit/UIProcess/soup/WebProcessPoolSoup.cpp b/Source/WebKit/UIProcess/soup/WebProcessPoolSoup.cpp
+index 6bcfbf7..8b7cfb9 100644
+--- a/Source/WebKit/UIProcess/soup/WebProcessPoolSoup.cpp
++++ b/Source/WebKit/UIProcess/soup/WebProcessPoolSoup.cpp
+@@ -42,7 +42,7 @@ void WebProcessPool::platformInitializeNetworkProcess(NetworkProcessCreationPara
+     parameters.languages = overrideLanguages().isEmpty() ? userPreferredLanguages() : overrideLanguages();
+     parameters.memoryPressureHandlerConfiguration = s_networkProcessMemoryPressureHandlerConfiguration;
+ 
+-#if OS(LINUX) && !OS(ANDROID)
++#if (OS(LINUX) || OS(PHOENIX)) && !OS(ANDROID)
+     if (MemoryPressureMonitor::disabled())
+         parameters.shouldSuppressMemoryPressureHandler = true;
+ #endif // OS(LINUX)
