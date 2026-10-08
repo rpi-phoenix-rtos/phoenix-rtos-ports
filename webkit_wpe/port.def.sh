@@ -54,6 +54,10 @@
 	#   patches/webkit/0024       diagnostic: the web process's memory pressure monitor logs its
 	#                             limits, policy changes and releases ("WPEB-MEMPRESSURE"; the
 	#                             build has no release logging)
+	#   patches/webkit/0025       the UI process watches the system's free memory (meminfo()) and
+	#                             sends every web and network process memory pressure events
+	#                             below 20 % / 10 % free (Linux's MemoryPressureMonitor, which
+	#                             reads /proc/meminfo; "WPEB-MEMPRESSURE ... system level=")
 	#   patches/webkit-video/0030 USE video only: <video>/<audio> without GStreamer, a WebCore
 	#                             media player over FFmpeg's libraries (USE_FFMPEG; HEVC on the
 	#                             Pi 4's rpivid block through video_player's hevc_rpivid decoder).
