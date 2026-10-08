@@ -13,7 +13,8 @@
 #   Super+E               file manager (Thunar)      Super+D, Alt+F2 application finder
 #   Super+Space           fuzzel launcher            right click on the wallpaper: desktop menu
 #   the panel: applications menu, launchers (terminal, files, app finder), window buttons,
-#   the clock (local time), Log Out
+#   the memory in use (green/yellow/red; the tooltip lists the largest processes), the clock
+#   (local time), Log Out
 #
 # Environment knobs (psh `export NAME=value` before the command):
 #   HOLD       0 (default) = until Log Out; N = log out by itself after N seconds (unattended
@@ -31,7 +32,8 @@
 #              <dir> with a second `thunar` (forwarded to the running one over the bus)
 #   SESSION_SCRIPT (default /bin/xfce-desktop.sh) and every knob it reads
 #
-# Every line of ours starts with "XFCE-SESSION " (grading); the session's own start with "XFCE ".
+# Every line of ours starts with "XFCE-SESSION " (grading); the session's own start with "XFCE ";
+# the panel's memory plugin prints "MEMMON ..." on the console when it starts and every 30 s.
 #
 # Copyright 2026 Phoenix Systems
 #

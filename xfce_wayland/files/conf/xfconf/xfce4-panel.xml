@@ -6,7 +6,8 @@
   migrate helper on the first start (another 17 MB GTK program; it would copy
   /etc/xdg/xfce4/panel/default.xml). One panel at the top edge (layer-shell): the
   applications menu, launchers for foot and Thunar, the window buttons
-  (libxfce4windowing: wlr-foreign-toplevel), a spacer, the clock. Plugins that need
+  (libxfce4windowing: wlr-foreign-toplevel), a spacer, the memory in use (the memory
+  plugin, patches/xfce4-panel/0003), the clock. Plugins that need
   X11 or an XFCE session manager are left out (systray = StatusNotifier only here,
   pager needs workspaces, actions calls xfce4-session-logout).
 -->
@@ -29,6 +30,7 @@
         <value type="int" value="5"/>
         <value type="int" value="6"/>
         <value type="int" value="7"/>
+        <value type="int" value="13"/>
         <value type="int" value="8"/>
       </property>
     </property>
@@ -58,6 +60,7 @@
       <property name="expand" type="bool" value="true"/>
       <property name="style" type="uint" value="0"/>
     </property>
+    <property name="plugin-13" type="string" value="memory"/>
     <property name="plugin-8" type="string" value="clock">
       <property name="digital-layout" type="uint" value="3"/>
       <property name="digital-time-format" type="string" value="%a %d %b  %H:%M"/>

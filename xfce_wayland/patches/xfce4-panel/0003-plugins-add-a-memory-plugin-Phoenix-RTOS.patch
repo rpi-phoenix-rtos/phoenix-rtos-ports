@@ -1,0 +1,1008 @@
+From cd4debc6828031c7760f07f45c8db4760983ca04 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Thu, 8 Oct 2026 22:50:50 +0200
+Subject: [PATCH] plugins: add a memory plugin (Phoenix-RTOS)
+
+A small panel item that shows how much physical memory is in use:
+"Mem <used>/<total> GB" and a bar, green below 75 % used, yellow up
+to 90 %, red above. Phoenix-RTOS has no OOM handling, so running out
+of memory wedges the desktop with no warning; this makes it visible.
+
+The figures come from Phoenix-RTOS meminfo(): one call every 2 s for
+the totals. The kernel counts its file cache as free (it is given up
+on demand), so "used" leaves it out; the cache and the largest free
+block are not reported separately. The tooltip adds free memory and
+the five processes with the most anonymous memory (threadsinfo() and
+one meminfo() per process, done only while a tooltip is shown, at most
+every 5 s, and for the log line).
+
+At start, every 30 s and when the level goes up, one line goes to
+/dev/console (stderr only if it cannot be opened):
+  MEMMON t=<s> total_mb= used_mb= free_mb= cache_mb=- largest_kb=-
+         top=<name>:<mb>,... all_mb= level=<green|yellow|red>
+
+Built only for host_machine.system() == 'phoenix'; with
+-Dbuiltin-plugins=true it is linked into the panel like the others.
+BSD-3-Clause, new code.
+---
+ meson.build                         |   4 +
+ plugins/memory/memory-stats.c       | 139 +++++++
+ plugins/memory/memory-stats.h       |  73 ++++
+ plugins/memory/memory.c             | 609 ++++++++++++++++++++++++++++
+ plugins/memory/memory.desktop.in.in |   8 +
+ plugins/memory/memory.h             |  26 ++
+ plugins/memory/meson.build          |  57 +++
+ 7 files changed, 916 insertions(+)
+ create mode 100644 plugins/memory/memory-stats.c
+ create mode 100644 plugins/memory/memory-stats.h
+ create mode 100644 plugins/memory/memory.c
+ create mode 100644 plugins/memory/memory.desktop.in.in
+ create mode 100644 plugins/memory/memory.h
+ create mode 100644 plugins/memory/meson.build
+
+diff --git a/meson.build b/meson.build
+index 9838792..ccd41f4 100644
+--- a/meson.build
++++ b/meson.build
+@@ -272,6 +272,10 @@ subdir('plugins' / 'applicationsmenu')
+ subdir('plugins' / 'clock')
+ subdir('plugins' / 'directorymenu')
+ subdir('plugins' / 'launcher')
++if host_machine.system() == 'phoenix'
++  # meminfo() and threadsinfo(): Phoenix-RTOS system calls
++  subdir('plugins' / 'memory')
++endif
+ subdir('plugins' / 'pager')
+ subdir('plugins' / 'separator')
+ subdir('plugins' / 'showdesktop')
+diff --git a/plugins/memory/memory-stats.c b/plugins/memory/memory-stats.c
+new file mode 100644
+index 0000000..a784a00
+--- /dev/null
++++ b/plugins/memory/memory-stats.c
+@@ -0,0 +1,139 @@
++/*
++ * Phoenix-RTOS
++ *
++ * xfce4-panel memory plugin: the figures and how they are shown (no GTK, no system calls)
++ *
++ * Copyright 2026 Phoenix Systems
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#include "memory-stats.h"
++
++#include <stdio.h>
++#include <string.h>
++
++
++#define GIB (1ULL << 30)
++
++
++unsigned int
++memory_permille (unsigned long long used,
++                 unsigned long long total)
++{
++  if (total == 0U || used >= total)
++    return 1000U;
++
++  /* used < total < 2^54 on any real machine: no overflow */
++  return (unsigned int) ((used * 1000U) / total);
++}
++
++
++
++MemoryLevel
++memory_level (unsigned long long used,
++              unsigned long long total)
++{
++  unsigned int permille = memory_permille (used, total);
++
++  if (permille < MEMORY_HIGH_PERMILLE)
++    return MEMORY_LEVEL_OK;
++  if (permille <= MEMORY_CRITICAL_PERMILLE)
++    return MEMORY_LEVEL_HIGH;
++  return MEMORY_LEVEL_CRITICAL;
++}
++
++
++
++const char *
++memory_level_name (MemoryLevel level)
++{
++  switch (level)
++    {
++    case MEMORY_LEVEL_OK:
++      return "green";
++    case MEMORY_LEVEL_HIGH:
++      return "yellow";
++    default:
++      return "red";
++    }
++}
++
++
++
++void
++memory_format_gb (char *buf,
++                  size_t size,
++                  unsigned long long bytes)
++{
++  /* tenths of a GiB, rounded half up */
++  unsigned long long tenths = (bytes * 10U + GIB / 2U) / GIB;
++
++  snprintf (buf, size, "%llu.%llu", tenths / 10U, tenths % 10U);
++}
++
++
++
++void
++memory_process_name (char *buf,
++                     size_t size,
++                     const char *cmdline)
++{
++  const char *start = cmdline, *end, *p;
++  size_t n = 0;
++
++  if (size == 0U)
++    return;
++
++  /* the first argument ends at the first blank; its file name after the last '/' */
++  end = start + strcspn (start, " \t");
++  for (p = start; p < end; p++)
++    if (*p == '/')
++      start = p + 1;
++
++  for (p = start; p < end && n + 1U < size; p++, n++)
++    {
++      char c = *p;
++
++      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
++          || c == '.' || c == '_' || c == '+' || c == '-')
++        buf[n] = c;
++      else
++        buf[n] = '_';
++    }
++
++  if (n == 0U && size > 1U)
++    buf[n++] = '?';
++  buf[n] = '\0';
++}
++
++
++
++void
++memory_top_insert (MemoryProcess *top,
++                   unsigned int *count,
++                   unsigned int max,
++                   const MemoryProcess *process)
++{
++  unsigned int i = *count;
++
++  if (max == 0U)
++    return;
++
++  /* full and not larger than the last one: not in the list */
++  if (i == max)
++    {
++      if (process->bytes <= top[max - 1U].bytes)
++        return;
++      i--;
++    }
++  else
++    {
++      (*count)++;
++    }
++
++  /* move the smaller ones down, then put it in their place */
++  for (; i > 0U && top[i - 1U].bytes < process->bytes; i--)
++    top[i] = top[i - 1U];
++  top[i] = *process;
++}
+diff --git a/plugins/memory/memory-stats.h b/plugins/memory/memory-stats.h
+new file mode 100644
+index 0000000..d9c1cad
+--- /dev/null
++++ b/plugins/memory/memory-stats.h
+@@ -0,0 +1,73 @@
++/*
++ * Phoenix-RTOS
++ *
++ * xfce4-panel memory plugin: the figures and how they are shown (no GTK, no system calls)
++ *
++ * Copyright 2026 Phoenix Systems
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#ifndef __MEMORY_STATS_H__
++#define __MEMORY_STATS_H__
++
++#include <stddef.h>
++
++
++/* Used memory, in per mille of the total, from which the plugin shows the next level */
++#define MEMORY_HIGH_PERMILLE     750U
++#define MEMORY_CRITICAL_PERMILLE 900U
++
++/* The processes listed by memory use */
++#define MEMORY_TOP_PROCESSES 5U
++
++
++typedef enum
++{
++  MEMORY_LEVEL_OK = 0,   /* below 75 %: green */
++  MEMORY_LEVEL_HIGH,     /* 75 % to 90 %: yellow */
++  MEMORY_LEVEL_CRITICAL, /* above 90 %: red */
++} MemoryLevel;
++
++
++typedef struct
++{
++  int pid;
++  unsigned long long bytes;
++  char name[32]; /* the program's file name, as memory_process_name() makes it */
++} MemoryProcess;
++
++
++MemoryLevel
++memory_level (unsigned long long used,
++              unsigned long long total);
++
++const char *
++memory_level_name (MemoryLevel level);
++
++/* bytes in GiB with one decimal, rounded: "3.8" */
++void
++memory_format_gb (char *buf,
++                  size_t size,
++                  unsigned long long bytes);
++
++/* used in per mille of total, at most 1000 */
++unsigned int
++memory_permille (unsigned long long used,
++                 unsigned long long total);
++
++/* The file name of a process's first argument ("/bin/bash /bin/x" -> "bash"), as one
++ * word for a log line: other than [A-Za-z0-9._+-] becomes '_'; "?" when empty */
++void
++memory_process_name (char *buf,
++                     size_t size,
++                     const char *cmdline);
++
++/* Keeps top[0..*count) sorted by bytes, largest first, at most max entries */
++void
++memory_top_insert (MemoryProcess *top,
++                   unsigned int *count,
++                   unsigned int max,
++                   const MemoryProcess *process);
++
++#endif /* !__MEMORY_STATS_H__ */
+diff --git a/plugins/memory/memory.c b/plugins/memory/memory.c
+new file mode 100644
+index 0000000..3f73967
+--- /dev/null
++++ b/plugins/memory/memory.c
+@@ -0,0 +1,609 @@
++/*
++ * Phoenix-RTOS
++ *
++ * xfce4-panel memory plugin: how much physical memory is in use (Phoenix-RTOS meminfo())
++ *
++ * The panel shows "Mem <used>/<total> GB" and a bar, green below 75 % used, yellow up to
++ * 90 %, red above; the tooltip adds free memory and the processes using the most memory.
++ * At start, every 30 s and when the level goes up, one line goes to /dev/console (to stderr
++ * if it cannot be opened):
++ *
++ *   MEMMON t=<s> total_mb=<n> used_mb=<n> free_mb=<n> cache_mb=- largest_kb=- top=<name>:<mb>,... all_mb=<n> level=<green|yellow|red>
++ *
++ * t is seconds since the plugin started. The kernel counts the pages of its file cache as
++ * free (they are given up on demand), so "used" leaves the cache out; meminfo() does not
++ * report the cache, or the largest free block, separately: cache_mb and largest_kb are "-".
++ * A process's memory is its anonymous memory (the anonymous pages of its map entries, as
++ * `mem -m <pid>` lists them); all_mb is that of all processes. GB and MB are 2^30 and 2^20.
++ *
++ * Costs: every 2 s one meminfo() for the totals. The processes (one threadsinfo() and a
++ * meminfo() per process) only for the log line and for a tooltip being shown, at most
++ * every 5 s.
++ *
++ * Copyright 2026 Phoenix Systems
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include "memory.h"
++#include "memory-stats.h"
++
++#include <fcntl.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++
++#include <sys/mman.h>    /* meminfo() */
++#include <sys/threads.h> /* threadsinfo(), threadcount() */
++
++#include <gtk/gtk.h>
++
++
++#define MEMORY_UPDATE_SECONDS 2U
++#define MEMORY_LOG_SECONDS    30U
++
++/* the process list is reused for this long (a tooltip asks on every pointer motion) */
++#define MEMORY_TOP_MAX_AGE (5 * G_USEC_PER_SEC)
++
++/* a level going up is logged at once, but not more often than this */
++#define MEMORY_LEVEL_LOG_GAP (10 * G_USEC_PER_SEC)
++
++/* the bar's thickness and its distance from the panel's edges, in pixels */
++#define MEMORY_BAR_THICKNESS 6
++#define MEMORY_BAR_MARGIN    4
++
++#define MIB (1ULL << 20)
++
++
++/* bar and text colours of the levels: green, yellow, red */
++static const char *const memory_level_colors[] = { "#2ec27e", "#e5a50a", "#e01b24" };
++
++
++typedef struct
++{
++  unsigned long long total;
++  unsigned long long used; /* without the file cache */
++  unsigned long long free; /* with the file cache */
++} MemorySummary;
++
++
++struct _MemoryPlugin
++{
++  XfcePanelPlugin __parent__;
++
++  GtkWidget *box;
++  GtkWidget *bar;
++  GtkWidget *label;
++
++  guint timeout_id;
++  guint ticks;
++  gint64 start_time;
++  gint64 log_time;
++
++  /* the last figures, and what the panel shows of them */
++  MemorySummary mem;
++  MemoryLevel level;
++  unsigned int permille;
++  gchar *markup;
++
++  /* the processes using the most memory */
++  MemoryProcess top[MEMORY_TOP_PROCESSES];
++  unsigned int ntop;
++  unsigned int nprocesses;
++  unsigned long long all_bytes;
++  gboolean top_valid;
++  gint64 top_time;
++
++  /* buffers of the process scan, kept: memory may be short when they are needed */
++  threadinfo_t *threads;
++  int threads_size;
++  entryinfo_t *entries;
++  int entries_size;
++
++  /* the MEMMON lines go here (the session sends stderr to a log file) */
++  int console_fd;
++};
++
++
++
++XFCE_PANEL_DEFINE_PLUGIN (MemoryPlugin, memory_plugin)
++
++
++
++static void
++memory_plugin_construct (XfcePanelPlugin *panel_plugin);
++static void
++memory_plugin_free_data (XfcePanelPlugin *panel_plugin);
++static gboolean
++memory_plugin_size_changed (XfcePanelPlugin *panel_plugin,
++                            gint size);
++static void
++memory_plugin_mode_changed (XfcePanelPlugin *panel_plugin,
++                            XfcePanelPluginMode mode);
++
++
++
++static void
++memory_plugin_class_init (MemoryPluginClass *klass)
++{
++  XfcePanelPluginClass *plugin_class = XFCE_PANEL_PLUGIN_CLASS (klass);
++
++  plugin_class->construct = memory_plugin_construct;
++  plugin_class->free_data = memory_plugin_free_data;
++  plugin_class->size_changed = memory_plugin_size_changed;
++  plugin_class->mode_changed = memory_plugin_mode_changed;
++}
++
++
++
++static gboolean
++memory_plugin_bar_draw (GtkWidget *widget,
++                        cairo_t *cr,
++                        MemoryPlugin *plugin);
++static gboolean
++memory_plugin_query_tooltip (GtkWidget *widget,
++                             gint x,
++                             gint y,
++                             gboolean keyboard_mode,
++                             GtkTooltip *tooltip,
++                             MemoryPlugin *plugin);
++
++
++
++static void
++memory_plugin_init (MemoryPlugin *plugin)
++{
++  plugin->console_fd = -1;
++  plugin->level = MEMORY_LEVEL_OK;
++
++  plugin->box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 4);
++  gtk_container_set_border_width (GTK_CONTAINER (plugin->box), 2);
++  gtk_container_add (GTK_CONTAINER (plugin), plugin->box);
++
++  plugin->bar = gtk_drawing_area_new ();
++  g_signal_connect (G_OBJECT (plugin->bar), "draw",
++                    G_CALLBACK (memory_plugin_bar_draw), plugin);
++  gtk_box_pack_start (GTK_BOX (plugin->box), plugin->bar, FALSE, FALSE, 0);
++
++  plugin->label = gtk_label_new (NULL);
++  gtk_box_pack_start (GTK_BOX (plugin->box), plugin->label, FALSE, FALSE, 0);
++
++  gtk_widget_set_has_tooltip (GTK_WIDGET (plugin), TRUE);
++  g_signal_connect (G_OBJECT (plugin), "query-tooltip",
++                    G_CALLBACK (memory_plugin_query_tooltip), plugin);
++
++  gtk_widget_show_all (plugin->box);
++}
++
++
++
++/* --- reading the figures --------------------------------------------------------------- */
++
++static void
++memory_read_summary (MemorySummary *mem)
++{
++  meminfo_t info;
++
++  /* the totals only: no page map, no map entries, no shared maps */
++  memset (&info, 0, sizeof (info));
++  info.page.mapsz = -1;
++  info.entry.mapsz = -1;
++  info.entry.kmapsz = -1;
++  info.maps.mapsz = -1;
++  meminfo (&info);
++
++  mem->used = info.page.alloc;
++  mem->free = info.page.free;
++  mem->total = mem->used + mem->free;
++}
++
++
++
++/* The anonymous memory of process pid, in bytes; FALSE if it is gone or no buffer could
++ * be had */
++static gboolean
++memory_process_bytes (MemoryPlugin *plugin,
++                      int pid,
++                      unsigned long long *bytes)
++{
++  meminfo_t info;
++  unsigned long long sum;
++  int attempt, i;
++
++  for (attempt = 0; attempt < 4; attempt++)
++    {
++      if (plugin->entries == NULL)
++        {
++          plugin->entries_size = MAX (plugin->entries_size, 256);
++          plugin->entries = g_try_new (entryinfo_t, plugin->entries_size);
++          if (plugin->entries == NULL)
++            {
++              plugin->entries_size = 0;
++              return FALSE;
++            }
++        }
++
++      memset (&info, 0, sizeof (info));
++      info.page.mapsz = -1;
++      info.entry.kmapsz = -1;
++      info.maps.mapsz = -1;
++      info.entry.pid = (unsigned int) pid;
++      info.entry.mapsz = plugin->entries_size;
++      info.entry.map = plugin->entries;
++      meminfo (&info);
++
++      if (info.entry.mapsz < 0)
++        return FALSE;
++
++      if (info.entry.mapsz <= plugin->entries_size)
++        {
++          sum = 0;
++          for (i = 0; i < info.entry.mapsz; i++)
++            {
++              /* (size_t)-1: an entry backed by a file with no anonymous pages */
++              if (plugin->entries[i].anonsz != SIZE_MAX && plugin->entries[i].anonsz != (size_t) ~0U)
++                sum += plugin->entries[i].anonsz;
++            }
++          *bytes = sum;
++          return TRUE;
++        }
++
++      /* more entries than room: again with a larger buffer */
++      g_free (plugin->entries);
++      plugin->entries = NULL;
++      plugin->entries_size = info.entry.mapsz + 64;
++    }
++
++  return FALSE;
++}
++
++
++
++/* The processes using the most memory, into plugin->top; FALSE if they could not be listed */
++static gboolean
++memory_refresh_top (MemoryPlugin *plugin)
++{
++  MemoryProcess process;
++  int n, i, j;
++  pid_t pid;
++
++  plugin->top_valid = FALSE;
++  plugin->top_time = g_get_monotonic_time ();
++
++  n = threadcount ();
++  if (n <= 0)
++    return FALSE;
++
++  if (plugin->threads == NULL || plugin->threads_size < n + 16)
++    {
++      g_free (plugin->threads);
++      plugin->threads_size = n + 64;
++      plugin->threads = g_try_new (threadinfo_t, plugin->threads_size);
++      if (plugin->threads == NULL)
++        {
++          plugin->threads_size = 0;
++          return FALSE;
++        }
++    }
++
++  n = threadsinfo (plugin->threads_size, PH_THREADINFO_NAME, plugin->threads);
++  if (n < 0)
++    return FALSE;
++  n = MIN (n, plugin->threads_size);
++
++  plugin->ntop = 0;
++  plugin->nprocesses = 0;
++  plugin->all_bytes = 0;
++
++  for (i = 0; i < n; i++)
++    {
++      /* pid 0: the kernel's own threads */
++      pid = plugin->threads[i].pid;
++      if (pid <= 0)
++        continue;
++
++      /* every process once, at its first thread */
++      for (j = 0; j < i; j++)
++        if (plugin->threads[j].pid == pid)
++          break;
++      if (j < i)
++        continue;
++
++      process.pid = pid;
++      if (!memory_process_bytes (plugin, pid, &process.bytes))
++        continue;
++
++      plugin->threads[i].name[sizeof (plugin->threads[i].name) - 1] = '\0';
++      memory_process_name (process.name, sizeof (process.name), plugin->threads[i].name);
++
++      plugin->nprocesses++;
++      plugin->all_bytes += process.bytes;
++      memory_top_insert (plugin->top, &plugin->ntop, MEMORY_TOP_PROCESSES, &process);
++    }
++
++  plugin->top_valid = TRUE;
++  return TRUE;
++}
++
++
++
++/* --- the console line ------------------------------------------------------------------ */
++
++static void
++memory_write_line (MemoryPlugin *plugin,
++                   const char *line,
++                   size_t len)
++{
++  /* write(), no stdio: nothing here allocates. stderr only without a console: the
++   * session's panel log is printed at its end, 40 lines of it */
++  if (plugin->console_fd >= 0)
++    (void) !write (plugin->console_fd, line, len);
++  else
++    (void) !write (STDERR_FILENO, line, len);
++}
++
++
++
++static void
++memory_plugin_log (MemoryPlugin *plugin,
++                   gint64 now)
++{
++  char top[MEMORY_TOP_PROCESSES * (sizeof (plugin->top[0].name) + 12)];
++  char line[512], all[24];
++  size_t used = 0;
++  unsigned int i;
++  int len;
++
++  plugin->log_time = now;
++
++  strcpy (top, "-");
++  strcpy (all, "-");
++  if (memory_refresh_top (plugin))
++    {
++      for (i = 0; i < plugin->ntop; i++)
++        {
++          len = snprintf (top + used, sizeof (top) - used, "%s%s:%llu", (i > 0) ? "," : "",
++                          plugin->top[i].name, plugin->top[i].bytes / MIB);
++          if (len < 0 || (size_t) len >= sizeof (top) - used)
++            break;
++          used += (size_t) len;
++        }
++      if (used == 0)
++        strcpy (top, "-");
++      snprintf (all, sizeof (all), "%llu", plugin->all_bytes / MIB);
++    }
++
++  len = snprintf (line, sizeof (line),
++                  "MEMMON t=%lld total_mb=%llu used_mb=%llu free_mb=%llu cache_mb=- largest_kb=- top=%s all_mb=%s level=%s\n",
++                  (long long) ((now - plugin->start_time) / G_USEC_PER_SEC),
++                  plugin->mem.total / MIB, plugin->mem.used / MIB, plugin->mem.free / MIB,
++                  top, all, memory_level_name (plugin->level));
++  if (len > 0)
++    memory_write_line (plugin, line, MIN ((size_t) len, sizeof (line) - 1));
++}
++
++
++
++/* --- the panel ------------------------------------------------------------------------- */
++
++static void
++memory_plugin_update (MemoryPlugin *plugin)
++{
++  char used[16], total[16];
++  unsigned int permille;
++  MemoryLevel level;
++  gchar *markup;
++
++  memory_read_summary (&plugin->mem);
++  level = memory_level (plugin->mem.used, plugin->mem.total);
++  permille = memory_permille (plugin->mem.used, plugin->mem.total);
++
++  memory_format_gb (used, sizeof (used), plugin->mem.used);
++  memory_format_gb (total, sizeof (total), plugin->mem.total);
++  if (level == MEMORY_LEVEL_OK)
++    markup = g_strdup_printf ("Mem %s/%s GB", used, total);
++  else
++    markup = g_strdup_printf ("Mem <span foreground=\"%s\" weight=\"bold\">%s/%s GB</span>",
++                              memory_level_colors[level], used, total);
++
++  /* redraw only what changed: every redraw is a new frame for the compositor */
++  if (g_strcmp0 (markup, plugin->markup) != 0)
++    {
++      gtk_label_set_markup (GTK_LABEL (plugin->label), markup);
++      g_free (plugin->markup);
++      plugin->markup = markup;
++    }
++  else
++    {
++      g_free (markup);
++    }
++
++  if (level != plugin->level || permille / 10U != plugin->permille / 10U)
++    gtk_widget_queue_draw (plugin->bar);
++  plugin->level = level;
++  plugin->permille = permille;
++}
++
++
++
++static gboolean
++memory_plugin_tick (gpointer data)
++{
++  MemoryPlugin *plugin = MEMORY_PLUGIN (data);
++  MemoryLevel before = plugin->level;
++  gint64 now = g_get_monotonic_time ();
++
++  memory_plugin_update (plugin);
++
++  plugin->ticks++;
++  if (plugin->ticks % (MEMORY_LOG_SECONDS / MEMORY_UPDATE_SECONDS) == 0)
++    memory_plugin_log (plugin, now);
++  else if (plugin->level > before && now - plugin->log_time >= MEMORY_LEVEL_LOG_GAP)
++    memory_plugin_log (plugin, now);
++
++  return G_SOURCE_CONTINUE;
++}
++
++
++
++static gboolean
++memory_plugin_bar_draw (GtkWidget *widget,
++                        cairo_t *cr,
++                        MemoryPlugin *plugin)
++{
++  GtkStyleContext *context = gtk_widget_get_style_context (widget);
++  int width = gtk_widget_get_allocated_width (widget);
++  int height = gtk_widget_get_allocated_height (widget);
++  GdkRGBA trough, fill;
++  double part = plugin->permille / 1000.0;
++
++  /* the trough: the text colour, faint */
++  gtk_style_context_get_color (context, gtk_style_context_get_state (context), &trough);
++  trough.alpha *= 0.25;
++  gdk_cairo_set_source_rgba (cr, &trough);
++  cairo_rectangle (cr, 0, 0, width, height);
++  cairo_fill (cr);
++
++  /* the used part, from the bottom (or the left, on a vertical panel) */
++  if (!gdk_rgba_parse (&fill, memory_level_colors[plugin->level]))
++    return FALSE;
++  gdk_cairo_set_source_rgba (cr, &fill);
++  if (xfce_panel_plugin_get_mode (XFCE_PANEL_PLUGIN (plugin)) == XFCE_PANEL_PLUGIN_MODE_VERTICAL)
++    cairo_rectangle (cr, 0, 0, width * part, height);
++  else
++    cairo_rectangle (cr, 0, height * (1.0 - part), width, height * part);
++  cairo_fill (cr);
++
++  return FALSE;
++}
++
++
++
++static gboolean
++memory_plugin_query_tooltip (GtkWidget *widget,
++                             gint x,
++                             gint y,
++                             gboolean keyboard_mode,
++                             GtkTooltip *tooltip,
++                             MemoryPlugin *plugin)
++{
++  char used[16], total[16], avail[16];
++  GString *text;
++  unsigned int i;
++
++  if (!plugin->top_valid || g_get_monotonic_time () - plugin->top_time > MEMORY_TOP_MAX_AGE)
++    memory_refresh_top (plugin);
++
++  memory_format_gb (used, sizeof (used), plugin->mem.used);
++  memory_format_gb (total, sizeof (total), plugin->mem.total);
++  memory_format_gb (avail, sizeof (avail), plugin->mem.free);
++
++  text = g_string_new (NULL);
++  g_string_append_printf (text,
++                          "<b>Memory</b>\n"
++                          "Total: %s GB (%llu MB)\n"
++                          "Used: %s GB (%u %%)\n"
++                          "Free: %s GB, with the reclaimable file cache\n"
++                          "<small>The file cache and the largest free block are not reported separately.</small>",
++                          total, plugin->mem.total / MIB, used, plugin->permille / 10U, avail);
++
++  if (plugin->top_valid)
++    {
++      g_string_append (text, "\n\n<b>Most memory</b> (anonymous memory of the process)");
++      for (i = 0; i < plugin->ntop; i++)
++        g_string_append_printf (text, "\n%6llu MB  %s (pid %d)",
++                                plugin->top[i].bytes / MIB, plugin->top[i].name, plugin->top[i].pid);
++      g_string_append_printf (text, "\nAll %u processes: %llu MB",
++                              plugin->nprocesses, plugin->all_bytes / MIB);
++    }
++  else
++    {
++      g_string_append (text, "\n\n(the processes could not be listed)");
++    }
++
++  g_string_append (text, "\n<small>Green below 75 % used, yellow to 90 %, red above. GB = 1024 MB.</small>");
++
++  gtk_tooltip_set_markup (tooltip, text->str);
++  g_string_free (text, TRUE);
++
++  return TRUE;
++}
++
++
++
++static void
++memory_plugin_construct (XfcePanelPlugin *panel_plugin)
++{
++  MemoryPlugin *plugin = MEMORY_PLUGIN (panel_plugin);
++
++  /* one row of a multi-row panel is enough */
++  xfce_panel_plugin_set_small (panel_plugin, TRUE);
++  memory_plugin_mode_changed (panel_plugin, xfce_panel_plugin_get_mode (panel_plugin));
++
++  plugin->console_fd = open ("/dev/console", O_WRONLY | O_NOCTTY | O_CLOEXEC);
++  plugin->start_time = g_get_monotonic_time ();
++
++  memory_plugin_update (plugin);
++  memory_plugin_log (plugin, plugin->start_time);
++
++  plugin->timeout_id = g_timeout_add_seconds (MEMORY_UPDATE_SECONDS, memory_plugin_tick, plugin);
++}
++
++
++
++static void
++memory_plugin_free_data (XfcePanelPlugin *panel_plugin)
++{
++  MemoryPlugin *plugin = MEMORY_PLUGIN (panel_plugin);
++
++  if (plugin->timeout_id != 0)
++    g_source_remove (plugin->timeout_id);
++  plugin->timeout_id = 0;
++
++  if (plugin->console_fd >= 0)
++    close (plugin->console_fd);
++  plugin->console_fd = -1;
++
++  g_free (plugin->markup);
++  g_free (plugin->threads);
++  g_free (plugin->entries);
++}
++
++
++
++static gboolean
++memory_plugin_size_changed (XfcePanelPlugin *panel_plugin,
++                            gint size)
++{
++  /* the size follows the text: nothing to force */
++  return TRUE;
++}
++
++
++
++static void
++memory_plugin_mode_changed (XfcePanelPlugin *panel_plugin,
++                            XfcePanelPluginMode mode)
++{
++  MemoryPlugin *plugin = MEMORY_PLUGIN (panel_plugin);
++  gboolean vertical = (mode == XFCE_PANEL_PLUGIN_MODE_VERTICAL);
++
++  /* on a vertical panel the text is turned, like the clock's, and the bar lies across */
++  gtk_orientable_set_orientation (GTK_ORIENTABLE (plugin->box),
++                                  vertical ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL);
++  gtk_label_set_angle (GTK_LABEL (plugin->label), vertical ? 270 : 0);
++
++  gtk_widget_set_size_request (plugin->bar,
++                               vertical ? -1 : MEMORY_BAR_THICKNESS,
++                               vertical ? MEMORY_BAR_THICKNESS : -1);
++  gtk_widget_set_margin_top (plugin->bar, vertical ? 0 : MEMORY_BAR_MARGIN);
++  gtk_widget_set_margin_bottom (plugin->bar, vertical ? 0 : MEMORY_BAR_MARGIN);
++  gtk_widget_set_margin_start (plugin->bar, vertical ? MEMORY_BAR_MARGIN : 0);
++  gtk_widget_set_margin_end (plugin->bar, vertical ? MEMORY_BAR_MARGIN : 0);
++  gtk_widget_queue_draw (plugin->bar);
++}
+diff --git a/plugins/memory/memory.desktop.in.in b/plugins/memory/memory.desktop.in.in
+new file mode 100644
+index 0000000..e01779a
+--- /dev/null
++++ b/plugins/memory/memory.desktop.in.in
+@@ -0,0 +1,8 @@
++[Xfce Panel]
++Type=X-XFCE-PanelPlugin
++Name=Memory
++Comment=Shows how much memory is in use and which programs use the most
++Icon=computer
++X-XFCE-Module=memory
++X-XFCE-Internal=TRUE
++X-XFCE-API=@LIBXFCE4PANEL_VERSION_API@
+diff --git a/plugins/memory/memory.h b/plugins/memory/memory.h
+new file mode 100644
+index 0000000..fab50ef
+--- /dev/null
++++ b/plugins/memory/memory.h
+@@ -0,0 +1,26 @@
++/*
++ * Phoenix-RTOS
++ *
++ * xfce4-panel memory plugin: how much physical memory is in use (Phoenix-RTOS meminfo())
++ *
++ * Copyright 2026 Phoenix Systems
++ *
++ * SPDX-License-Identifier: BSD-3-Clause
++ */
++
++#ifndef __MEMORY_H__
++#define __MEMORY_H__
++
++#include "libxfce4panel/libxfce4panel.h"
++
++G_BEGIN_DECLS
++
++#define MEMORY_TYPE_PLUGIN (memory_plugin_get_type ())
++G_DECLARE_FINAL_TYPE (MemoryPlugin, memory_plugin, MEMORY, PLUGIN, XfcePanelPlugin)
++
++void
++memory_plugin_register_type (XfcePanelTypeModule *type_module);
++
++G_END_DECLS
++
++#endif /* !__MEMORY_H__ */
+diff --git a/plugins/memory/meson.build b/plugins/memory/meson.build
+new file mode 100644
+index 0000000..0dfe1d2
+--- /dev/null
++++ b/plugins/memory/meson.build
+@@ -0,0 +1,57 @@
++# Copyright 2026 Phoenix Systems
++# SPDX-License-Identifier: BSD-3-Clause
++#
++# The memory plugin: Phoenix-RTOS only (meminfo(), threadsinfo()).
++
++plugin_sources = [
++  'memory.c',
++  'memory.h',
++  'memory-stats.c',
++  'memory-stats.h',
++]
++
++plugin_install_subdir = 'xfce4' / 'panel' / 'plugins'
++
++plugin_lib = build_target(
++  'memory',
++  plugin_sources,
++  target_type: builtin_plugins ? 'static_library' : 'shared_module',
++  # (built in: the panel carries the resources once)
++  sources: builtin_plugins ? [] : xfce4_panel_resources_c,
++  gnu_symbol_visibility: 'hidden',
++  c_args: (builtin_plugins ? ['-Dxfce_panel_module_init=xfce_panel_builtin_memory_init'] : []) + [
++    '-DG_LOG_DOMAIN="@0@"'.format('libmemory'),
++  ],
++  include_directories: [
++    include_directories('..' / '..'),
++  ],
++  dependencies: [
++    gtk,
++    libxfce4util,
++  ],
++  link_with: [
++    libxfce4panel,
++  ],
++  install: not builtin_plugins,
++  install_dir: get_option('prefix') / get_option('libdir') / plugin_install_subdir,
++)
++if builtin_plugins
++  builtin_plugin_libs += plugin_lib
++  builtin_plugin_names += 'memory'
++endif
++
++i18n.merge_file(
++  input: configure_file(
++    input: 'memory.desktop.in.in',
++    output: 'memory.desktop.in',
++    configuration: {
++      'LIBXFCE4PANEL_VERSION_API': libxfce4panel_version_api,
++    },
++    install: false,
++  ),
++  output: 'memory.desktop',
++  po_dir: '..' / '..' / 'po',
++  type: 'desktop',
++  install: true,
++  install_dir: get_option('prefix') / get_option('datadir') / plugin_install_subdir,
++)
+-- 
+2.53.0
+

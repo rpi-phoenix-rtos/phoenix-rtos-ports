@@ -20,7 +20,8 @@
 	#   exo 4.20.0                (autotools) GTK 3 extensions
 	#   libxfce4windowing 4.20.7  (meson)     Wayland backend only (wlr-foreign-toplevel)
 	#   Thunar 4.20.10            (autotools) + thunarx; no gudev/libnotify/exif/plugins
-	#   xfce4-panel 4.20.8        (meson)     Wayland + gtk-layer-shell; internal plugins linked in
+	#   xfce4-panel 4.20.8        (meson)     Wayland + gtk-layer-shell; internal plugins linked in,
+	#                                         + a memory plugin (Phoenix meminfo(); patch 0003)
 	#   xfdesktop 4.20.2          (meson)     Wayland: background through gtk-layer-shell
 	#   xfce4-settings 4.20.5     (autotools) settings manager + appearance; no X11
 	#   xfce4-appfinder 4.20.0    (autotools)
@@ -44,7 +45,8 @@
 	# GPL-2.0-or-later; libxfce4util, libxfce4ui, garcon, exo, libxfce4panel:
 	# LGPL-2.0-or-later; libxfce4windowing: LGPL-2.1-or-later; adwaita-icon-theme:
 	# LGPL-3.0-only OR CC-BY-SA-3.0; shared-mime-info (data): GPL-2.0-or-later;
-	# files/ (compat, msgfmt stand-in, pngify-icon-theme.py, configuration): BSD-3-Clause.
+	# files/ (compat, msgfmt stand-in, pngify-icon-theme.py, configuration) and the panel's
+	# memory plugin (new files of patches/xfce4-panel/0003, plugins/memory/): BSD-3-Clause.
 	license="GPL-2.0-or-later AND LGPL-2.0-or-later AND LGPL-2.1-or-later AND (LGPL-3.0-only OR CC-BY-SA-3.0) AND BSD-3-Clause"
 	license_file="COPYING"
 
@@ -347,7 +349,8 @@ EOF
 		--disable-apr-plugin --disable-sbr-plugin --disable-tpa-plugin --disable-uca-plugin \
 		--disable-wallpaper-plugin --disable-introspection --with-helper-path-prefix=/usr/lib
 
-	# --- stage 3: xfce4-panel (Wayland + gtk-layer-shell; the internal plugins linked in: patch 0001) ---
+	# --- stage 3: xfce4-panel (Wayland + gtk-layer-shell; the internal plugins linked in: patch 0001;
+	# the memory plugin: patch 0003) ---
 	_meson_pkg --cross "${out}/phoenix-aarch64-wl.cross" xfce4-panel -Dx11=disabled -Dwayland=enabled \
 		-Dgtk-layer-shell=enabled -Ddbusmenu=disabled -Dintrospection=false -Dvala=disabled -Dgtk-doc=false \
 		-Dbuiltin-plugins=true -Dhelper-path-prefix=/usr/lib
@@ -407,7 +410,7 @@ EOF
 		"xfconfd|lib/xfce4/xfconf/xfconfd|g_bus_own_name xfconf_backend_factory_get_backend g_dbus_connection_register_object"
 		"xfconf-query|bin/xfconf-query|xfconf_channel_get_property xfconf_init"
 		"gdbus|bin/gdbus|g_dbus_connection_new_for_address_sync _g_dbus_auth_mechanism_anon_get_type"
-		"xfce4-panel|bin/xfce4-panel|panel_builtin_plugins xfce_panel_builtin_applicationsmenu_init xfce_panel_builtin_clock_init xfce_panel_builtin_tasklist_init xfce_panel_builtin_windowmenu_init xfce_panel_builtin_launcher_init xfce_panel_builtin_separator_init xfce_panel_builtin_actions_init gtk_layer_init_for_window xfw_screen_get_default garcon_menu_new_for_path"
+		"xfce4-panel|bin/xfce4-panel|panel_builtin_plugins xfce_panel_builtin_applicationsmenu_init xfce_panel_builtin_clock_init xfce_panel_builtin_tasklist_init xfce_panel_builtin_windowmenu_init xfce_panel_builtin_launcher_init xfce_panel_builtin_separator_init xfce_panel_builtin_actions_init xfce_panel_builtin_memory_init gtk_layer_init_for_window xfw_screen_get_default garcon_menu_new_for_path"
 		"xfdesktop|bin/xfdesktop|xfce_desktop_new gtk_layer_init_for_window xfw_screen_get_default gdk_wayland_display_get_type"
 		"xfce4-settings-manager|bin/xfce4-settings-manager|garcon_menu_new_for_path xfconf_channel_get gdk_wayland_display_get_type"
 		"xfce4-appearance-settings|bin/xfce4-appearance-settings|xfconf_channel_get gtk_icon_theme_get_default gdk_wayland_display_get_type"

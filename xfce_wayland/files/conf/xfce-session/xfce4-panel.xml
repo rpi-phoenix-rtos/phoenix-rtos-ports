@@ -9,7 +9,9 @@
   /usr/share/xfce-session/applications), the web browser (the webkit_wpe port's
   /usr/share/applications/wpe-browser.desktop: /bin/browser) and the application finder (its
   own .desktop file, found by its bare Exec on the session's PATH); the window buttons (libxfce4windowing:
-  wlr-foreign-toplevel); a spacer; the clock (GLib's local time: the session's TZ); and
+  wlr-foreign-toplevel); a spacer; the memory in use (the memory plugin of patches/xfce4-panel/
+  0003: used/total GB, green/yellow/red, a MEMMON line on the console every 30 s); the clock
+  (GLib's local time: the session's TZ); and
   Log Out (the actions plugin: without a session manager on the bus it runs
   `loginctl terminate-session`, the session's stand-in in /usr/lib/xfce-session/bin, which
   ends the session in order). configver = XFCE4_PANEL_CONFIG_VERSION (2): no migrate helper.
@@ -35,6 +37,7 @@
         <value type="int" value="5"/>
         <value type="int" value="6"/>
         <value type="int" value="7"/>
+        <value type="int" value="13"/>
         <value type="int" value="8"/>
         <value type="int" value="10"/>
         <value type="int" value="11"/>
@@ -76,6 +79,7 @@
       <property name="expand" type="bool" value="true"/>
       <property name="style" type="uint" value="0"/>
     </property>
+    <property name="plugin-13" type="string" value="memory"/>
     <property name="plugin-8" type="string" value="clock">
       <property name="digital-layout" type="uint" value="3"/>
       <property name="digital-time-format" type="string" value="%a %d %b  %H:%M"/>
