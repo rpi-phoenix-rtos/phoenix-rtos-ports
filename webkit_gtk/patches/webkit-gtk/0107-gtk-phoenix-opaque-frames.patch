@@ -1,0 +1,252 @@
+Subject: GTK on Phoenix: an opaque view's frames are drawn without alpha (opt-in)
+
+The web process's dma-buf frames are AB24 (patch 0016's texture export: an RGBA8 texture), and
+GTK 3 draws a GL texture with alpha by blending it over what lies below the view: in
+gdk_cairo_draw_from_gl() (gdk/gdkgl.c, GTK 3.24.52) a texture whose GL_TEXTURE_ALPHA_SIZE is not 0
+(GDK asks on GL ES 3.1 and later, gdkglcontext.c; before that it assumes alpha) makes GDK first
+upload the window's cairo surface under the view as a texture of its own
+(gdk_gl_texture_from_surface() of the clip region), then draw the frame with GL_BLEND. With
+alpha 0 it draws the frame's quads opaque and only marks them flushed, so end_paint uploads
+nothing there either. The paint watch (0105) measured ~7 ms per frame for that draw on the
+Raspberry Pi 4 at alpha_bits=8.
+
+An opaque view's frames have alpha 255 everywhere: the web process clears to transparent only
+when the view's background colour is not opaque (AcceleratedSurface::clear() and isOpaque()),
+otherwise the page is drawn over its opaque base background. Upstream uses that with GBM, where
+the web process picks an opaque buffer format for an opaque view (SwapChain::setupBufferFormat());
+our texture export has no such choice. With WEBKIT_PHOENIX_OPAQUE=1 (webkit-browser
+--opaque-frames) the UI process does it on its side: while the view is opaque (no background
+colour, or an opaque one -- webkit-browser sets none), each EGLImage buffer is imported as
+XB24 instead of AB24 (AR24 -> XR24): the same memory, the alpha byte ignored. Mesa makes such a
+dma-buf EGLImage a GL_RGB8 texture (dri_util.c: XBGR8888 -> GL_RGB8, so the alpha size is 0) and
+the V3D samples it as RGBX8 (v3dx_format_table.c, alpha read as 1). The view's opacity is checked
+when a frame becomes current, so a background colour set later re-imports the buffer with alpha
+before it is drawn again; a format the EGL implementation refuses is logged once and not tried
+again (the frame is then drawn with alpha, as before).
+
+The paint watch's import line shows the format the texture was made with, once per format:
+
+  WPEB-WEBKIT gtk-paint import pid=<p> size=<w>x<h> fourcc=XB24 modifier=0x... alpha_bits=0
+
+and the frame-pacing line (0106) says whether a view uses it:
+
+  WPEB-WEBKIT frame-pacing pid=<p> ahead=0|1 opaque=0|1
+
+Off by default (an A/B of draw_ms in one image). What it cannot cover: a frame region the web
+process does not draw (none expected over an opaque base background) shows its stale RGB instead
+of the GTK background below the view.
+
+diff --git a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
+index 65a49ed..5312e66 100644
+--- a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
++++ b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
+@@ -206,13 +206,15 @@ static void didDrawFrame(int64_t receivedUs, int64_t startUs, int64_t swapEndUs,
+     state.drawEndUs = endUs;
+ }
+ 
+-static void didImportTexture(const IntSize& size, const DMABufBufferAttributes& attributes)
++// fourcc: the format the EGLImage was made with (with WEBKIT_PHOENIX_OPAQUE=1 its opaque variant)
++static void didImportTexture(const IntSize& size, uint32_t fourcc, uint64_t modifier)
+ {
+     state.total.imports++;
+-    static bool logged;
+-    if (logged)
++    // once per format: the first texture, and again if the view's opacity changed it
++    static uint32_t loggedFourcc;
++    if (fourcc == loggedFourcc)
+         return;
+-    logged = true;
++    loggedFourcc = fourcc;
+     // gdk_cairo_draw_from_gl() blends a texture that has alpha over the cairo surface below the
+     // view, which it first uploads as a texture of its own, every paint (GTK 3 gdk/gdkgl.c). GDK
+     // asks the texture as here, on GL ES 3.1 and later; before that it assumes alpha. (-1: not
+@@ -220,10 +222,24 @@ static void didImportTexture(const IntSize& size, const DMABufBufferAttributes&
+     GLint alphaBits = -1;
+     if (epoxy_gl_version() >= 31)
+         glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_ALPHA_SIZE, &alphaBits);
+-    const uint32_t fourcc = attributes.fourcc.value;
+     WTFLogAlways("WPEB-WEBKIT gtk-paint import pid=%d size=%dx%d fourcc=%c%c%c%c modifier=0x%016" PRIx64 " alpha_bits=%d", getpid(),
+         size.width(), size.height(), fourcc & 0xff, (fourcc >> 8) & 0xff, (fourcc >> 16) & 0xff, (fourcc >> 24) & 0xff,
+-        attributes.modifier, alphaBits);
++        modifier, alphaBits);
++}
++
++// The opaque variant of a dma-buf format with alpha: the same memory layout, the alpha byte ignored.
++// Mesa makes such an EGLImage a GL_RGB8 texture (dri_util.c: __DRI_IMAGE_FORMAT_XBGR8888 ->
++// GL_RGB8), so its GL_TEXTURE_ALPHA_SIZE is 0; the V3D samples it as RGBX8 (alpha read as 1).
++static uint32_t opaqueFourcc(uint32_t fourcc)
++{
++    auto code = [](char a, char b, char c, char d) {
++        return static_cast<uint32_t>(a) | static_cast<uint32_t>(b) << 8 | static_cast<uint32_t>(c) << 16 | static_cast<uint32_t>(d) << 24;
++    };
++    if (fourcc == code('A', 'B', '2', '4')) // DRM_FORMAT_ABGR8888: the web process's frames (patch 0016)
++        return code('X', 'B', '2', '4');
++    if (fourcc == code('A', 'R', '2', '4'))
++        return code('X', 'R', '2', '4');
++    return fourcc;
+ }
+ 
+ } // namespace PhoenixPaintWatch
+@@ -379,7 +395,16 @@ AcceleratedBackingStore::AcceleratedBackingStore(WebPageProxy& webPage)
+     // renders frame N+1 while GTK paints frame N: 1 / max(web, UI) (webkit-browser --frame-ahead).
+     const char* frameAhead = getenv("WEBKIT_PHOENIX_FRAME_AHEAD");
+     m_frameAhead = frameAhead && !strcmp(frameAhead, "1");
+-    WTFLogAlways("WPEB-WEBKIT frame-pacing pid=%d ahead=%d", getpid(), m_frameAhead);
++    // Opaque frames (webkit-browser --opaque-frames): the web process's frames are AB24, so
++    // gdk_cairo_draw_from_gl() blends them over the cairo surface below the view, which it uploads
++    // as a texture first, every paint (GTK 3 gdk/gdkgl.c, alpha_size != 0). While the view is
++    // opaque (no background colour, or an opaque one: AcceleratedSurface::isOpaque(), where the web
++    // process never clears to transparent) the alpha byte is 255 everywhere and that upload is
++    // wasted: the frame is imported as XB24 instead. Upstream does the same with GBM, where the
++    // web process picks an opaque buffer format for an opaque view (SwapChain::setupBufferFormat()).
++    const char* opaque = getenv("WEBKIT_PHOENIX_OPAQUE");
++    m_opaqueFrames = opaque && !strcmp(opaque, "1");
++    WTFLogAlways("WPEB-WEBKIT frame-pacing pid=%d ahead=%d opaque=%d", getpid(), m_frameAhead, m_opaqueFrames);
+ #endif
+ }
+ 
+@@ -571,8 +596,49 @@ AcceleratedBackingStore::BufferEGLImage::BufferEGLImage(WebPageProxy& webPage, u
+     , m_dmaBufAttributes(WTF::move(dmaBufAttributes))
+     , m_image(image)
+ {
++#if OS(PHOENIX)
++    m_importedFourcc = m_dmaBufAttributes.fourcc.value;
++#endif
+ }
+ 
++#if OS(PHOENIX)
++// WEBKIT_PHOENIX_OPAQUE=1: the same dma-buf imported again, as opaque or with alpha as the view now
++// is (swapBuffersIfNeeded(), with the GL context current; the buffer is the pending one, which GTK
++// does not sample). m_dmaBufAttributes keeps the web process's format (bufferDescription()).
++void AcceleratedBackingStore::BufferEGLImage::setOpaque(bool opaque)
++{
++    const uint32_t fourcc = opaque ? PhoenixPaintWatch::opaqueFourcc(m_dmaBufAttributes.fourcc.value) : m_dmaBufAttributes.fourcc.value;
++    if (fourcc == m_importedFourcc || fourcc == m_failedFourcc)
++        return;
++    auto* glDisplay = Display::singleton().glDisplay();
++    if (!glDisplay)
++        return;
++
++    const auto webProcessFourcc = m_dmaBufAttributes.fourcc;
++    m_dmaBufAttributes.fourcc = fourcc;
++    auto* image = DMABufBuffer::createEGLImage(*glDisplay, m_dmaBufAttributes);
++    m_dmaBufAttributes.fourcc = webProcessFourcc;
++    if (!image) {
++        // keep the image there is (frames with alpha are drawn right, only slower); not again
++        m_failedFourcc = fourcc;
++        WTFLogAlways("WPEB-WEBKIT gtk-paint reimport failed pid=%d fourcc=%c%c%c%c", getpid(), fourcc & 0xff, (fourcc >> 8) & 0xff,
++            (fourcc >> 16) & 0xff, (fourcc >> 24) & 0xff);
++        return;
++    }
++    glDisplay->destroyImage(m_image);
++    m_image = image;
++    m_importedFourcc = fourcc;
++#if !USE(GTK4)
++    // didUpdateContents() makes the texture from the new image
++    if (m_textureID) {
++        gdk_gl_context_make_current(m_gdkGLContext.get());
++        glDeleteTextures(1, &m_textureID);
++        m_textureID = 0;
++    }
++#endif
++}
++#endif
++
+ AcceleratedBackingStore::BufferEGLImage::~BufferEGLImage()
+ {
+     if (auto* glDisplay = Display::singleton().glDisplay())
+@@ -634,7 +700,7 @@ void AcceleratedBackingStore::BufferEGLImage::didUpdateContents(Buffer*, const R
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+     glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, m_image);
+ #if OS(PHOENIX)
+-    PhoenixPaintWatch::didImportTexture(m_size, m_dmaBufAttributes);
++    PhoenixPaintWatch::didImportTexture(m_size, m_importedFourcc, m_dmaBufAttributes.modifier);
+ #endif
+ }
+ #endif
+@@ -1069,6 +1135,19 @@ void AcceleratedBackingStore::update(const LayerTreeContext& context)
+     }
+ }
+ 
++#if OS(PHOENIX)
++// as the web process's AcceleratedSurface::isOpaque(): with an opaque view it never clears to
++// transparent, and the page is drawn over the view's opaque base background
++bool AcceleratedBackingStore::viewIsOpaque() const
++{
++    RefPtr webPage = m_webPage.get();
++    if (!webPage)
++        return false;
++    const auto& backgroundColor = webPage->backgroundColor();
++    return !backgroundColor || backgroundColor->isOpaque();
++}
++#endif
++
+ bool AcceleratedBackingStore::swapBuffersIfNeeded()
+ {
+     if (!m_pendingBuffer || m_fenceMonitor.hasFileDescriptor())
+@@ -1077,6 +1156,12 @@ bool AcceleratedBackingStore::swapBuffersIfNeeded()
+     if (m_pendingBuffer->type() == Buffer::Type::EglImage) {
+         ensureGLContext();
+         gdk_gl_context_make_current(m_gdkGLContext.get());
++#if OS(PHOENIX)
++        // per frame, so a background colour set later (webkit_web_view_set_background_color())
++        // turns a buffer imported as opaque back into one with alpha before it is drawn again
++        if (m_opaqueFrames)
++            m_pendingBuffer->setOpaque(viewIsOpaque());
++#endif
+     }
+     m_pendingBuffer->didUpdateContents(m_committedBuffer.get(), m_pendingDamageRects);
+     m_pendingDamageRects = { };
+diff --git a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
+index 4333170..c59ca87 100644
+--- a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
++++ b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
+@@ -100,6 +100,9 @@ private:
+ 
+     void ensureGLContext();
+     bool swapBuffersIfNeeded();
++#if OS(PHOENIX)
++    bool viewIsOpaque() const;
++#endif
+ 
+     class Buffer : public RefCounted<Buffer> {
+     public:
+@@ -138,6 +141,10 @@ private:
+         void paint(cairo_t*, const WebCore::IntRect&) const;
+ #endif
+         void didRelease() const;
++#if OS(PHOENIX)
++        // WEBKIT_PHOENIX_OPAQUE=1: draw the frame without its alpha (an EGLImage buffer only)
++        virtual void setOpaque(bool) { }
++#endif
+ 
+     protected:
+         Buffer(WebPageProxy&, uint64_t id, uint64_t surfaceID, const WebCore::IntSize&, RendererBufferFormat::Usage);
+@@ -188,9 +195,16 @@ private:
+         RendererBufferDescription description() const override;
+         RefPtr<WebCore::NativeImage> asNativeImageForTesting() const override;
+         void release() override;
++#if OS(PHOENIX)
++        void setOpaque(bool) override;
++#endif
+ 
+         WebCore::DMABufBufferAttributes m_dmaBufAttributes;
+         EGLImage m_image { nullptr };
++#if OS(PHOENIX)
++        uint32_t m_importedFourcc { 0 }; // the format m_image was made with
++        uint32_t m_failedFourcc { 0 }; // a format the EGL implementation refused for this buffer
++#endif
+ #if USE(GTK4)
+         GRefPtr<GdkTexture> m_texture;
+ #else
+@@ -277,6 +291,10 @@ private:
+     bool m_frameAhead { false };
+     bool m_pendingFrameDoneSent { false }; // m_pendingBuffer's FrameDone went when it arrived
+     bool m_committedFrameDoneSent { false }; // the same for m_committedBuffer
++    // WEBKIT_PHOENIX_OPAQUE=1 (webkit-browser --opaque-frames): while the view is opaque, its
++    // frames are imported without alpha, so GDK draws them without blending them over (and first
++    // uploading) the cairo surface below the view
++    bool m_opaqueFrames { false };
+ #endif
+ };
+ 
