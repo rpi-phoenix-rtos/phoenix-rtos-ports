@@ -39,7 +39,7 @@ MediaSource and SourceBuffer (hls.js, dash.js, Shaka, video.js-VHS) without GStr
 
 Type answers (MediaSource.isTypeSupported, addSourceBuffer, changeType; they steer adaptive
 players): video/mp4 and audio/mp4 only; HEVC Main/Main10 up to level 4.1
-(WPE_PHOENIX_MSE_HEVC_4K=1: any); H.264 up to level 3.1, 720p30 (WPE_PHOENIX_MSE_H264_1080=1: up
+(WPE_PHOENIX_MSE_HEVC_4K=1: any); H.264 up to level 3.2, 720p (WPE_PHOENIX_MSE_H264_1080=1: up
 to 4.2); AAC, MP3, Opus, AC-3, E-AC-3, FLAC; width/height/framerate parameters held to the same
 limits; no WebM, MPEG-TS, VP9, AV1 or encrypted media. MediaCapabilities media-source answers use
 the MSE engine's containers.
@@ -2587,7 +2587,7 @@ index 00000000..f1e22744
 +    return std::nullopt;
 +}
 +
-+static constexpr unsigned kH264Level31 = 31;   // 1280x720 30 fps
++static constexpr unsigned kH264Level32 = 32;   // 1280x720 60 fps: sites label 720p30 so too
 +static constexpr unsigned kH264Level42 = 42;   // 1920x1080 60 fps
 +static constexpr unsigned kHEVCLevel41 = 123;  // level_idc = 30 x level: 4.1, 1920x1080 60 fps
 +
@@ -2607,7 +2607,7 @@ index 00000000..f1e22744
 +        }
 +        bool full = envFlag("WPE_PHOENIX_MSE_H264_1080");
 +        auto level = h264Level(codec);
-+        if (level && *level > (full ? kH264Level42 : kH264Level31)) {
++        if (level && *level > (full ? kH264Level42 : kH264Level32)) {
 +            reason = "h264-level";
 +            return false;
 +        }
@@ -3176,7 +3176,7 @@ index 00000000..2bba0154
 +//
 +// The type answers steer adaptive players (hls.js, Shaka and dash.js choose renditions by
 +// MediaSource.isTypeSupported()): fragmented MP4 only; HEVC Main and Main10 up to level 4.1
-+// (1080p60: the rpivid block; WPE_PHOENIX_MSE_HEVC_4K=1 lifts it); H.264 up to level 3.1 (720p30,
++// (1080p60: the rpivid block; WPE_PHOENIX_MSE_HEVC_4K=1 lifts it); H.264 up to level 3.2 (720p,
 +// the CPU's limit; WPE_PHOENIX_MSE_H264_1080=1: up to 4.2); AAC, MP3, Opus, AC-3, E-AC-3, FLAC.
 +// No WebM, no MPEG-TS, no VP9, no AV1, no encrypted media. Width/height/framerate parameters
 +// of a type are held to the same limits.
