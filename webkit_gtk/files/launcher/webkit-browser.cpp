@@ -32,7 +32,16 @@
  *                           downloads bar, ~/Downloads, the "download finished" line)
  *     --tab-cycle=S         switch to the next tab every S s (checks: "tab switch ..." lines)
  *     --present-stats=S     every S s, how many frames GDK painted the window ("present-stats
- *                           paints=N fps=F"; the gate's painted fps of a <video>)
+ *                           paints=N fps=F"; the gate's painted fps of a <video>), where the web
+ *                           process's frames spent their time in this process ("gtk-paint ...",
+ *                           WebKit patch webkit-gtk/0105), this process's and the web process's
+ *                           frame pipeline ("frame-watch-ui ...", "frame-watch-web ...", shared
+ *                           patch 0020)
+ *     --frame-trace=N[@S]   with --present-stats: one "frame n= wait= ..." line for each of N
+ *                           frames drawn from S s after the window opened (default: from the first
+ *                           report on). A few seconds' worth: the serial console carries ~30 such
+ *                           lines a second
+ *     --size=WxH            the window's size (default 1280x960)
  *   Keys (MiniBrowser's): Ctrl+T new tab, Ctrl+W close, Ctrl+L the address, F5 / Ctrl+R reload,
  *   Escape stop, Alt+Home start page, Ctrl+F find, Ctrl++ / Ctrl+- / Ctrl+0 zoom, F11 fullscreen,
  *   Ctrl+Q quit; Alt+Left / Alt+Right back / forward.
@@ -43,7 +52,8 @@
  * process's own "WPEB-WEBKIT swap-chain ... type=texture-dmabuf|shm" line (shared patch 0016)
  * says which frame transport it took; GTK's "Disabled hardware acceleration because GTK failed
  * to initialize GL" says GDK has no GL (then everything runs on the CPU). "WKGB gdk-gl ok|failed"
- * is this program's own check of GDK's GL on the browser window (see logGdkGL()).
+ * is this program's own check of GDK's GL on the browser window (see logGdkGL()). "title ..."
+ * follows each tab's title (the benchmark pages report their end through it).
  *
  * Copyright 2026 Phoenix Systems
  * SPDX-License-Identifier: BSD-3-Clause
@@ -78,10 +88,20 @@ int NetworkProcessMain(int argc, char** argv);
 /* glib-networking's OpenSSL TLS backend, linked statically (gio/modules/libgioopenssl.a) */
 extern "C" void g_io_openssl_load(GIOModule*);
 
+/* the frame watch of a web or the UI process (shared WebKit patch 0020, ThreadedCompositor.cpp) */
+extern "C" int wpe_phoenix_frame_watch(int ui, int64_t limitMs, char* line, size_t size);
+/* the GTK UI process's paint watch (WebKit patch webkit-gtk/0105, AcceleratedBackingStore.h) */
+extern "C" void webkit_gtk_phoenix_paint_watch_before_paint(void);
+extern "C" int webkit_gtk_phoenix_paint_watch_after_paint(char* line, size_t size);
+extern "C" void webkit_gtk_phoenix_paint_watch_report(char* line, size_t size);
+
+/* --present-stats in the UI process: the web processes log their frame watch every this many s */
+static const char frameWatchEnv[] = "WKGB_FRAME_WATCH_SECS";
+
 /* --- log ------------------------------------------------------------------------------------ */
 
 /* bumped with every change a Pi gate depends on: printed in "ui start" */
-static const char launcherRevision[] = "b10-r3";
+static const char launcherRevision[] = "b10-r4";
 
 static double startMs;
 static char processRole[16] = "ui";
@@ -141,11 +161,28 @@ static void recordExecutablePath(const char* argv0)
 static constexpr unsigned orphanPollMs = 250;
 static constexpr unsigned orphanGraceMs = 3000;
 
+/*
+ * The same thread logs a web process's frame watch (shared patch 0020: the compositor's state, the
+ * frames it sent to the UI and the FrameDones it got back, its swap chain, the rendering updates)
+ * every S s when the UI runs with --present-stats=S:
+ *   WKGB t=.. frame-watch-web pid=.. frame-watch kind=.. compositor state=.. frames_sent=N ...
+ * It reads atomics only.
+ */
 static void* orphanWatchdog(void* arg)
 {
     const pid_t parent = static_cast<pid_t>(reinterpret_cast<intptr_t>(arg));
-    while (getppid() == parent)
+    const char* watchEnv = getenv(frameWatchEnv);
+    const int watchSecs = watchEnv && !strcmp(processRole, "web") ? atoi(watchEnv) : 0;
+    const unsigned watchPolls = watchSecs > 0 ? static_cast<unsigned>(watchSecs) * (1000 / orphanPollMs) : 0;
+    unsigned polls = 0;
+    while (getppid() == parent) {
         usleep(orphanPollMs * 1000);
+        if (watchPolls && ++polls % watchPolls == 0) {
+            char line[768];
+            wpe_phoenix_frame_watch(0, 0, line, sizeof(line));
+            LOG("frame-watch-web pid=%d %s", static_cast<int>(getpid()), line);
+        }
+    }
     usleep(orphanGraceMs * 1000);
     LOG("role=%s pid=%d orphaned (parent %d gone): exit", processRole, static_cast<int>(getpid()), static_cast<int>(parent));
     _exit(0);
@@ -186,6 +223,8 @@ static int optTimeout;
 static char* optDownload;
 static int optTabCycle;
 static int optPresentStats;
+static char* optFrameTrace;
+static char* optSize;
 static char** optURIs;
 
 static const GOptionEntry optionEntries[] = {
@@ -207,6 +246,8 @@ static const GOptionEntry optionEntries[] = {
     { "download", 0, 0, G_OPTION_ARG_STRING, &optDownload, "Once the first tab has loaded, download URL (checks)", "URL" },
     { "tab-cycle", 0, 0, G_OPTION_ARG_INT, &optTabCycle, "Switch to the next tab every S s (checks)", "S" },
     { "present-stats", 0, 0, G_OPTION_ARG_INT, &optPresentStats, "Every S s, log how many frames the window painted", "S" },
+    { "frame-trace", 0, 0, G_OPTION_ARG_STRING, &optFrameTrace, "With --present-stats: log N frames, from S s after the window opened", "N[@S]" },
+    { "size", 0, 0, G_OPTION_ARG_STRING, &optSize, "The window's size (default 1280x960)", "WxH" },
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &optURIs, nullptr, "[URL|FILE|WORDS...]" },
     { nullptr, 0, 0, G_OPTION_ARG_NONE, nullptr, nullptr, nullptr }
 };
@@ -353,6 +394,13 @@ static void webProcessTerminated(WebKitWebView* webView, WebKitWebProcessTermina
         reason == WEBKIT_WEB_PROCESS_CRASHED ? "crashed" : reason == WEBKIT_WEB_PROCESS_EXCEEDED_MEMORY_LIMIT ? "memory-limit" : "api");
 }
 
+/* as wpe-browser's: the benchmark suite (bench.sh) waits for "title BENCH-DONE ..." */
+static void titleChanged(WebKitWebView* webView, GParamSpec*, gpointer)
+{
+    const char* title = webkit_web_view_get_title(webView);
+    LOG("title %s", title ? title : "");
+}
+
 static WebKitWebView* createTab(BrowserWindow* window, bool first)
 {
     auto* webView = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
@@ -364,6 +412,7 @@ static WebKitWebView* createTab(BrowserWindow* window, bool first)
     g_signal_connect(webView, "load-changed", G_CALLBACK(loadChanged), first ? GINT_TO_POINTER(1) : nullptr);
     g_signal_connect(webView, "load-failed", G_CALLBACK(loadFailed), nullptr);
     g_signal_connect(webView, "web-process-terminated", G_CALLBACK(webProcessTerminated), nullptr);
+    g_signal_connect(webView, "notify::title", G_CALLBACK(titleChanged), nullptr);
     browser_window_append_view(window, webView);
     return webView;
 }
@@ -438,7 +487,10 @@ static void probeEGL(GdkDisplay* display)
  * while the web context is created, before any window) is explained by the line above it:
  *   WKGB egl-early wayland=1 client_ext=<platform_wayland,platform_surfaceless> display=1
  *        initialize=1 version=1.5 apis=<EGL_CLIENT_APIS> bind_es=1 bind_gl=0 create_context_ext=1
- *        configs=<n> context_es3=1 context_es2=1 error=0x3000 vendor=<...>
+ *        configs=<n> context_es3=1 context_es2=1 min_swap=0 max_swap=1 error=0x3000 vendor=<...>
+ * min_swap: the config's EGL_MIN_SWAP_INTERVAL. GDK 3 sets the swap interval to 0 when it is 0
+ * (gdk/wayland/gdkglcontext-wayland.c), so eglSwapBuffers() never waits for the compositor and
+ * GDK's frame clock alone paces the window.
  * The connection stays open (closing it could let GDK's display reuse its address, which Mesa
  * keys its EGL displays on); the EGL display is terminated.
  */
@@ -454,7 +506,7 @@ static void earlyEGLProbe()
     bool platformSurfaceless = client && strstr(client, "EGL_MESA_platform_surfaceless");
     EGLDisplay display = getWaylandEGLDisplay(wlDisplay);
     EGLint error = eglGetError();
-    EGLint major = 0, minor = 0, configs = 0;
+    EGLint major = 0, minor = 0, configs = 0, minSwap = -1, maxSwap = -1;
     bool initialized = false, bindES = false, bindGL = false, createContextExt = false, es3 = false, es2 = false;
     const char* vendor = "-";
     const char* apis = "-";
@@ -473,6 +525,8 @@ static void earlyEGLProbe()
                 EGL_RED_SIZE, 1, EGL_GREEN_SIZE, 1, EGL_BLUE_SIZE, 1, EGL_ALPHA_SIZE, 8, EGL_NONE };
             EGLConfig config = nullptr;
             if (eglChooseConfig(display, configAttributes, &config, 1, &configs) && configs > 0) {
+                eglGetConfigAttrib(display, config, EGL_MIN_SWAP_INTERVAL, &minSwap);
+                eglGetConfigAttrib(display, config, EGL_MAX_SWAP_INTERVAL, &maxSwap);
                 const EGLint es3Attributes[] = { EGL_CONTEXT_MAJOR_VERSION_KHR, 3, EGL_CONTEXT_MINOR_VERSION_KHR, 0, EGL_NONE };
                 const EGLint es2Attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
                 EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, es3Attributes);
@@ -487,10 +541,10 @@ static void earlyEGLProbe()
             error = eglGetError();
         }
     }
-    LOG("egl-early wayland=1 client_ext=%s%s display=%d initialize=%d version=%d.%d apis=%s bind_es=%d bind_gl=%d create_context_ext=%d configs=%d context_es3=%d context_es2=%d error=0x%x vendor=%s",
+    LOG("egl-early wayland=1 client_ext=%s%s display=%d initialize=%d version=%d.%d apis=%s bind_es=%d bind_gl=%d create_context_ext=%d configs=%d context_es3=%d context_es2=%d min_swap=%d max_swap=%d error=0x%x vendor=%s",
         platformWayland ? "platform_wayland" : "-", platformSurfaceless ? ",platform_surfaceless" : "",
         display != EGL_NO_DISPLAY, initialized, major, minor, apis ? apis : "-", bindES, bindGL, createContextExt, configs, es3, es2,
-        error, vendor ? vendor : "-");
+        minSwap, maxSwap, error, vendor ? vendor : "-");
     if (initialized)
         eglTerminate(display);
 }
@@ -544,22 +598,65 @@ static gboolean tabCycle(gpointer window)
     return G_SOURCE_CONTINUE;
 }
 
-/* --present-stats: GDK's frame clock paints the window once per frame that has damage */
+/*
+ * --present-stats: GDK's frame clock paints the window once per frame that has damage. Every S s:
+ *   present-stats secs= paints= fps= timings_complete= presented=
+ *       paints: the clock's cycles (after-paint). timings_complete/presented: of those cycles' frame
+ *       timings, how many GDK completed and how many have a presentation time -- GDK 3 completes
+ *       them from the compositor's frame callback, which it asks for only when it commits the
+ *       surface itself (shared memory), not when eglSwapBuffers() does (GL): 0 says this
+ *       window's clock runs free of the compositor
+ *   gtk-paint secs= received= drawn= ... wait_ms=avg/max ...   WebKit patch webkit-gtk/0105
+ *   frame-watch-ui frame-watch kind= backing-store received= ... display-link ticks= ...   patch 0020
+ * and --frame-trace=N[@S]: "frame n= wait= before= swap= draw= after= rx_to_after= dt=" (ms) for
+ * each of N frames drawn from S s on.
+ */
 static unsigned paintsSinceReport;
+static unsigned timingsComplete;
+static unsigned timingsPresented;
 static double lastReportMs;
+static int frameTraceFrames; /* --frame-trace: N */
+static double frameTraceFromMs; /* and from when (this program's clock) */
 
-static void afterPaint(GdkFrameClock*, gpointer)
+/* GDK keeps the timings of the last 16 cycles; this one's are read 8 cycles later */
+static constexpr gint64 timingsLag = 8;
+
+static void beforePaint(GdkFrameClock*, gpointer)
+{
+    webkit_gtk_phoenix_paint_watch_before_paint();
+}
+
+static void afterPaint(GdkFrameClock* clock, gpointer)
 {
     ++paintsSinceReport;
+    if (GdkFrameTimings* timings = gdk_frame_clock_get_timings(clock, gdk_frame_clock_get_frame_counter(clock) - timingsLag)) {
+        if (gdk_frame_timings_get_complete(timings)) {
+            ++timingsComplete;
+            if (gdk_frame_timings_get_presentation_time(timings))
+                ++timingsPresented;
+        }
+    }
+    char line[256];
+    if (webkit_gtk_phoenix_paint_watch_after_paint(line, sizeof(line)) && frameTraceFrames > 0 && nowMs() >= frameTraceFromMs) {
+        --frameTraceFrames;
+        LOG("frame %s", line);
+    }
 }
 
 static gboolean presentStats(gpointer)
 {
     double now = nowMs();
     double secs = (now - lastReportMs) / 1000.0;
-    LOG("present-stats secs=%.1f paints=%u fps=%.1f", secs, paintsSinceReport, secs > 0 ? paintsSinceReport / secs : 0.0);
-    paintsSinceReport = 0;
+    LOG("present-stats secs=%.1f paints=%u fps=%.1f timings_complete=%u presented=%u", secs, paintsSinceReport,
+        secs > 0 ? paintsSinceReport / secs : 0.0, timingsComplete, timingsPresented);
+    paintsSinceReport = timingsComplete = timingsPresented = 0;
     lastReportMs = now;
+
+    char line[1024];
+    webkit_gtk_phoenix_paint_watch_report(line, sizeof(line));
+    LOG("gtk-paint %s", line);
+    wpe_phoenix_frame_watch(1, 0, line, sizeof(line));
+    LOG("frame-watch-ui %s", line);
     return G_SOURCE_CONTINUE;
 }
 
@@ -643,7 +740,13 @@ static void activate(GApplication* application, gpointer)
     auto* window = BROWSER_WINDOW(browser_window_new(nullptr, context));
     g_object_unref(context);
     gtk_application_add_window(GTK_APPLICATION(application), GTK_WINDOW(window));
-    gtk_window_set_default_size(GTK_WINDOW(window), 1280, 960);
+    int width = 1280, height = 960;
+    if (optSize && (sscanf(optSize, "%dx%d", &width, &height) != 2 || width <= 0 || height <= 0)) {
+        LOG("bad --size=%s: 1280x960", optSize);
+        width = 1280;
+        height = 960;
+    }
+    gtk_window_set_default_size(GTK_WINDOW(window), width, height);
 
     GtkWidget* firstTab = nullptr;
     if (optURIs && optURIs[0]) {
@@ -670,12 +773,18 @@ static void activate(GApplication* application, gpointer)
         g_timeout_add_seconds(optTabCycle, tabCycle, window);
     if (optPresentStats > 0) {
         if (GdkFrameClock* clock = gtk_widget_get_frame_clock(GTK_WIDGET(window))) {
+            g_signal_connect(clock, "before-paint", G_CALLBACK(beforePaint), nullptr);
             g_signal_connect(clock, "after-paint", G_CALLBACK(afterPaint), nullptr);
             lastReportMs = nowMs();
             g_timeout_add_seconds(optPresentStats, presentStats, nullptr);
+            int from = optPresentStats;
+            if (optFrameTrace && sscanf(optFrameTrace, "%d@%d", &frameTraceFrames, &from) < 1)
+                LOG("bad --frame-trace=%s", optFrameTrace);
+            frameTraceFromMs = lastReportMs + from * 1000.0;
         }
     }
-    LOG("ui window shown gdk_gl=%s rendering=%s", g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop", optCPURendering ? "cpu" : "gpu");
+    LOG("ui window shown gdk_gl=%s rendering=%s size=%dx%d present_stats=%d frame_trace=%s", g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop",
+        optCPURendering ? "cpu" : "gpu", width, height, optPresentStats, optFrameTrace ? optFrameTrace : "-");
 }
 
 /* The process model of shared patch 0015, read when the web context is created. */
@@ -744,6 +853,11 @@ static int uiMain(int argc, char** argv)
     }
 
     applyProcessModel();
+    if (optPresentStats > 0) {
+        /* for the web processes (orphanWatchdog()); the network process ignores it */
+        g_autofree char* secs = g_strdup_printf("%d", optPresentStats);
+        g_setenv(frameWatchEnv, secs, TRUE);
+    }
     /* launcher=: which revision of this file the binary carries (build 66 shipped an older one) */
     LOG("ui start pid=%d executable=%s wayland=%s gdk_gl=%s launcher=%s", static_cast<int>(getpid()), getenv("WPE_PHOENIX_EXECUTABLE"),
         g_getenv("WAYLAND_DISPLAY"), g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop", launcherRevision);
