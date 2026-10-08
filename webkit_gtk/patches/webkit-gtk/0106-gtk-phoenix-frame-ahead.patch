@@ -1,0 +1,260 @@
+Subject: GTK on Phoenix: the web process renders one frame ahead of the GTK UI (opt-in)
+
+WebKitGTK 3's AcceleratedBackingStore sends FrameDone for a web-process frame from paint(), after
+GDK's frame clock has drawn it, and the web process's ThreadedCompositor composites the next frame
+only after FrameDone (State::InProgress until frameComplete()). So exactly one frame is in flight
+and the two processes run in series: on the Raspberry Pi 4 (B10 §11, the paint watch of 0105)
+~15 ms of GTK work per frame plus ~20 ms of web-process rendering, 33-41 ms per frame, a ~30 fps
+cap: a 60 fps video painted 47 % of its frames, MotionMark-quick scored 2.60 (WPE: 74.99).
+
+With WEBKIT_PHOENIX_FRAME_AHEAD=1 (webkit-browser --frame-ahead) FrameDone goes when a frame is
+received, so the web process renders frame N+1 while GTK paints frame N; the rate becomes that of
+the slower side instead of the sum of both (1 / max(15, 20 ms) on the Pi), latency grows by up to
+one frame. As WPE's patch 0019 does for its compositor, the web process stays at most one frame
+ahead of what GTK draws:
+
+  - at most one undrawn frame: a frame that arrives before GTK drew the previous one (the web
+    process was faster than GTK's paint) replaces it; the replaced frame's buffer goes back to the
+    web process (ReleaseBuffer) undrawn, and the paint watch counts it as superseded. The new
+    frame's FrameDone then waits until it is current (paint()), so the web process does not render
+    frames that are never shown; the next frame is again early.
+  - exactly one FrameDone per Frame (counted: frame_done, of which done_early when received).
+  - buffers: the buffer GTK draws (the committed one) is released only by swapBuffersIfNeeded(),
+    as upstream, once the next frame replaced it, so the web process never renders into a buffer
+    GTK is sampling; its swap chain (AcceleratedSurface::SwapChain, at most 4 targets, 2 made at
+    first) then holds the committed, the pending and the rendering target: 3.
+  - the frame clock: frame() only queues a redraw; GDK still paints at most once per cycle.
+  - with a rendering fence still pending (never on Phoenix: patch 0016 keeps the fences in the web
+    process) FrameDone goes after paint() as before, since a second frame would find the fence
+    monitor busy.
+
+Off by default, so one image can A/B both pacings in one boot. The UI process says which one a
+view uses, once per backing store (the line of WPE's 0019):
+
+  WPEB-WEBKIT frame-pacing pid=<p> ahead=0|1
+
+diff --git a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
+index 3e30160..65a49ed 100644
+--- a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
++++ b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp
+@@ -67,6 +67,8 @@
+ #include <epoxy/gl.h>
+ #include <inttypes.h>
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <time.h>
+ #include <unistd.h>
+ #endif
+@@ -93,8 +95,11 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(AcceleratedBackingStore);
+ //              Buffer::paint() draws it with gdk_cairo_draw_from_gl(), then FrameDone goes back
+ //   after      the frame clock's after-paint: GDK has drawn the other widgets, uploaded what cairo
+ //              drew and called eglSwapBuffers()
+-// The web process renders its next frame only after FrameDone, so one frame is in flight and a
+-// frame replaced before it was drawn ("superseded") should not exist; it is counted all the same.
++// The web process renders its next frame only after FrameDone. By default that is after paint(),
++// so one frame is in flight and a frame replaced before it was drawn ("superseded") does not
++// happen. One frame ahead (m_frameAhead) FrameDone goes when the frame is received ("done_early"),
++// so the next frame may arrive before GTK drew this one: it replaces it, and this one is counted
++// as superseded.
+ // Main thread only (IPC messages, GDK's paint and frame clock, the program's report timer).
+ namespace PhoenixPaintWatch {
+ 
+@@ -125,13 +130,15 @@ struct Duration {
+ 
+ struct Counts {
+     uint64_t received { 0 };
+-    uint64_t superseded { 0 }; // a frame arrived while the previous one was still pending
++    uint64_t superseded { 0 }; // a frame arrived while the previous one was still pending (one frame
++                               // ahead): that one went back to the web process undrawn
+     uint64_t unknownBuffer { 0 }; // a frame in a buffer this process does not have: FrameDone at once
+     uint64_t dropped { 0 }; // the pending frame thrown away when the view changed surface
+     uint64_t drawn { 0 }; // paints that made a new frame current and drew it
+     uint64_t repaints { 0 }; // paints that drew the current frame again (GDK redrew the view)
+     uint64_t fenceWaits { 0 }; // paints with a frame pending behind its rendering fence
+     uint64_t framesDone { 0 };
++    uint64_t framesDoneEarly { 0 }; // of those, sent when the frame was received (one frame ahead)
+     uint64_t imports { 0 }; // GL textures made from a buffer's EGLImage (first use of a buffer)
+     uint64_t cycles { 0 }; // frame clock cycles (before-paint)
+     uint64_t cyclesWithFrame { 0 };
+@@ -365,6 +372,15 @@ AcceleratedBackingStore::AcceleratedBackingStore(WebPageProxy& webPage)
+     })
+     , m_legacyMainFrameProcess(webPage.legacyMainFrameProcess())
+ {
++#if OS(PHOENIX)
++    // Phoenix-RTOS: with FrameDone after paint(), the web process composites frame N+1 only once
++    // GTK has drawn frame N, so the two run in series and the frame rate is 1 / (web + UI) per
++    // frame (Raspberry Pi 4: ~20 + ~15 ms, a ~30 fps cap). One frame ahead, the web process
++    // renders frame N+1 while GTK paints frame N: 1 / max(web, UI) (webkit-browser --frame-ahead).
++    const char* frameAhead = getenv("WEBKIT_PHOENIX_FRAME_AHEAD");
++    m_frameAhead = frameAhead && !strcmp(frameAhead, "1");
++    WTFLogAlways("WPEB-WEBKIT frame-pacing pid=%d ahead=%d", getpid(), m_frameAhead);
++#endif
+ }
+ 
+ AcceleratedBackingStore::~AcceleratedBackingStore()
+@@ -912,11 +928,12 @@ void AcceleratedBackingStore::didDestroyBuffer(uint64_t id)
+ 
+ void AcceleratedBackingStore::frame(uint64_t bufferID, Rects&& damageRects, WTF::UnixFileDescriptor&& renderingFenceFD)
+ {
+-    ASSERT(!m_pendingBuffer);
+ #if OS(PHOENIX)
++    // One frame ahead, the pending frame's FrameDone may have gone already (see below).
++    ASSERT(!m_pendingBuffer || m_pendingFrameDoneSent);
+     PhoenixPaintWatch::didReceiveFrame();
+-    if (m_pendingBuffer)
+-        PhoenixPaintWatch::state.total.superseded++;
++#else
++    ASSERT(!m_pendingBuffer);
+ #endif
+     auto* buffer = m_buffers.get(bufferID);
+     if (!buffer) {
+@@ -927,6 +944,30 @@ void AcceleratedBackingStore::frame(uint64_t bufferID, Rects&& damageRects, WTF:
+         return;
+     }
+ 
++#if OS(PHOENIX)
++    bool frameDoneNow = m_frameAhead;
++    if (m_pendingBuffer) {
++        // Superseded: GTK has not drawn the previous frame (its FrameDone went when it arrived).
++        // GTK draws one frame per paint, so this one replaces it, with the damage of both. The
++        // previous frame's buffer goes back to the web process now: it is locked there until
++        // ReleaseBuffer, and GTK has not sampled it since it last went back, so the web process may
++        // render into it at once. GTK's own buffer (m_committedBuffer) stays locked until
++        // swapBuffersIfNeeded() replaces it, as without frame-ahead. This frame's FrameDone waits
++        // until it is current (paint()): the web process stays at most one frame ahead of what GTK
++        // draws, rather than rendering frames that are never shown.
++        PhoenixPaintWatch::state.total.superseded++;
++        if (m_pendingBuffer != m_committedBuffer)
++            m_pendingBuffer->release();
++        if (m_pendingDamageRects.isEmpty() || damageRects.isEmpty())
++            damageRects = { }; // no damage: the whole buffer
++        else
++            damageRects.appendVector(m_pendingDamageRects);
++        m_pendingBuffer = nullptr;
++        m_pendingDamageRects = { };
++        m_pendingFrameDoneSent = false;
++        frameDoneNow = false;
++    }
++#endif
+     m_pendingBuffer = buffer;
+ #if OS(PHOENIX)
+     // before the fence monitor: without a fence it queues the redraw from inside this call
+@@ -935,6 +976,17 @@ void AcceleratedBackingStore::frame(uint64_t bufferID, Rects&& damageRects, WTF:
+ #endif
+     m_pendingDamageRects = WTF::move(damageRects);
+     m_fenceMonitor.addFileDescriptor(WTF::move(renderingFenceFD));
++#if OS(PHOENIX)
++    // One frame ahead: the web process may render the next frame while GTK paints this one. Not
++    // while this frame's rendering fence is pending (never on Phoenix, patch 0016): the next frame
++    // could then arrive while the fence monitor still holds this one's (its RELEASE_ASSERT), so
++    // FrameDone goes after paint() as without frame-ahead.
++    if (frameDoneNow && !m_fenceMonitor.hasFileDescriptor()) {
++        m_pendingFrameDoneSent = true;
++        PhoenixPaintWatch::state.total.framesDoneEarly++;
++        frameDone();
++    }
++#endif
+ }
+ 
+ void AcceleratedBackingStore::frameDone()
+@@ -991,8 +1043,12 @@ void AcceleratedBackingStore::update(const LayerTreeContext& context)
+ #if OS(PHOENIX)
+             PhoenixPaintWatch::state.total.dropped++;
+             PhoenixFrameWatch::uiProcess.pendingMs.store(0, std::memory_order_relaxed);
+-#endif
++            // one FrameDone per frame: one frame ahead, it may have gone when the frame arrived
++            if (!std::exchange(m_pendingFrameDoneSent, false))
++                frameDone();
++#else
+             frameDone();
++#endif
+             m_pendingBuffer = nullptr;
+             m_pendingDamageRects = { };
+         }
+@@ -1029,6 +1085,9 @@ bool AcceleratedBackingStore::swapBuffersIfNeeded()
+         m_committedBuffer->release();
+ 
+     m_committedBuffer = WTF::move(m_pendingBuffer);
++#if OS(PHOENIX)
++    m_committedFrameDoneSent = std::exchange(m_pendingFrameDoneSent, false);
++#endif
+     return true;
+ }
+ 
+@@ -1040,8 +1099,13 @@ bool AcceleratedBackingStore::snapshot(GtkSnapshot* gtkSnapshot)
+         return false;
+ 
+     m_committedBuffer->snapshot(gtkSnapshot);
++#if OS(PHOENIX)
++    if (didSwapBuffers && !m_committedFrameDoneSent)
++        frameDone();
++#else
+     if (didSwapBuffers)
+         frameDone();
++#endif
+ 
+     return didSwapBuffers;
+ }
+@@ -1059,6 +1123,14 @@ bool AcceleratedBackingStore::paint(cairo_t* cr, const IntRect& clipRect)
+         return false;
+ 
+ #if OS(PHOENIX)
++    // One FrameDone per frame. One frame ahead: it went when the frame arrived, or, for a frame
++    // that superseded another one, it goes now that the frame is current (before the draw: the
++    // web process may start the next frame meanwhile). Otherwise after the draw, as upstream.
++    bool frameDoneSent = !didSwapBuffers || m_committedFrameDoneSent;
++    if (!frameDoneSent && m_frameAhead) {
++        frameDone();
++        frameDoneSent = true;
++    }
+     const int64_t swapEndUs = PhoenixPaintWatch::nowUs();
+ #endif
+     m_committedBuffer->paint(cr, clipRect);
+@@ -1067,9 +1139,12 @@ bool AcceleratedBackingStore::paint(cairo_t* cr, const IntRect& clipRect)
+         PhoenixPaintWatch::didDrawFrame(receivedUs, startUs, swapEndUs, PhoenixPaintWatch::nowUs());
+     else
+         PhoenixPaintWatch::state.total.repaints++;
+-#endif
++    if (!frameDoneSent)
++        frameDone();
++#else
+     if (didSwapBuffers)
+         frameDone();
++#endif
+ 
+     return didSwapBuffers;
+ }
+@@ -1145,11 +1220,11 @@ void webkit_gtk_phoenix_paint_watch_report(char* line, size_t size)
+             break;
+         used += n;
+     }
+-    snprintf(line, size, "secs=%.1f received=%llu drawn=%llu superseded=%llu dropped=%llu unknown=%llu frame_done=%llu repaints=%llu"
+-        " fence_waits=%llu imports=%llu cycles=%llu cycles_frame=%llu%s dt_hist=%llu/%llu/%llu/%llu total_drawn=%llu",
++    snprintf(line, size, "secs=%.1f received=%llu drawn=%llu superseded=%llu dropped=%llu unknown=%llu frame_done=%llu done_early=%llu"
++        " repaints=%llu fence_waits=%llu imports=%llu cycles=%llu cycles_frame=%llu%s dt_hist=%llu/%llu/%llu/%llu total_drawn=%llu",
+         secs, delta(now.received, then.received), delta(now.drawn, then.drawn), delta(now.superseded, then.superseded),
+         delta(now.dropped, then.dropped), delta(now.unknownBuffer, then.unknownBuffer), delta(now.framesDone, then.framesDone),
+-        delta(now.repaints, then.repaints), delta(now.fenceWaits, then.fenceWaits), delta(now.imports, then.imports),
++        delta(now.framesDoneEarly, then.framesDoneEarly), delta(now.repaints, then.repaints), delta(now.fenceWaits, then.fenceWaits), delta(now.imports, then.imports),
+         delta(now.cycles, then.cycles), delta(now.cyclesWithFrame, then.cyclesWithFrame), averages,
+         static_cast<unsigned long long>(state.intervalHistogram[0]), static_cast<unsigned long long>(state.intervalHistogram[1]),
+         static_cast<unsigned long long>(state.intervalHistogram[2]), static_cast<unsigned long long>(state.intervalHistogram[3]),
+diff --git a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
+index 24b4363..4333170 100644
+--- a/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
++++ b/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.h
+@@ -270,6 +270,13 @@ private:
+ #if OS(PHOENIX)
+     // the paint watch (below): when the pending frame came from the web process
+     int64_t m_pendingReceivedUs { 0 };
++    // One frame ahead (WEBKIT_PHOENIX_FRAME_AHEAD=1, webkit-browser --frame-ahead): a frame's
++    // FrameDone goes when it is received, so the web process renders the next frame while GTK
++    // paints this one. A frame that arrives while the previous one is still undrawn replaces it
++    // (that one goes back to the web process) and gets its FrameDone once it is current.
++    bool m_frameAhead { false };
++    bool m_pendingFrameDoneSent { false }; // m_pendingBuffer's FrameDone went when it arrived
++    bool m_committedFrameDoneSent { false }; // the same for m_committedBuffer
+ #endif
+ };
+ 

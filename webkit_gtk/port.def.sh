@@ -33,6 +33,9 @@
 	#   patches/webkit-gtk/0105       the GTK UI process's paint watch: where each web-process frame
 	#                                 spends its time between arriving and GDK's swap (the UI half
 	#                                 of shared patch 0020 for GTK; webkit-browser --present-stats)
+	#   patches/webkit-gtk/0106       one frame ahead (opt-in, webkit-browser --frame-ahead): FrameDone
+	#                                 when a frame is received, so the web process renders the next
+	#                                 frame while GTK paints this one (the GTK side of WPE's 0019)
 	#   patches/webkit-gtk-video/0130 USE video only: USE_FFMPEG for PORT=GTK (0030's CMake side)
 	#   files/build-gtk.sh            the build (build-wpe.sh's stages for PORT=GTK)
 	#   files/launcher/               the program: role dispatch, desktop defaults, downloads,
@@ -160,8 +163,8 @@ p_build() {
 	# what the stage must hold: the program with its log lines and export table, the bundle
 	local bad=0 s
 	for s in 'WKGB t=%.0f %s' 'download finished uri=%s' 'ui window shown gdk_gl=%s' 'WPEB-WEBKIT swap-chain pid=%d' \
-		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL' 'gdk-gl ok use_es=%d version=%d.%d' 'egl-probe platform_wayland=%d' 'egl-early wayland=1 client_ext=' 'b10-r4' \
-		'gtk-paint %s' 'frame-watch-web pid=%d' 'frame-watch-ui %s' 'WPEB-WEBKIT gtk-paint import pid=%d'; do
+		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL' 'gdk-gl ok use_es=%d version=%d.%d' 'egl-probe platform_wayland=%d' 'egl-early wayland=1 client_ext=' 'b10-r5' \
+		'gtk-paint %s' 'frame-watch-web pid=%d' 'frame-watch-ui %s' 'WPEB-WEBKIT gtk-paint import pid=%d' 'WPEB-WEBKIT frame-pacing pid=%d ahead=%d'; do
 		grep -qaF "${s}" "${ST}/usr/bin/webkit-browser" || { echo "webkit_gtk: webkit-browser lacks '${s}'"; bad=1; }
 	done
 	"${TC}-readelf" -dW "${ST}/usr/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so" | grep -q '(HASH)' ||

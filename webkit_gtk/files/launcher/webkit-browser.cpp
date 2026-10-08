@@ -42,6 +42,9 @@
  *                           report on). A few seconds' worth: the serial console carries ~30 such
  *                           lines a second
  *     --size=WxH            the window's size (default 1280x960)
+ *     --frame-ahead         the web process renders the next frame while GTK paints this one
+ *                           (WEBKIT_PHOENIX_FRAME_AHEAD=1, WebKit patch webkit-gtk/0106; off by
+ *                           default: one image A/Bs both pacings)
  *   Keys (MiniBrowser's): Ctrl+T new tab, Ctrl+W close, Ctrl+L the address, F5 / Ctrl+R reload,
  *   Escape stop, Alt+Home start page, Ctrl+F find, Ctrl++ / Ctrl+- / Ctrl+0 zoom, F11 fullscreen,
  *   Ctrl+Q quit; Alt+Left / Alt+Right back / forward.
@@ -101,7 +104,7 @@ static const char frameWatchEnv[] = "WKGB_FRAME_WATCH_SECS";
 /* --- log ------------------------------------------------------------------------------------ */
 
 /* bumped with every change a Pi gate depends on: printed in "ui start" */
-static const char launcherRevision[] = "b10-r4";
+static const char launcherRevision[] = "b10-r5";
 
 static double startMs;
 static char processRole[16] = "ui";
@@ -225,6 +228,7 @@ static int optTabCycle;
 static int optPresentStats;
 static char* optFrameTrace;
 static char* optSize;
+static gboolean optFrameAhead;
 static char** optURIs;
 
 static const GOptionEntry optionEntries[] = {
@@ -248,6 +252,7 @@ static const GOptionEntry optionEntries[] = {
     { "present-stats", 0, 0, G_OPTION_ARG_INT, &optPresentStats, "Every S s, log how many frames the window painted", "S" },
     { "frame-trace", 0, 0, G_OPTION_ARG_STRING, &optFrameTrace, "With --present-stats: log N frames, from S s after the window opened", "N[@S]" },
     { "size", 0, 0, G_OPTION_ARG_STRING, &optSize, "The window's size (default 1280x960)", "WxH" },
+    { "frame-ahead", 0, 0, G_OPTION_ARG_NONE, &optFrameAhead, "Let the web process render the next frame while GTK paints this one", nullptr },
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &optURIs, nullptr, "[URL|FILE|WORDS...]" },
     { nullptr, 0, 0, G_OPTION_ARG_NONE, nullptr, nullptr, nullptr }
 };
@@ -853,14 +858,18 @@ static int uiMain(int argc, char** argv)
     }
 
     applyProcessModel();
+    /* read by each view's AcceleratedBackingStore (webkit-gtk/0106), created after this */
+    if (optFrameAhead)
+        g_setenv("WEBKIT_PHOENIX_FRAME_AHEAD", "1", TRUE);
     if (optPresentStats > 0) {
         /* for the web processes (orphanWatchdog()); the network process ignores it */
         g_autofree char* secs = g_strdup_printf("%d", optPresentStats);
         g_setenv(frameWatchEnv, secs, TRUE);
     }
     /* launcher=: which revision of this file the binary carries (build 66 shipped an older one) */
-    LOG("ui start pid=%d executable=%s wayland=%s gdk_gl=%s launcher=%s", static_cast<int>(getpid()), getenv("WPE_PHOENIX_EXECUTABLE"),
-        g_getenv("WAYLAND_DISPLAY"), g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop", launcherRevision);
+    LOG("ui start pid=%d executable=%s wayland=%s gdk_gl=%s frame_ahead=%s launcher=%s", static_cast<int>(getpid()),
+        getenv("WPE_PHOENIX_EXECUTABLE"), g_getenv("WAYLAND_DISPLAY"), g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop",
+        g_getenv("WEBKIT_PHOENIX_FRAME_AHEAD") ? g_getenv("WEBKIT_PHOENIX_FRAME_AHEAD") : "0", launcherRevision);
     if (!optCPURendering)
         earlyEGLProbe();
 
