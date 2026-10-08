@@ -83,6 +83,9 @@ p_build() {
 	# the fallbacks, `TERM=xterm-color mc` failed with "can't load termcap". Compiled from
 	# this release's own terminfo.src by the build host's tic (the cross build makes no
 	# programs); the binary format is the same for every ncurses 6.
+	# It also fixes the compiled-in xterm-256color, which the fallback generator stores with
+	# pairs#65536 wrapped to 0: COLORS=0 COLOR_PAIRS=0 after start_color(), so mc in foot (which
+	# sets that TERM) ran in monochrome. The database entry is found first and has 256/256.
 	if [ -n "${PREFIX_ROOTFS:-}" ]; then
 		local ti="${PREFIX_ROOTFS}/usr/share/terminfo"
 		local terms="ansi,dumb,linux,vt100,vt102,vt220,xterm,xterm-color,xterm-16color,xterm-256color"
