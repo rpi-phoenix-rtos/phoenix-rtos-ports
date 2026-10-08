@@ -42,6 +42,15 @@
  *                           report on). A few seconds' worth: the serial console carries ~30 such
  *                           lines a second
  *     --size=WxH            the window's size (default 1280x960)
+ *     --memory-limit=MB     the web processes' memory pressure handler (WebKit's periodic monitor)
+ *                           measures against MB instead of min(RAM, 3 GB): it releases caches from
+ *                           0.33 x MB (conservative) and harder from 0.5 x MB (strict)
+ *     --memory-kill=F       ... and a web process above F x MB is terminated, the tab reporting
+ *                           "web-process-terminated reason=memory-limit" (F > 0.5; default 0, never)
+ *     --memory-poll-secs=S  how often it measures (default 30)
+ *                           As wpe-browser's options of the same names. The web process logs what
+ *                           the monitor does ("WPEB-MEMPRESSURE ...", shared patch 0024); this
+ *                           process, the system's free memory ("... system level=", patch 0025)
  *   Keys (MiniBrowser's): Ctrl+T new tab, Ctrl+W close, Ctrl+L the address, F5 / Ctrl+R reload,
  *   Escape stop, Alt+Home start page, Ctrl+F find, Ctrl++ / Ctrl+- / Ctrl+0 zoom, F11 fullscreen,
  *   Ctrl+Q quit; Alt+Left / Alt+Right back / forward.
@@ -225,6 +234,9 @@ static int optTabCycle;
 static int optPresentStats;
 static char* optFrameTrace;
 static char* optSize;
+static int optMemoryLimitMB;
+static double optMemoryKill;
+static double optMemoryPollSecs;
 static char** optURIs;
 
 static const GOptionEntry optionEntries[] = {
@@ -248,6 +260,9 @@ static const GOptionEntry optionEntries[] = {
     { "present-stats", 0, 0, G_OPTION_ARG_INT, &optPresentStats, "Every S s, log how many frames the window painted", "S" },
     { "frame-trace", 0, 0, G_OPTION_ARG_STRING, &optFrameTrace, "With --present-stats: log N frames, from S s after the window opened", "N[@S]" },
     { "size", 0, 0, G_OPTION_ARG_STRING, &optSize, "The window's size (default 1280x960)", "WxH" },
+    { "memory-limit", 0, 0, G_OPTION_ARG_INT, &optMemoryLimitMB, "The web processes' memory pressure handler measures against MB (default min(RAM, 3 GB))", "MB" },
+    { "memory-kill", 0, 0, G_OPTION_ARG_DOUBLE, &optMemoryKill, "Terminate a web process above F x the memory limit (F > 0.5; default 0, never)", "F" },
+    { "memory-poll-secs", 0, 0, G_OPTION_ARG_DOUBLE, &optMemoryPollSecs, "How often the memory pressure handler measures (default 30)", "S" },
     { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &optURIs, nullptr, "[URL|FILE|WORDS...]" },
     { nullptr, 0, 0, G_OPTION_ARG_NONE, nullptr, nullptr, nullptr }
 };
@@ -687,6 +702,35 @@ static void startup(GApplication* application)
         gtk_application_set_accels_for_action(GTK_APPLICATION(application), it[0], &it[1]);
 }
 
+/* --memory-limit/-kill/-poll-secs, as wpe-browser's: the settings are a construct property of the
+ * context, given only when an option asks for them (otherwise WebKit's defaults) */
+static WebKitWebContext* createWebContext(WebKitWebsiteDataManager* manager)
+{
+    if (optMemoryLimitMB <= 0 && optMemoryKill <= 0 && optMemoryPollSecs <= 0)
+        return webkit_web_context_new_with_website_data_manager(manager);
+
+    WebKitMemoryPressureSettings* memory = webkit_memory_pressure_settings_new();
+    if (optMemoryLimitMB > 0)
+        webkit_memory_pressure_settings_set_memory_limit(memory, static_cast<guint>(optMemoryLimitMB));
+    if (optMemoryKill > 0) {
+        if (optMemoryKill > webkit_memory_pressure_settings_get_strict_threshold(memory))
+            webkit_memory_pressure_settings_set_kill_threshold(memory, optMemoryKill);
+        else
+            LOG("memory-pressure kill=%.2f ignored: it must be above the strict threshold %.2f", optMemoryKill,
+                webkit_memory_pressure_settings_get_strict_threshold(memory));
+    }
+    if (optMemoryPollSecs > 0)
+        webkit_memory_pressure_settings_set_poll_interval(memory, optMemoryPollSecs);
+    LOG("memory-pressure limit_mb=%u conservative=%.2f strict=%.2f kill=%.2f poll_s=%.1f",
+        webkit_memory_pressure_settings_get_memory_limit(memory), webkit_memory_pressure_settings_get_conservative_threshold(memory),
+        webkit_memory_pressure_settings_get_strict_threshold(memory), webkit_memory_pressure_settings_get_kill_threshold(memory),
+        webkit_memory_pressure_settings_get_poll_interval(memory));
+    auto* context = WEBKIT_WEB_CONTEXT(g_object_new(WEBKIT_TYPE_WEB_CONTEXT, "website-data-manager", manager,
+        "memory-pressure-settings", memory, nullptr));
+    webkit_memory_pressure_settings_free(memory);
+    return context;
+}
+
 static void activate(GApplication* application, gpointer)
 {
     WebKitWebsiteDataManager* manager;
@@ -699,7 +743,7 @@ static void activate(GApplication* application, gpointer)
         LOG("session persistent data=%s cache=%s", dataDir, cacheDir);
     }
     webkit_website_data_manager_set_favicons_enabled(manager, TRUE);
-    WebKitWebContext* context = webkit_web_context_new_with_website_data_manager(manager);
+    WebKitWebContext* context = createWebContext(manager);
     g_object_unref(manager);
 
     WebKitCookieManager* cookies = webkit_web_context_get_cookie_manager(context);
