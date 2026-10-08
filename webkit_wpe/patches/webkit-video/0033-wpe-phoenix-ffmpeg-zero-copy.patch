@@ -136,7 +136,7 @@ index 84a0ffb0..d88c8534 100644
 +    if (!context.codec || strcmp(context.codec->name, "hevc_rpivid"))
 +        return false;
 +    const char* knob = getenv("WPE_PHOENIX_MEDIA_ZERO_COPY");
-+    if (!knob || strcmp(knob, "1"))
++    if (knob && !strcmp(knob, "0"))
 +        return false;
 +    static std::once_flag once;
 +    static bool available;
@@ -655,7 +655,7 @@ index b4841b95..9928be26 100644
      static bool supportsPixelFormat(int);
  
 +    // Before avcodec_open2() of a video decoder: ask hevc_rpivid for zero-copy frames when this
-+    // build, the decoder and the EGL display can do it and WPE_PHOENIX_MEDIA_ZERO_COPY is 1
++    // build, the decoder and the EGL display can do it and WPE_PHOENIX_MEDIA_ZERO_COPY is not 0
 +    // (rpivid_out=drm_prime in *options, slice instead of frame threads). True when asked.
 +    static bool requestZeroCopy(AVCodecContext&, AVDictionary** options);
 +    static bool isZeroCopyFrame(const AVFrame&);
@@ -695,7 +695,7 @@ index a20a8afc..48b154f6 100644
      context->thread_count = envNumber("WPE_PHOENIX_MEDIA_THREADS", m_isHLS && codec->id == AV_CODEC_ID_H264 ? 3 : 0);
      context->opaque = &m_hardwareState;
 -    if (avcodec_open2(context, codec, nullptr) < 0) {
-+    // hevc_rpivid: the block's GPU buffers as the frames (zero copy; WPE_PHOENIX_MEDIA_ZERO_COPY=1: on)
++    // hevc_rpivid: the block's GPU buffers as the frames (zero copy; WPE_PHOENIX_MEDIA_ZERO_COPY=0: off)
 +    AVDictionary* options = nullptr;
 +    bool zeroCopy = stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && CoordinatedPlatformLayerBufferFFmpeg::requestZeroCopy(*context, &options);
 +    int opened = avcodec_open2(context, codec, &options);
