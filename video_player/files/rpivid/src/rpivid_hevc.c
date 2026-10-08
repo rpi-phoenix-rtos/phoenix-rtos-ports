@@ -94,6 +94,7 @@ typedef struct RPIVIDPool {
 	int have_ops;
 	RPIVIDBuf *free;
 	int nbufs;
+	char err[128];                 /* why the last buffer could not be made */
 } RPIVIDPool;
 
 /* hwaccel_picture_private of an HEVCFrame */
@@ -133,6 +134,7 @@ typedef struct RPIVIDContext {
 	/* statistics (ns): all frames, and the current reporting window */
 	uint64_t n, sum_slices, sum_p1, sum_p2, sum_detile;
 	uint64_t wn, w_slices, w_p1, w_p2, w_detile;
+	uint32_t stale_total, w_stale;   /* completions already pending when a phase started (rpivid_hw.c) */
 	uint64_t t_start;
 	uint32_t p1_reruns, missing_total;
 	int zc;                        /* drm_prime output */
@@ -196,8 +198,11 @@ static void buf_free(RPIVIDPool *p, RPIVIDBuf *b)
 		rpivid_dma_free(&b->c);
 	}
 	else if (b->has_bo) {
-		/* y and c are views of the buffer */
-		p->ops.free(p->ops.opaque, &b->bo);
+		/* y and c are views of the buffer; one the block may still write (it stopped
+		 * responding) is not handed back to the GPU's allocator */
+		if (!rpivid_hw_dead()) {
+			p->ops.free(p->ops.opaque, &b->bo);
+		}
 	}
 	else {
 		rpivid_dma_free(&b->y);   /* c is a view of y's allocation */
@@ -217,14 +222,21 @@ static int buf_alloc_zc(RPIVIDPool *p, RPIVIDBuf *b)
 		memset(&b->bo, 0, sizeof(b->bo));
 		b->bo.fd = -1;
 		if ((p->ops.alloc(p->ops.opaque, size, &b->bo) < 0) || (b->bo.cpu == NULL) || (b->bo.size < size) || (b->bo.pa == 0u)) {
+			snprintf(p->err, sizeof(p->err), "no GPU buffer of %zu bytes", size);
 			return -1;
 		}
 		b->has_bo = 1;
+		if (b->bo.pa + size > RPIVID_DMA_LIMIT) {
+			snprintf(p->err, sizeof(p->err), "the GPU buffer at PA 0x%" PRIx64 " is beyond the block's reach (0x%llx)", b->bo.pa,
+				(unsigned long long)RPIVID_DMA_LIMIT);
+			return -1;
+		}
 		b->y.cpu = b->bo.cpu;
 		b->y.pa = b->bo.pa;
 		b->y.size = b->bo.size;
 	}
 	else if (rpivid_dma_alloc(&b->y, size) < 0) {
+		snprintf(p->err, sizeof(p->err), "no contiguous memory the block reaches for %zu bytes", size);
 		return -1;
 	}
 	else {
@@ -389,7 +401,8 @@ static int rpivid_alloc_frame(AVCodecContext *avctx, AVFrame *frame)
 	}
 	b = pool_get(ctx->pool);
 	if (b == NULL) {
-		av_log(avctx, AV_LOG_ERROR, "rpivid: no buffer for another picture (%d held)\n", ctx->pool->nbufs);
+		av_log(avctx, AV_LOG_ERROR, "rpivid: no buffer for another picture (%d held): %s\n", ctx->pool->nbufs,
+			(ctx->pool->err[0] != '\0') ? ctx->pool->err : "the GPU still reads the one to reuse");
 		return AVERROR(ENOMEM);
 	}
 	frame->buf[0] = av_buffer_create((uint8_t *)&b->drm, sizeof(b->drm), drm_buf_release, b, 0);
@@ -873,10 +886,11 @@ static int rpivid_uninit(AVCodecContext *avctx)
 	}
 	if (ctx->n != 0u) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: %" PRIu64 " pictures on the block: hw %.2f ms (phase 1 %.2f, phase 2 %.2f), "
-			"SAND->planar %.2f ms, slices (bitstream copy, commands) %.2f ms per picture; %u phase-1 reruns, %u missing references, %d buffers\n",
+			"SAND->planar %.2f ms, slices (bitstream copy, commands) %.2f ms per picture; %u phase-1 reruns, %u missing references, %d buffers, "
+			"%u stale completions\n",
 			ctx->n, (ctx->sum_p1 + ctx->sum_p2) / 1e6 / ctx->n, ctx->sum_p1 / 1e6 / ctx->n, ctx->sum_p2 / 1e6 / ctx->n,
 			ctx->sum_detile / 1e6 / ctx->n, ctx->sum_slices / 1e6 / ctx->n, ctx->p1_reruns, ctx->missing_total,
-			(ctx->pool != NULL) ? ctx->pool->nbufs : 0);
+			(ctx->pool != NULL) ? ctx->pool->nbufs : 0, ctx->stale_total);
 	}
 	rpivid_cmd_free(&ctx->cmd);
 	rpivid_dma_free(&ctx->bs);
@@ -975,6 +989,23 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level, int out)
 		rpivid_geom(&g, (uint32_t)sps->width, (uint32_t)sps->height, (unsigned int)sps->bit_depth);
 	}
 	ctx->pool = pool_new(&g, sps->sps_temporal_mvp_enabled_flag, zc, (uint32_t)sps->width, (uint32_t)sps->height);
+	if (zc && (ctx->pool != NULL)) {
+		/* the first buffer now: one the block cannot have (unreachable, none at all) keeps
+		 * this stream on system-memory frames, still decoded by the block */
+		RPIVIDBuf *b = pool_get(ctx->pool);
+
+		if (b != NULL) {
+			pool_put(ctx->pool, b);
+		}
+		else {
+			av_log(avctx, AV_LOG_WARNING, "rpivid: drm_prime output: %s: system-memory frames for this stream\n",
+				(ctx->pool->err[0] != '\0') ? ctx->pool->err : "no buffer");
+			pool_unref(ctx->pool);
+			zc = 0;
+			rpivid_geom(&g, (uint32_t)sps->width, (uint32_t)sps->height, (unsigned int)sps->bit_depth);
+			ctx->pool = pool_new(&g, sps->sps_temporal_mvp_enabled_flag, 0, (uint32_t)sps->width, (uint32_t)sps->height);
+		}
+	}
 	if ((ctx->pool == NULL) || (rpivid_dma_alloc(&ctx->dummy_mv, g.colmv_size) < 0)) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: CPU decode: out of memory\n");
 		pool_unref(ctx->pool);
@@ -998,6 +1029,9 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level, int out)
 	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit, tools: %s, HEVC clock %u MHz, completion %s\n", sps->width,
 		sps->height, sps->bit_depth, tool_list(list, sizeof(list), need), rpivid_hw_clock(ctx->hw) / 1000000u,
 		rpivid_hw_irq(ctx->hw) ? "by interrupt" : "POLLED (no interrupt)");
+	if (rpivid_hw_note(ctx->hw)[0] != '\0') {
+		av_log(avctx, AV_LOG_WARNING, "rpivid: %s\n", rpivid_hw_note(ctx->hw));
+	}
 	if (zc) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: drm_prime output: NV12 SAND128 column height %u, %zu bytes per picture, %s\n", g.col_height,
 			g.luma_size, ctx->pool->have_ops ? "GPU buffers (dma-buf)" : "own memory (no buffer operations: no dma-buf)");
@@ -1378,10 +1412,11 @@ static void stat_window(AVCodecContext *avctx, RPIVIDContext *ctx)
 	if (ctx->wn < STAT_EVERY) {
 		return;
 	}
-	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms%s\n", ctx->n,
+	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms%s stale=%u\n", ctx->n,
 		(ctx->w_p1 + ctx->w_p2) / 1e6 / ctx->wn, ctx->w_p1 / 1e6 / ctx->wn, ctx->w_p2 / 1e6 / ctx->wn, ctx->w_detile / 1e6 / ctx->wn,
-		ctx->w_slices / 1e6 / ctx->wn, ctx->zc ? " zc=1" : "");
+		ctx->w_slices / 1e6 / ctx->wn, ctx->zc ? " zc=1" : "", ctx->w_stale);
 	ctx->wn = ctx->w_slices = ctx->w_p1 = ctx->w_p2 = ctx->w_detile = 0;
+	ctx->w_stale = 0;
 }
 
 
@@ -1447,13 +1482,25 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	t1 = (uint64_t)av_gettime_relative();
 	rc = rpivid_hw_decode(ctx->hw, &j, &st);
 	t2 = (uint64_t)av_gettime_relative();
+	ctx->stale_total += st.stale;
+	ctx->w_stale += st.stale;
+	if ((rc == 0) && (st.p1_ns + st.p2_ns > 100000000u)) {
+		/* a decode that waited long for the block (a stall to explain) */
+		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d took %.0f ms on the block (phase 1 %.0f, phase 2 %.0f)\n", s->poc,
+			(st.p1_ns + st.p2_ns) / 1e6, st.p1_ns / 1e6, st.p2_ns / 1e6);
+	}
 	if (st.p1_runs > 1u) {
 		ctx->p1_reruns += st.p1_runs - 1u;
 	}
-	if (rc < 0) {
+	if (rc == -ETIMEDOUT) {
+		av_log(avctx, AV_LOG_ERROR, "rpivid: the block failed picture POC %d: timeout in phase %u (CFSTATUS %u CFNUM %u STATUS 0x%x, "
+			"%u phase-1 runs); the block is not used again until reboot (clock %s)\n", s->poc, st.timeout_phase, st.cfstatus, st.cfnum,
+			st.status, st.p1_runs, st.clock_off ? "switched off" : "left on: the mailbox refused");
+		ctx->frame_err = "hardware";
+	}
+	else if (rc < 0) {
 		av_log(avctx, AV_LOG_ERROR, "rpivid: the block failed picture POC %d: %s (CFSTATUS %u CFNUM %u STATUS 0x%x, %u phase-1 runs)\n",
-			s->poc, (rc == -ETIMEDOUT) ? "timeout" : ((rc == -EIO) ? "decode error" : "out of memory"), st.cfstatus, st.cfnum,
-			st.status, st.p1_runs);
+			s->poc, (rc == -EIO) ? "decode error" : "out of memory", st.cfstatus, st.cfnum, st.status, st.p1_runs);
 		ctx->frame_err = "hardware";
 	}
 
@@ -1478,7 +1525,11 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	cur->has_mv = ctx->write_mv;
 	ctx->missing_total += (uint32_t)ctx->missing_refs;
 
-	ctx->n++;
+	if (ctx->n++ == 0u) {
+		/* where a stream that stops early got to */
+		av_log(avctx, AV_LOG_INFO, "rpivid: first picture on the block: POC %d, %.1f ms%s\n", s->poc, (st.p1_ns + st.p2_ns) / 1e6,
+			(rpivid_hw_note(ctx->hw)[0] != '\0') ? " (the block works again after the clock reset)" : "");
+	}
 	ctx->wn++;
 	ctx->sum_slices += (t1 - t0) * 1000u + ctx->slice_ns;
 	ctx->w_slices += (t1 - t0) * 1000u + ctx->slice_ns;

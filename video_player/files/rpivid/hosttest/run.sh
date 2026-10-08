@@ -35,7 +35,13 @@
 # every 8-bit clip BIT-EXACT too; and a forced CPU fallback (FFMPEG_RPIVID_REFUSE_AT=3: the
 # block refuses its 4th picture; MOCK_FAIL_AT=5: it fails its 6th): pictures are dropped up to
 # the next IRAP, then the CPU decoder goes on, and every frame emitted, in either output, must
-# equal the CPU decoder's frame of the same pts.
+# equal the CPU decoder's frame of the same pts. Also per clip: the interrupt path
+# (MOCK_ISR_RACE=1), BIT-EXACT with no stale completion. Then, on the first 8-bit clip: a block
+# that stops responding (MOCK_WEDGE_AT: phase 2 never finishes) -- the process records it, its
+# clock goes off, no register is touched after; the next process does not touch the block at
+# all; FFMPEG_RPIVID_RESET=1 tries it once (a clock off/on), and only once; a marker from an
+# earlier boot is ignored -- and a zero-copy buffer beyond the block's reach (MOCK_PA_HIGH_SIZE):
+# the stream keeps system-memory frames, still decoded by the block.
 #
 # Copyright 2026 Phoenix Systems
 #
@@ -81,7 +87,7 @@ if [ "$(cat "${work}/ffmpeg.stamp" 2>/dev/null || true)" != "${stamp}" ]; then
 	tar xzf "${tarball}" -C "${src}" --strip-components=1
 	for p in "${rp}"/patches/*.patch; do patch -d "${src}" -p1 -s <"${p}"; done
 	cp "${rp}"/src/*.[ch] "${src}/libavcodec/"
-	printf '/* host test: the Phoenix-RTOS hardware layer against hosttest/mock.c */\n#define __phoenix__ 1\n#define RPIVID_MMIO_HOOKS 1\n#include "phoenix_shim.h"\n#include "%s/src/rpivid_hw.c"\n' "${rp}" \
+	printf '/* host test: the Phoenix-RTOS hardware layer against hosttest/mock.c */\n#define __phoenix__ 1\n#define RPIVID_MMIO_HOOKS 1\nconst char *rpivid_dead_path(void);\n#define RPIVID_DEAD_PATH rpivid_dead_path()\n#include "phoenix_shim.h"\n#include "%s/src/rpivid_hw.c"\n' "${rp}" \
 		>"${src}/libavcodec/rpivid_hw.c"
 	(cd "${bld}" && "${src}/configure" --disable-everything --enable-decoder=hevc,hevc_rpivid --enable-demuxer=hevc,mov \
 		--enable-parser=hevc --enable-protocol=file --enable-bsf=hevc_mp4toannexb --disable-programs --disable-doc \
@@ -122,6 +128,10 @@ else
 	mt=1
 fi
 export ASAN_OPTIONS=detect_leaks=0
+# the block's cross-process state (rpivid_hw.c's /tmp/.rpivid.dead on the Pi)
+dead="${work}/rpivid.dead"
+export MOCK_DEAD_PATH="${dead}"
+rm -f "${dead}"
 n_same=0 n_diff=0 n_skip=0 n_cpu=0
 for c in "${clips[@]}"; do
 	b="$(basename "${c}")" ref="${work}/${b}.ref.log" hw="${work}/${b}.hw.log"
@@ -185,6 +195,17 @@ if [ "${loop}" = 1 ]; then
 			echo "LOOP      ${b} threads=${t}: ${v}"
 			case "${v}" in *BIT-EXACT*hw_used=1) ;; *) n_loop_bad=$((n_loop_bad + 1)) ;; esac
 		done
+		# the interrupt path (MOCK_ISR_RACE=1: a handler registered, running inside the waiter's
+		# controller read: both see one completion): still BIT-EXACT, no completion left stale
+		MOCK_ISR_RACE=1 MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${w}x${h}" MOCK_LOG=/dev/null \
+			"${work}/hevc-rpivid-check" -cpuref -l 2 -T 1 "${c}" >"${work}/${b}.isr.out" 2>&1 || true
+		if grep -q 'ERROR: AddressSanitizer' "${work}/${b}.isr.out"; then
+			echo "ASAN      ${b} isr"; grep -A12 'ERROR: AddressSanitizer' "${work}/${b}.isr.out" | head -20; exit 1
+		fi
+		v="$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]* first_bad=[0-9-]* hw_used=[0-9]' "${work}/${b}.isr.out" || echo 'verdict=none')"
+		z="$(grep -o 'completion by interrupt\|[0-9]* stale completions' "${work}/${b}.isr.out" | tr '\n' ' ')"
+		echo "LOOP-ISR  ${b}: ${v}; ${z}"
+		case "${v} ${z}" in *BIT-EXACT*hw_used=1*"completion by interrupt"*" 0 stale completions"*) ;; *) n_loop_bad=$((n_loop_bad + 1)) ;; esac
 		# zero copy: 8-bit only (10-bit streams keep system-memory frames: nothing new to see)
 		[ "${pf}" = yuv420p ] || continue
 		for t in 1 "${threads}"; do
@@ -230,6 +251,94 @@ if [ "${loop}" = 1 ]; then
 			done
 		done
 	done
+
+	# --- a block that stops responding, and one out of reach ---
+	wc="" ww="" wh=""
+	for c in "${clips[@]}"; do
+		IFS=, read -r w h pf < <(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,pix_fmt -of csv=p=0 "${c}")
+		if [ "${pf}" = yuv420p ]; then wc="${c}" ww="${w}" wh="${h}"; break; fi
+	done
+	if [ -n "${wc}" ]; then
+		b="$(basename "${wc}")"
+		idrs="$(ffprobe -v error -select_streams v:0 -show_entries frame=key_frame -of csv=p=0 "${wc}" | awk '$1 == 1 { print NR - 1 }' | paste -sd, -)"
+		# run <name> <expect regex for the output, in order> -- <env...>: one decoder process
+		wrun() {
+			local name="$1" mode="$2"; shift 2
+			local o="${work}/${b}.wedge-${name}.out"
+			env "$@" MOCK_GOLDEN="${work}/${b}.golden" MOCK_GOLDEN_SIZE="${ww}x${wh}" MOCK_GOLDEN_IDR="${idrs}" \
+				MOCK_LOG="${work}/${b}.wedge-${name}.mock" "${work}/hevc-rpivid-check" -cpuref -l 2 -T 1 ${mode} "${wc}" >"${o}" 2>&1 || true
+			if grep -q 'ERROR: AddressSanitizer' "${o}"; then
+				echo "ASAN      ${b} wedge ${name}"; grep -A12 'ERROR: AddressSanitizer' "${o}" | head -20; exit 1
+			fi
+		}
+		# wcheck <name> <ok 0/1> <what>: one verdict line
+		wcheck() {
+			echo "LOOP-WEDGE ${b} $1: $([ "$2" = 1 ] && echo ok || echo BAD) -- $3"
+			[ "$2" = 1 ] || n_loop_bad=$((n_loop_bad + 1))
+		}
+		has() { grep -Eq -- "$2" "$1"; }
+		o="${work}/${b}.wedge" m="${work}/${b}.wedge"
+		bypts_ok='matched=[0-9]+ wrong=0 unmatched=0 dropped=[1-9][0-9]* hw_used=1 hw_fallback=1'
+
+		# 1. phase 2 of the 4th picture never finishes: recorded, clock off, nothing after
+		rm -f "${dead}"
+		wrun stop -bypts MOCK_WEDGE_AT=3
+		ok=1
+		has "${o}-stop.out" "${bypts_ok}" && has "${o}-stop.out" 'timeout in phase 2 .*not used again until reboot \(clock switched off\)' &&
+			has "${o}-stop.out" 'CPU decode: the block stopped responding earlier in this process' && has "${m}-stop.mock" '^MOCK clock off$' &&
+			! has "${m}-stop.mock" 'register access with the clock off' && has "${dead}" '^wedged pid=[0-9]+ t=[0-9]+ phase 2 timed out' || ok=0
+		wcheck stop "${ok}" "$(grep -o 'bypts hw_frames=[^ ]* .*' "${o}-stop.out" | cut -d' ' -f1-7); marker: $(cut -c1-60 "${dead}" 2>/dev/null)"
+
+		# 2. the next process: CPU decode at once, no mailbox call, no register access
+		wrun next ''
+		ok=1
+		has "${o}-next.out" 'CPU decode: the block stopped responding earlier in this boot' && has "${o}-next.out" 'verdict=BIT-EXACT .*hw_used=0' &&
+			! has "${m}-next.mock" '^(PIC |MOCK )' || ok=0
+		wcheck next "${ok}" "$(grep -o 'CPU decode: .\{0,60\}' "${o}-next.out" | head -1)"
+
+		# 3. FFMPEG_RPIVID_RESET=1: a clock off/on, the block decodes again, the marker goes
+		wrun reset '' FFMPEG_RPIVID_RESET=1
+		ok=1
+		has "${o}-reset.out" 'clock switched off and on' && has "${o}-reset.out" 'works again after the clock reset' &&
+			has "${o}-reset.out" 'verdict=BIT-EXACT .*hw_used=1 hw_fallback=0' && [ ! -e "${dead}" ] &&
+			[ "$(grep -c '^MOCK clock' "${m}-reset.mock")" = 2 ] && ! has "${m}-reset.mock" 'register access with the clock off' || ok=0
+		wcheck reset "${ok}" "$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]*' "${o}-reset.out"); marker $([ -e "${dead}" ] && echo kept || echo removed)"
+
+		# 4. a reset that does not help: still recorded, as tried
+		echo "wedged pid=1 t=0 (the host test)" >"${dead}"
+		wrun resetfail -bypts FFMPEG_RPIVID_RESET=1 MOCK_WEDGE_AT=0
+		ok=1
+		has "${o}-resetfail.out" "${bypts_ok}" && has "${dead}" '^reset-tried .*after a clock reset' || ok=0
+		wcheck resetfail "${ok}" "marker: $(cut -c1-80 "${dead}" 2>/dev/null)"
+
+		# 5. and is not tried again
+		wrun once '' FFMPEG_RPIVID_RESET=1
+		ok=1
+		has "${o}-once.out" 'CPU decode: the block stopped responding earlier in this boot' && ! has "${o}-once.out" 'FFMPEG_RPIVID_RESET=1 tries' &&
+			! has "${m}-once.mock" '^(PIC |MOCK )' || ok=0
+		wcheck once "${ok}" "$(grep -o 'CPU decode: .\{0,60\}' "${o}-once.out" | head -1)"
+
+		# 6. a marker from an earlier boot (a later time than now) is ignored and removed
+		echo "wedged pid=1 t=999999999999 (an earlier boot)" >"${dead}"
+		wrun oldboot ''
+		ok=1
+		has "${o}-oldboot.out" 'verdict=BIT-EXACT .*hw_used=1 hw_fallback=0' && [ ! -e "${dead}" ] || ok=0
+		wcheck oldboot "${ok}" "$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]*' "${o}-oldboot.out")"
+
+		# 7. zero copy with the picture buffer beyond the block's reach: system-memory frames,
+		# still from the block
+		zs="$(grep -o 'column height [0-9]*, [0-9]* bytes per picture' "${work}/${b}.zc1.out" | head -1 | awk '{ print $4 }')"
+		if [ -n "${zs}" ]; then
+			wrun reach -zc MOCK_PA_HIGH_SIZE=$(( (zs + 4095) / 4096 * 4096 ))
+			ok=1
+			has "${o}-reach.out" "drm_prime output: no contiguous memory the block reaches .*: system-memory frames for this stream" &&
+				has "${o}-reach.out" 'verdict=BIT-EXACT .*hw_used=1 hw_fallback=0' && has "${o}-reach.out" 'zc frames=[0-9]+ drm_prime=0 ' || ok=0
+			wcheck reach "${ok}" "$(grep -o 'drm_prime output: .\{0,70\}' "${o}-reach.out" | head -1)"
+		else
+			wcheck reach 0 "no zero-copy size in ${b}.zc1.out"
+		fi
+		rm -f "${dead}"
+	fi
 	echo "RESULT loop_bad=${n_loop_bad}"
 fi
 [ "${n_diff}" = 0 ] && [ "${n_loop_bad}" = 0 ]

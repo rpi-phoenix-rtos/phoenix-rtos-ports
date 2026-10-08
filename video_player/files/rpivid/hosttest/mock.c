@@ -12,7 +12,9 @@
  * allocation; this is how the FFmpeg hwaccel is held to the HW-proven reference
  * player (tools/hevc-decode/hevc-m2.c).
  *
- * Environment: MOCK_LOG=<file> (the log; default stdout), MOCK_FAIL_AT=<n> (picture n
+ * Environment: MOCK_ISR_RACE=1 (an interrupt handler is registered, and it runs inside the
+ * waiter's read of the interrupt controller each time that read sees a completion: both observe
+ * the same completion, the race that left a stale phase-2 completion on the Pi), MOCK_LOG=<file> (the log; default stdout), MOCK_FAIL_AT=<n> (picture n
  * fails phase 1: CFSTATUS != CFNUM), MOCK_GOLDEN=<file> (phase 2 "decodes" picture POC p
  * by writing frame p of this raw yuv420p / yuv420p10le file, display order, into the
  * output buffers in the block's SAND layout: then the decoder's output path -- de-tiling,
@@ -23,6 +25,12 @@
  * indices of the stream's IDR pictures, in order -- the n-th POC 0 the block decodes is the n-th
  * of them -- for decoders that skip pictures (pictures dropped after leaving the block): else
  * the display index base of an IDR is the number of pictures the block decoded before it).
+ * MOCK_WEDGE_AT=<n>: from picture n on the block stops responding as it did on the Pi --
+ * phase 1 still completes, phase 2 never does -- until its clock is switched off and on with
+ * MOCK_WEDGE_RESET=1 set; the mailbox's clock switching is logged ("MOCK clock off/on"), and so
+ * is any register access while the clock is off. MOCK_PA_HIGH_SIZE=<bytes>: contiguous memory
+ * of that size gets bus addresses above 16 GiB (beyond the block's reach). MOCK_DEAD_PATH: the
+ * file rpivid_hw.c keeps the block's cross-process state in (rpivid_dead_path()).
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -56,7 +64,7 @@ typedef struct {
 
 static blk_t blks[4096];
 static int nblks;
-static uint64_t next_pa = 0x10000000u;
+static uint64_t next_pa = 0x10000000u, next_high_pa = 0x400000000ull;
 static pthread_mutex_t memlock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint8_t regs[RPIVID_HEVC_SIZE] __attribute__((aligned(64)));
@@ -90,11 +98,17 @@ void *mock_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
 		free(p);
 		return MAP_FAILED;
 	}
-	blks[nblks].pa = next_pa;
 	blks[nblks].cpu = p;
 	blks[nblks].size = len;
+	if ((getenv("MOCK_PA_HIGH_SIZE") != NULL) && ((size_t)atoll(getenv("MOCK_PA_HIGH_SIZE")) == len)) {
+		blks[nblks].pa = next_high_pa;
+		next_high_pa += (len + 4095u) & ~(size_t)4095u;
+	}
+	else {
+		blks[nblks].pa = next_pa;
+		next_pa += (len + 4095u) & ~(size_t)4095u;
+	}
 	nblks++;
-	next_pa += (len + 4095u) & ~(size_t)4095u;
 	pthread_mutex_unlock(&memlock);
 	return p;
 }
@@ -157,6 +171,18 @@ static uint8_t *pa2va(uint64_t pa, size_t len)
 
 /* ---- the rest of the platform ---- */
 
+static FILE *lg(void);
+static int clock_off_now, wedged;
+
+
+const char *rpivid_dead_path(void);
+const char *rpivid_dead_path(void)
+{
+	const char *p = getenv("MOCK_DEAD_PATH");
+
+	return (p != NULL) ? p : "rpivid-hosttest.dead";
+}
+
 int lookup(const char *name, oid_t *file, oid_t *dev)
 {
 	(void)name;
@@ -177,6 +203,27 @@ int msgSend(uint32_t port, msg_t *m)
 	uint32_t *out = (uint32_t *)(void *)m->o.raw;
 
 	(void)port;
+	if (((const uint32_t *)(const void *)m->i.raw)[0] == 0x00038001u) {
+		/* VC_SET_CLOCK_STATE: in[0] the clock, in[1] on/off */
+		uint32_t on = ((const uint32_t *)(const void *)m->i.raw)[4];
+
+		/* only the switching off and back on: the register logs compare against the
+		 * reference player, which switches the clock on through libvcmbox */
+		if (!on) {
+			fprintf(lg(), "MOCK clock off\n");
+			fflush(lg());
+			clock_off_now = 1;
+		}
+		else if (clock_off_now) {
+			fprintf(lg(), "MOCK clock on\n");
+			fflush(lg());
+			clock_off_now = 0;
+			if (wedged && (getenv("MOCK_WEDGE_RESET") != NULL)) {
+				fprintf(lg(), "MOCK the clock off/on reset the block\n");
+				wedged = 0;
+			}
+		}
+	}
 	/* vcmbox response: err 0, two words, word 1 a 500 MHz clock / "on" state */
 	out[0] = 0;
 	out[1] = 2;
@@ -201,13 +248,20 @@ int vcmbox_call(uint32_t tag, uint32_t valBufSize, const uint32_t *in, uint32_t 
 }
 
 
+static int (*isr_fn)(unsigned int, void *);
+static int in_isr;
+
+
 int interrupt(unsigned int n, int (*f)(unsigned int, void *), void *arg, handle_t queue, handle_t *handle)
 {
 	(void)n;
-	(void)f;
 	(void)arg;
 	(void)queue;
-	(void)handle;
+	if (getenv("MOCK_ISR_RACE") != NULL) {
+		isr_fn = f;
+		*handle = 3;
+		return 0;
+	}
 	return -ENOSYS; /* the decoders poll the interrupt controller instead */
 }
 
@@ -267,7 +321,7 @@ int resourceDestroy(handle_t h)
 
 static FILE *logf_;
 static long pic_no;
-static long fail_at = -1;
+static long fail_at = -1, wedge_at = -1;
 static int failing;
 static FILE *golden;
 
@@ -297,6 +351,9 @@ static FILE *lg(void)
 		}
 		if (f != NULL) {
 			fail_at = atol(f);
+		}
+		if ((f = getenv("MOCK_WEDGE_AT")) != NULL) {
+			wedge_at = atol(f);
 		}
 		if ((f = getenv("MOCK_GOLDEN")) != NULL) {
 			golden = fopen(f, "rb");
@@ -506,10 +563,27 @@ static void phase2(void)
 }
 
 
+static void clock_check(const char *what, uint32_t off)
+{
+	if (clock_off_now) {
+		fprintf(lg(), "MOCK register access with the clock off: %s 0x%x\n", what, off);
+	}
+}
+
+
 static uint32_t mmio_rd(const volatile uint8_t *base, uint32_t off)
 {
+	clock_check("read", off);
 	if (base == intc) {
-		return (off == ARG_IC_ICTRL) ? ictrl : 0u;
+		uint32_t v = (off == ARG_IC_ICTRL) ? ictrl : 0u;
+
+		if ((off == ARG_IC_ICTRL) && (isr_fn != NULL) && !in_isr && ((v & (ACTIVE1_INT_SET | ACTIVE2_INT_SET)) != 0u)) {
+			/* the handler runs between this read and the waiter's use of it */
+			in_isr = 1;
+			(void)isr_fn(0, NULL);
+			in_isr = 0;
+		}
+		return v;
 	}
 	if (off == RPI_VERSION) {
 		return RPIVID_EXPECT_VER;
@@ -523,6 +597,7 @@ static uint32_t mmio_rd(const volatile uint8_t *base, uint32_t off)
 
 static void mmio_wr(volatile uint8_t *base, uint32_t off, uint32_t v)
 {
+	clock_check("write", off);
 	if (base == intc) {
 		if (off == ARG_IC_ICTRL) {
 			ictrl &= ~(v & (ACTIVE1_INT_SET | ACTIVE2_INT_SET));
@@ -544,6 +619,14 @@ static void mmio_wr(volatile uint8_t *base, uint32_t off, uint32_t v)
 		}
 	}
 	else if (off == RPI_NUMROWS) {
+		if (!wedged && (wedge_at >= 0) && (pic_no >= wedge_at)) {
+			fprintf(lg(), "MOCK picture %ld: phase 2 never finishes (the block stops responding)\n", pic_no);
+			wedged = 1;
+			wedge_at = -1;
+		}
+		if (wedged) {
+			return;
+		}
 		phase2();
 		ictrl |= ACTIVE2_INT_SET;
 	}

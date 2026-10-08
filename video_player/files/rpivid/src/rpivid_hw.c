@@ -60,6 +60,9 @@ void rpivid_dma_fence(void)
 #define VC_CLK_HEVC           11u
 
 #define RPIVID_LOCK_PATH "/tmp/.rpivid.lock"
+#ifndef RPIVID_DEAD_PATH
+#define RPIVID_DEAD_PATH "/tmp/.rpivid.dead"   /* the host test names its own */
+#endif
 
 #define P1_TIMEOUT_MS 1000
 #define P2_TIMEOUT_MS 2000
@@ -88,6 +91,8 @@ struct rpivid_hw {
 	int have_irq;
 	rpivid_dma_t cmd, pu, coeff;
 	size_t pu_size, coeff_size;    /* the sizes asked for: the strides derive from these */
+	int resetting;                 /* the block is tried again after it stopped responding */
+	char note[256];
 };
 
 /* one owner per process: the interrupt handler finds the block through this */
@@ -166,6 +171,18 @@ static int vcmbox(uint32_t tag, const uint32_t *in, uint32_t nin, uint32_t *out,
 }
 
 
+/* Switch the HEVC clock off: a block that stopped responding then cannot finish a transfer
+ * into memory freed after this (Linux gates the same clock whenever the block is idle) */
+static int clock_off(void)
+{
+	uint32_t in[2], out[2] = { 0, 0 };
+
+	in[0] = VC_CLK_HEVC;
+	in[1] = 0;
+	return (vcmbox(VC_SET_CLOCK_STATE, in, 2, out, 2) < 0) ? -EIO : 0;
+}
+
+
 /* The HEVC clock at the firmware's maximum */
 static int clock_on(uint32_t *rate)
 {
@@ -214,10 +231,40 @@ static int hw_isr(unsigned int n, void *arg)
 	ic = rd(intc, ARG_IC_ICTRL);
 	a = ic & (ACTIVE1_INT_SET | ACTIVE2_INT_SET);
 	if (a != 0u) {
-		irq_active |= a;
+		__atomic_fetch_or(&irq_active, a, __ATOMIC_SEQ_CST);
 		wr(intc, ARG_IC_ICTRL, ic & ~SET_ZERO_MASK);
 	}
 	return 1;
+}
+
+
+/* One completion, two observers: the interrupt handler and the waiter (which also polls the
+ * controller) can both see it, and the handler's mark can land after the waiter consumed the
+ * completion. Left there, it would end the next wait of that phase at once, before the block
+ * finished -- the output read while being written, and the next phase started on a busy block
+ * (which then stops responding). So before a phase starts, a completion of it that is already
+ * pending is the previous one's: forgotten. 1 if there was one. */
+static int clear_stale(rpivid_hw_t *hw, uint32_t bit)
+{
+	uint32_t ic;
+	int stale = 0;
+
+	if (hw->have_irq) {
+		mutexLock(hw->irq_mtx);
+	}
+	if ((__atomic_fetch_and(&irq_active, ~bit, __ATOMIC_SEQ_CST) & bit) != 0u) {
+		stale = 1;
+	}
+	ic = rd(hw->intc, ARG_IC_ICTRL);
+	if ((ic & bit) != 0u) {
+		/* write-1-to-clear this phase's bit only; the enables written back as read */
+		wr(hw->intc, ARG_IC_ICTRL, (ic & ~SET_ZERO_MASK & ~(ACTIVE1_INT_SET | ACTIVE2_INT_SET)) | bit);
+		stale = 1;
+	}
+	if (hw->have_irq) {
+		mutexUnlock(hw->irq_mtx);
+	}
+	return stale;
 }
 
 
@@ -232,14 +279,15 @@ static int wait_active(rpivid_hw_t *hw, uint32_t bit, int timeout_ms)
 		mutexLock(hw->irq_mtx);
 	}
 	for (;;) {
-		if ((irq_active & bit) != 0u) {
-			irq_active &= ~bit;
+		if ((__atomic_fetch_and(&irq_active, ~bit, __ATOMIC_SEQ_CST) & bit) != 0u) {
 			rc = 0;
 			break;
 		}
 		ic = rd(hw->intc, ARG_IC_ICTRL);
 		if ((ic & bit) != 0u) {
 			wr(hw->intc, ARG_IC_ICTRL, ic & ~SET_ZERO_MASK);
+			/* the handler may have marked the same completion meanwhile */
+			__atomic_fetch_and(&irq_active, ~bit, __ATOMIC_SEQ_CST);
 			rc = 0;
 			break;
 		}
@@ -292,6 +340,101 @@ static int take_lock(char *why, size_t whylen)
 }
 
 
+/* ---- the block's state across processes, for this boot ---- */
+
+/* The marker RPIVID_DEAD_PATH holds one line, "<state> pid=<pid> t=<ms since boot> <what>":
+ * state "wedged" (a phase timed out) or "reset-tried" (an open switched the clock off and on
+ * to try the block again; a success removes the marker, so a "reset-tried" left behind means
+ * the try failed or its process died during it). 0: none, 1: wedged, 2: reset-tried. */
+static int dead_read(char *line, size_t len)
+{
+	unsigned long long t;
+	const char *p;
+	ssize_t n;
+	int fd = open(RPIVID_DEAD_PATH, O_RDONLY);
+
+	line[0] = '\0';
+	if (fd < 0) {
+		return 0;
+	}
+	n = read(fd, line, len - 1u);
+	close(fd);
+	if (n < 0) {
+		n = 0;
+	}
+	while ((n > 0) && ((line[n - 1] == '\n') || (line[n - 1] == '\r'))) {
+		n--;
+	}
+	line[n] = '\0';
+	/* the monotonic clock starts at boot: a later time is a previous boot's (a /tmp that is
+	 * not the RAM file system the system images make) */
+	p = strstr(line, " t=");
+	if ((p != NULL) && (sscanf(p + 3, "%llu", &t) == 1) && (t > now_ns() / 1000000u)) {
+		(void)unlink(RPIVID_DEAD_PATH);
+		line[0] = '\0';
+		return 0;
+	}
+	/* an empty or unreadable marker (its writer died) counts as "wedged" */
+	return (strncmp(line, "reset-tried", 11) == 0) ? 2 : 1;
+}
+
+
+static void dead_write(const char *state, const char *what)
+{
+	char line[256];
+	ssize_t w;
+	int n, fd = open(RPIVID_DEAD_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+
+	if (fd < 0) {
+		return;
+	}
+	n = snprintf(line, sizeof(line), "%s pid=%d t=%llu %s\n", state, (int)getpid(), (unsigned long long)(now_ns() / 1000000u), what);
+	if (n > 0) {
+		w = write(fd, line, ((size_t)n < sizeof(line)) ? (size_t)n : sizeof(line) - 1u);
+		(void)w;
+	}
+	close(fd);
+}
+
+
+/* A phase did not finish: the block is not used again, by this process or (the marker) any
+ * other, and its clock goes off. Its registers are read for the log first (a block in this
+ * state answered register reads on the Pi). */
+static int block_dead(rpivid_hw_t *hw, uint32_t phase, rpivid_hw_stat_t *st)
+{
+	char what[160];
+
+	hw_wedged = 1;
+	st->timeout_phase = phase;
+	st->cfstatus = rd(hw->regs, RPI_CFSTATUS);
+	st->cfnum = rd(hw->regs, RPI_CFNUM);
+	st->status = rd(hw->regs, RPI_STATUS);
+	snprintf(what, sizeof(what), "phase %u timed out (CFSTATUS %u CFNUM %u STATUS 0x%x)%s", phase, st->cfstatus, st->cfnum, st->status,
+		hw->resetting ? " after a clock reset" : "");
+	dead_write(hw->resetting ? "reset-tried" : "wedged", what);
+	/* nothing pending and the handler detached before the clock goes: it must not read the
+	 * controller of a block without a clock */
+	(void)clear_stale(hw, ACTIVE1_INT_SET);
+	(void)clear_stale(hw, ACTIVE2_INT_SET);
+	isr_intc = NULL;
+	rpivid_dma_fence();
+	st->clock_off = (clock_off() == 0) ? 1u : 0u;
+	return -ETIMEDOUT;
+}
+
+
+int rpivid_hw_dead(void)
+{
+	return hw_wedged;
+}
+
+
+const char *rpivid_hw_note(const rpivid_hw_t *hw)
+{
+	return hw->note;
+}
+
+
 uint32_t rpivid_hw_clock(const rpivid_hw_t *hw)
 {
 	return hw->clock;
@@ -316,8 +459,14 @@ static int dma_map(rpivid_dma_t *d, size_t size, int flags)
 		return -ENOMEM;
 	}
 	memset(p, 0, size);
-	d->cpu = p;
 	d->pa = (uint64_t)va2pa(p);
+	if ((d->pa == 0u) || (d->pa + size > RPIVID_DMA_LIMIT)) {
+		/* not the block's to reach (a guard: a Pi 4 has no RAM there) */
+		munmap(p, size);
+		memset(d, 0, sizeof(*d));
+		return -ENOMEM;
+	}
+	d->cpu = p;
 	d->size = size;
 	return 0;
 }
@@ -385,7 +534,9 @@ int rpivid_dma_alloc(rpivid_dma_t *d, size_t size)
 
 void rpivid_dma_free(rpivid_dma_t *d)
 {
-	if (d->cpu != NULL) {
+	/* after the block stopped responding it may still hold any of these: left mapped (this
+	 * happens once per boot, the block is not used again) */
+	if ((d->cpu != NULL) && !hw_wedged) {
 		munmap(d->cpu, d->size);
 	}
 	memset(d, 0, sizeof(*d));
@@ -421,7 +572,9 @@ int rpivid_hw_open(rpivid_hw_t **out, char *why, size_t whylen)
 {
 	rpivid_hw_t *hw;
 	uint32_t ver;
-	int rc;
+	char line[256];
+	const char *e;
+	int rc, dead;
 
 	*out = NULL;
 	snprintf(why, whylen, "unknown");
@@ -446,6 +599,26 @@ int rpivid_hw_open(rpivid_hw_t **out, char *why, size_t whylen)
 		hw->lockfd = -1;
 		rc = -EBUSY;
 		goto fail;
+	}
+
+	/* a block that stopped responding is left alone: no mailbox call, no register access */
+	dead = dead_read(line, sizeof(line));
+	if (dead != 0) {
+		e = getenv("FFMPEG_RPIVID_RESET");
+		if ((dead == 1) && (e != NULL) && (e[0] == '1')) {
+			/* one try per boot: recorded before it starts */
+			dead_write("reset-tried", "(trying the block again after a clock off/on)");
+			(void)clock_off();
+			usleep(1000);
+			hw->resetting = 1;
+			snprintf(hw->note, sizeof(hw->note), "clock switched off and on to try the block again (FFMPEG_RPIVID_RESET; it had stopped responding: %.80s)", line);
+		}
+		else {
+			snprintf(why, whylen, "the block stopped responding earlier in this boot and is not used again (%s: %.110s)%s", RPIVID_DEAD_PATH, line,
+				(dead == 1) ? "; FFMPEG_RPIVID_RESET=1 tries it once more" : "");
+			rc = -EIO;
+			goto fail;
+		}
 	}
 
 	rc = clock_on(&hw->clock);
@@ -590,11 +763,11 @@ int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *s
 		wr(hw->regs, RPI_COEFFWBASE, RPI_VC_ADDR(hw->coeff.pa));
 		wr(hw->regs, RPI_COEFFWSTRIDE, RPI_VC_LEN(coeff_stride));
 		wr(hw->regs, RPI_CFNUM, j->cmd_len);
+		st->stale += (uint32_t)clear_stale(hw, ACTIVE1_INT_SET);
 		wr(hw->regs, RPI_CFBASE, RPI_VC_ADDR(hw->cmd.pa));
 		if (wait_active(hw, ACTIVE1_INT_SET, P1_TIMEOUT_MS) < 0) {
-			hw_wedged = 1;
 			st->p1_runs = (uint32_t)runs;
-			return -ETIMEDOUT;
+			return block_dead(hw, 1, st);
 		}
 		st->cfstatus = rd(hw->regs, RPI_CFSTATUS);
 		st->cfnum = rd(hw->regs, RPI_CFNUM);
@@ -642,12 +815,17 @@ int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *s
 	wr(hw->regs, RPI_MVBASE, RPI_VC_ADDR(j->mv));
 	wr(hw->regs, RPI_COLBASE, RPI_VC_ADDR(j->col));
 	rpivid_dma_fence();
+	st->stale += (uint32_t)clear_stale(hw, ACTIVE2_INT_SET);
 	wr(hw->regs, RPI_NUMROWS, j->ctb_rows);
 	if (wait_active(hw, ACTIVE2_INT_SET, P2_TIMEOUT_MS) < 0) {
-		hw_wedged = 1;
-		return -ETIMEDOUT;
+		return block_dead(hw, 2, st);
 	}
 	st->p2_ns = now_ns() - t1;
+	if (hw->resetting) {
+		/* the try after a clock reset worked: the block is usable again */
+		hw->resetting = 0;
+		(void)unlink(RPIVID_DEAD_PATH);
+	}
 	return 0;
 }
 
@@ -682,6 +860,19 @@ uint32_t rpivid_hw_clock(const rpivid_hw_t *hw)
 int rpivid_hw_irq(const rpivid_hw_t *hw)
 {
 	(void)hw;
+	return 0;
+}
+
+
+const char *rpivid_hw_note(const rpivid_hw_t *hw)
+{
+	(void)hw;
+	return "";
+}
+
+
+int rpivid_hw_dead(void)
+{
 	return 0;
 }
 
