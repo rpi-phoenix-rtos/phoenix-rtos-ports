@@ -35,6 +35,7 @@
 	#   files/launcher/               the program: role dispatch, desktop defaults, downloads,
 	#                                 MiniBrowser's window sources
 	#   files/share/                  the .desktop entry, the start page
+	#   files/checks/                 the B10 gate page (USE checks)
 	#   files/cmake/, files/compat/   symlinks to webkit_wpe's
 	#
 	# The build is as big as webkit_wpe's (~2900 objects; 50 min to ~2 h at -j8 cold) and ccache
@@ -65,7 +66,9 @@
 	# jit webgl video mse release_log: as webkit_wpe's (JavaScriptCore's JIT tiers, WebGL through
 	#      ANGLE, <video>/<audio> over FFmpeg with HEVC on rpivid, Media Source Extensions, WebKit's
 	#      RELEASE_LOG). Each toggles a near-full WebKit rebuild.
-	iuse="rootfs jit release_log webgl video mse"
+	# checks: also stage the B10 gate page, /usr/share/webkit-browser/checks/b10.html (drop-downs,
+	#      pickers, dialogs, a self-contained 1 MiB download).
+	iuse="rootfs checks jit release_log webgl video mse"
 
 	supports="phoenix>=3.3"
 }
@@ -77,6 +80,7 @@
 #     /usr/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so   dlopen()ed by every WebProcess
 #     /usr/share/applications/webkit-browser.desktop                       XFCE menu: Internet
 #     /usr/share/webkit-browser/start.html                                 the start page
+#     USE checks: /usr/share/webkit-browser/checks/b10.html                the B10 gate page
 #   SHA256SUMS
 #
 # Host tools: as webkit_wpe.
@@ -146,11 +150,14 @@ p_build() {
 		"${ST}/usr/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so"
 	install -D -m 644 "${S}/webkit-browser.desktop" "${ST}/usr/share/applications/webkit-browser.desktop"
 	install -D -m 644 "${S}/start.html" "${ST}/usr/share/webkit-browser/start.html"
+	if b_use checks; then
+		install -D -m 644 "${F}/checks/b10.html" "${ST}/usr/share/webkit-browser/checks/b10.html"
+	fi
 
 	# what the stage must hold: the program with its log lines and export table, the bundle
 	local bad=0 s
 	for s in 'WKGB t=%.0f %s' 'download finished uri=%s' 'ui window shown gdk_gl=%s' 'WPEB-WEBKIT swap-chain pid=%d' \
-		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL'; do
+		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL' 'gdk-gl ok use_es=%d version=%d.%d' 'egl-probe platform_wayland=%d'; do
 		grep -qaF "${s}" "${ST}/usr/bin/webkit-browser" || { echo "webkit_gtk: webkit-browser lacks '${s}'"; bad=1; }
 	done
 	"${TC}-readelf" -dW "${ST}/usr/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so" | grep -q '(HASH)' ||
