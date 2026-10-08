@@ -37,7 +37,8 @@
  * "web-process-terminated ...", and "role=web|network pid=..." from the children. The web
  * process's own "WPEB-WEBKIT swap-chain ... type=texture-dmabuf|shm" line (shared patch 0016)
  * says which frame transport it took; GTK's "Disabled hardware acceleration because GTK failed
- * to initialize GL" says GDK has no GL (then everything runs on the CPU).
+ * to initialize GL" says GDK has no GL (then everything runs on the CPU). "WKGB gdk-gl ok|failed"
+ * is this program's own check of GDK's GL on the browser window (see logGdkGL()).
  *
  * Copyright 2026 Phoenix Systems
  * SPDX-License-Identifier: BSD-3-Clause
@@ -56,6 +57,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <epoxy/egl.h>
+#include <gdk/gdkwayland.h>
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 
@@ -355,6 +358,56 @@ static gboolean firstLoadTimeout(gpointer)
     return G_SOURCE_REMOVE;
 }
 
+/*
+ * The GL check of the gate (B10 G0): whether GDK gives this window an EGL context, as WebKit's
+ * hardware acceleration needs (AcceleratedBackingStore::canUseHardwareAcceleration). One line:
+ *   WKGB gdk-gl ok use_es=1 version=3.1
+ *   WKGB gdk-gl failed error=<GDK's message>
+ * and when it failed, the same steps as GDK's gdk_wayland_display_init_gl() on GDK's own
+ * wl_display, each with its result and eglGetError(), to name the step:
+ *   WKGB egl-probe platform_wayland=<0|1> display=<0|1> initialize=<0|1> version=<M.m>
+ *        bind_es=<0|1> bind_gl=<0|1> create_context=<0|1> error=0x<hex> vendor=<...>
+ */
+static void probeEGL(GdkDisplay* display)
+{
+    struct wl_display* wlDisplay = gdk_wayland_display_get_wl_display(display);
+    const char* clientExtensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
+    bool platformWayland = clientExtensions && (strstr(clientExtensions, "EGL_KHR_platform_wayland") || strstr(clientExtensions, "EGL_EXT_platform_wayland"));
+    EGLDisplay eglDisplay = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, wlDisplay, nullptr);
+    EGLint error = eglGetError();
+    EGLint major = 0, minor = 0;
+    bool initialized = false, bindES = false, bindGL = false, createContext = false;
+    const char* vendor = "-";
+    if (eglDisplay != EGL_NO_DISPLAY) {
+        initialized = eglInitialize(eglDisplay, &major, &minor);
+        error = eglGetError();
+        if (initialized) {
+            vendor = eglQueryString(eglDisplay, EGL_VENDOR);
+            createContext = epoxy_has_egl_extension(eglDisplay, "EGL_KHR_create_context");
+            bindGL = eglBindAPI(EGL_OPENGL_API);
+            bindES = eglBindAPI(EGL_OPENGL_ES_API); /* last: GDK's GLES contexts expect this API */
+        }
+    }
+    LOG("egl-probe platform_wayland=%d display=%d initialize=%d version=%d.%d bind_es=%d bind_gl=%d create_context=%d error=0x%x vendor=%s",
+        platformWayland, eglDisplay != EGL_NO_DISPLAY, initialized, major, minor, bindES, bindGL, createContext, error, vendor ? vendor : "-");
+}
+
+static void logGdkGL(GtkWidget* window)
+{
+    GError* error = nullptr;
+    GdkGLContext* context = gdk_window_create_gl_context(gtk_widget_get_window(window), &error);
+    if (context && gdk_gl_context_realize(context, &error)) {
+        int major = 0, minor = 0;
+        gdk_gl_context_get_version(context, &major, &minor);
+        LOG("gdk-gl ok use_es=%d version=%d.%d", gdk_gl_context_get_use_es(context), major, minor);
+    } else {
+        LOG("gdk-gl failed error=%s", error ? error->message : "?");
+        probeEGL(gtk_widget_get_display(window));
+    }
+    g_clear_error(&error);
+    g_clear_object(&context);
+}
+
 /* MiniBrowser's main.c sets the window's keys on the application; so do we */
 static void startup(GApplication* application)
 {
@@ -454,6 +507,7 @@ static void activate(GApplication* application, gpointer)
 
     gtk_widget_grab_focus(firstTab);
     gtk_widget_show(GTK_WIDGET(window));
+    logGdkGL(GTK_WIDGET(window));
     LOG("ui window shown gdk_gl=%s rendering=%s", g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop", optCPURendering ? "cpu" : "gpu");
 }
 
@@ -486,8 +540,33 @@ static void findWaylandDisplay()
     }
 }
 
+static bool argumentGiven(int argc, char** argv, const char* option)
+{
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--"))
+            break;
+        if (!strcmp(argv[i], option))
+            return true;
+    }
+    return false;
+}
+
 static int uiMain(int argc, char** argv)
 {
+    /*
+     * Everything GDK reads from the environment is set BEFORE the options are parsed: GTK's option
+     * group runs gdk_pre_parse() as its pre-parse hook, and that is where GDK reads GDK_GL, once
+     * (build 65, B10 G0: GDK_GL set after the parse was never seen, GDK bound EGL_OPENGL_API on our
+     * GLES-only Mesa, and WebKit fell back to CPU rendering with "No GL implementation is
+     * available"). Host test: coordination repo tools/browser/webkitgtk/gdkgl-order.c.
+     */
+    findWaylandDisplay();
+    /* GDK 3 binds EGL_OPENGL_API unless GDK_GL=gles; our Mesa (wayland variant) has GLES only */
+    if (!argumentGiven(argc, argv, "--desktop-gl"))
+        g_setenv("GDK_GL", "gles", FALSE);
+    /* only Wayland exists here; say so before GDK looks for X11 or broadway */
+    gdk_set_allowed_backends("wayland");
+
     g_autoptr(GOptionContext) options = g_option_context_new(nullptr);
     g_option_context_add_main_entries(options, optionEntries, nullptr);
     g_option_context_add_group(options, gtk_get_option_group(FALSE));
@@ -497,12 +576,6 @@ static int uiMain(int argc, char** argv)
         return 1;
     }
 
-    findWaylandDisplay();
-    /* GDK 3 binds EGL_OPENGL_API unless GDK_GL=gles; our Mesa (wayland variant) has GLES only */
-    if (!optDesktopGL)
-        g_setenv("GDK_GL", "gles", FALSE);
-    /* only Wayland exists here; say so before GDK looks for X11 or broadway */
-    gdk_set_allowed_backends("wayland");
     applyProcessModel();
     LOG("ui start pid=%d executable=%s wayland=%s gdk_gl=%s", static_cast<int>(getpid()), getenv("WPE_PHOENIX_EXECUTABLE"),
         g_getenv("WAYLAND_DISPLAY"), g_getenv("GDK_GL") ? g_getenv("GDK_GL") : "desktop");

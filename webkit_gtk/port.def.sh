@@ -150,7 +150,7 @@ p_build() {
 	# what the stage must hold: the program with its log lines and export table, the bundle
 	local bad=0 s
 	for s in 'WKGB t=%.0f %s' 'download finished uri=%s' 'ui window shown gdk_gl=%s' 'WPEB-WEBKIT swap-chain pid=%d' \
-		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL'; do
+		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL' 'gdk-gl ok use_es=%d version=%d.%d' 'egl-probe platform_wayland=%d'; do
 		grep -qaF "${s}" "${ST}/usr/bin/webkit-browser" || { echo "webkit_gtk: webkit-browser lacks '${s}'"; bad=1; }
 	done
 	"${TC}-readelf" -dW "${ST}/usr/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so" | grep -q '(HASH)' ||
