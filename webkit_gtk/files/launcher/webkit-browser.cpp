@@ -42,12 +42,16 @@
  *                           report on). A few seconds' worth: the serial console carries ~30 such
  *                           lines a second
  *     --size=WxH            the window's size (default 1280x960)
- *     --frame-ahead         the web process renders the next frame while GTK paints this one
- *                           (WEBKIT_PHOENIX_FRAME_AHEAD=1, WebKit patch webkit-gtk/0106; off by
- *                           default: one image A/Bs both pacings)
- *     --opaque-frames       while the view is opaque, draw its frames without alpha, so GDK does
- *                           not upload and blend the window below the view every paint
- *                           (WEBKIT_PHOENIX_OPAQUE=1, WebKit patch webkit-gtk/0107; off by default)
+ *     --no-frame-ahead      GTK paints a frame before the web process renders the next one, as
+ *                           upstream. By default the web process renders the next frame while GTK
+ *                           paints this one (WEBKIT_PHOENIX_FRAME_AHEAD, WebKit patch
+ *                           webkit-gtk/0106): 1080p60 video 47 -> 61 % painted, MotionMark 1.6 -> 76
+ *     --no-opaque-frames    draw frames with alpha, as upstream. By default an opaque view's frames
+ *                           are drawn without alpha, so GDK does not upload and blend the window
+ *                           below the view every paint (WEBKIT_PHOENIX_OPAQUE, webkit-gtk/0107):
+ *                           draw 7 -> 0.9 ms. Both together: 1080p60 69 % painted (2026-10-09).
+ *                           WEBKIT_PHOENIX_FRAME_AHEAD=0 / WEBKIT_PHOENIX_OPAQUE=0 in the
+ *                           environment also turn them off; --frame-ahead / --opaque-frames force on
  *     --memory-limit=MB     the web processes' memory pressure handler (WebKit's periodic monitor)
  *                           measures against MB instead of min(RAM, 3 GB): it releases caches from
  *                           0.33 x MB (conservative) and harder from 0.5 x MB (strict)
@@ -116,7 +120,7 @@ static const char frameWatchEnv[] = "WKGB_FRAME_WATCH_SECS";
 /* --- log ------------------------------------------------------------------------------------ */
 
 /* bumped with every change a Pi gate depends on: printed in "ui start" */
-static const char launcherRevision[] = "b10-r5";
+static const char launcherRevision[] = "b10-r6";
 
 static double startMs;
 static char processRole[16] = "ui";
@@ -242,6 +246,8 @@ static char* optFrameTrace;
 static char* optSize;
 static gboolean optFrameAhead;
 static gboolean optOpaqueFrames;
+static gboolean optNoFrameAhead;
+static gboolean optNoOpaqueFrames;
 static int optMemoryLimitMB;
 static double optMemoryKill;
 static double optMemoryPollSecs;
@@ -270,6 +276,8 @@ static const GOptionEntry optionEntries[] = {
     { "size", 0, 0, G_OPTION_ARG_STRING, &optSize, "The window's size (default 1280x960)", "WxH" },
     { "frame-ahead", 0, 0, G_OPTION_ARG_NONE, &optFrameAhead, "Let the web process render the next frame while GTK paints this one", nullptr },
     { "opaque-frames", 0, 0, G_OPTION_ARG_NONE, &optOpaqueFrames, "Draw an opaque view's frames without alpha", nullptr },
+    { "no-frame-ahead", 0, 0, G_OPTION_ARG_NONE, &optNoFrameAhead, "GTK paints a frame before the web process renders the next (upstream pacing)", nullptr },
+    { "no-opaque-frames", 0, 0, G_OPTION_ARG_NONE, &optNoOpaqueFrames, "Draw frames with alpha (upstream)", nullptr },
     { "memory-limit", 0, 0, G_OPTION_ARG_INT, &optMemoryLimitMB, "The web processes' memory pressure handler measures against MB (default min(RAM, 3 GB))", "MB" },
     { "memory-kill", 0, 0, G_OPTION_ARG_DOUBLE, &optMemoryKill, "Terminate a web process above F x the memory limit (F > 0.5; default 0, never)", "F" },
     { "memory-poll-secs", 0, 0, G_OPTION_ARG_DOUBLE, &optMemoryPollSecs, "How often the memory pressure handler measures (default 30)", "S" },
@@ -908,10 +916,15 @@ static int uiMain(int argc, char** argv)
 
     applyProcessModel();
     /* read by each view's AcceleratedBackingStore (webkit-gtk/0106, 0107), created after this */
-    if (optFrameAhead)
-        g_setenv("WEBKIT_PHOENIX_FRAME_AHEAD", "1", TRUE);
-    if (optOpaqueFrames)
-        g_setenv("WEBKIT_PHOENIX_OPAQUE", "1", TRUE);
+    /* On by default; an explicit option wins over the environment, the environment over the default */
+    if (optNoFrameAhead || optFrameAhead)
+        g_setenv("WEBKIT_PHOENIX_FRAME_AHEAD", optNoFrameAhead ? "0" : "1", TRUE);
+    else
+        g_setenv("WEBKIT_PHOENIX_FRAME_AHEAD", "1", FALSE);
+    if (optNoOpaqueFrames || optOpaqueFrames)
+        g_setenv("WEBKIT_PHOENIX_OPAQUE", optNoOpaqueFrames ? "0" : "1", TRUE);
+    else
+        g_setenv("WEBKIT_PHOENIX_OPAQUE", "1", FALSE);
     if (optPresentStats > 0) {
         /* for the web processes (orphanWatchdog()); the network process ignores it */
         g_autofree char* secs = g_strdup_printf("%d", optPresentStats);

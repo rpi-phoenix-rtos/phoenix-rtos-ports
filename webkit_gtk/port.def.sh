@@ -166,7 +166,7 @@ p_build() {
 	# what the stage must hold: the program with its log lines and export table, the bundle
 	local bad=0 s
 	for s in 'WKGB t=%.0f %s' 'download finished uri=%s' 'ui window shown gdk_gl=%s' 'WPEB-WEBKIT swap-chain pid=%d' \
-		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL' 'gdk-gl ok use_es=%d version=%d.%d' 'egl-probe platform_wayland=%d' 'egl-early wayland=1 client_ext=' 'b10-r5' \
+		'WPEB-WEBKIT process-model' 'Disabled hardware acceleration because GTK failed to initialize GL' 'gdk-gl ok use_es=%d version=%d.%d' 'egl-probe platform_wayland=%d' 'egl-early wayland=1 client_ext=' 'b10-r6' \
 		'gtk-paint %s' 'frame-watch-web pid=%d' 'frame-watch-ui %s' 'WPEB-WEBKIT gtk-paint import pid=%d' 'WPEB-WEBKIT frame-pacing pid=%d ahead=%d opaque=%d'; do
 		grep -qaF "${s}" "${ST}/usr/bin/webkit-browser" || { echo "webkit_gtk: webkit-browser lacks '${s}'"; bad=1; }
 	done
