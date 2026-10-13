@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Log Out
+Comment=End the desktop session and return to the psh prompt
+Exec=/usr/lib/xfce-session/bin/loginctl terminate-session
+Icon=system-log-out
+Terminal=false
+Categories=System;

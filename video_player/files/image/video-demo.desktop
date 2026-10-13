@@ -7,3 +7,4 @@ Exec=/usr/bin/gtk-video /usr/share/video-demo/h264-720p30-aac.mp4
 Icon=video-x-generic
 Terminal=false
 Categories=AudioVideo;Video;Player;
+NoDisplay=true

@@ -31,6 +31,10 @@
     <keybind key="Super_L" onRelease="yes">
       <action name="Execute" command="/bin/xfce4-appfinder" />
     </keybind>
+    <keybind key="C-A-Delete">
+      <!-- Log Out: the session's loginctl stand-in ends the session (back to psh) -->
+      <action name="Execute" command="/usr/lib/xfce-session/bin/loginctl terminate-session" />
+    </keybind>
     <keybind key="W-Return">
       <action name="Execute" command="/bin/foot" />
     </keybind>

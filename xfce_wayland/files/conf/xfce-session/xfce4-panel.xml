@@ -12,9 +12,9 @@
   wlr-foreign-toplevel); a spacer; the memory in use (the memory plugin of patches/xfce4-panel/
   0003: used/total GB, green/yellow/red, a MEMMON line on the console every 30 s); the clock
   (GLib's local time: the session's TZ); and
-  Log Out (the actions plugin: without a session manager on the bus it runs
+  Log Out (a launcher of /usr/share/xfce-session/applications/logout.desktop, which runs
   `loginctl terminate-session`, the session's stand-in in /usr/lib/xfce-session/bin, which
-  ends the session in order). configver = XFCE4_PANEL_CONFIG_VERSION (2): no migrate helper.
+  ends the session in order; also in the menu and on Ctrl+Alt+Delete). configver = XFCE4_PANEL_CONFIG_VERSION (2): no migrate helper.
 -->
 <channel name="xfce4-panel" version="1.0">
   <property name="configver" type="int" value="2"/>
@@ -87,21 +87,11 @@
     <property name="plugin-10" type="string" value="separator">
       <property name="style" type="uint" value="1"/>
     </property>
-    <property name="plugin-11" type="string" value="actions">
-      <property name="appearance" type="uint" value="0"/>
-      <property name="ask-confirmation" type="bool" value="true"/>
+    <property name="plugin-11" type="string" value="launcher">
+      <!-- Log Out as a plain launcher (owner 2026-10-13: the actions plugin's Log Out did
+           nothing when clicked): one click runs the session's loginctl stand-in, no dialog -->
       <property name="items" type="array">
-        <value type="string" value="-lock-screen"/>
-        <value type="string" value="-switch-user"/>
-        <value type="string" value="-separator"/>
-        <value type="string" value="-suspend"/>
-        <value type="string" value="-hibernate"/>
-        <value type="string" value="-hybrid-sleep"/>
-        <value type="string" value="-separator"/>
-        <value type="string" value="-shutdown"/>
-        <value type="string" value="-restart"/>
-        <value type="string" value="-separator"/>
-        <value type="string" value="+logout"/>
+        <value type="string" value="/usr/share/xfce-session/applications/logout.desktop"/>
       </property>
     </property>
   </property>
