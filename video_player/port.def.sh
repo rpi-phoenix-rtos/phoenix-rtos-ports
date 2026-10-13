@@ -390,7 +390,7 @@ p_build() {
 		local s syms bad=0 direct
 		syms="$("${NL_NM}" "${GV}")"
 		for s in main gtk_init gtk_window_fullscreen gdk_wayland_display_get_type avformat_open_input ff_h264_decoder \
-				ff_hevc_decoder ff_hevc_rpivid_decoder ff_aac_decoder sws_scale_frame swr_convert __wrap_pthread_create __wrap_close; do
+				ff_hevc_decoder ff_hevc_rpivid_decoder ff_aac_decoder sws_scale swr_convert __wrap_pthread_create __wrap_close; do
 			grep -qE " [TtWwDdRr] ${s}\$" <<<"${syms}" || { echo "video_player: gtk-video: symbol ${s}: NO"; bad=1; }
 		done
 		for s in 'GTK-VIDEO stat t=' 'GTK_VIDEO_AUTOKEYS' '/dev/audio0' 'media-playback-start' '/org/gtk/libgtk/theme/Adwaita'; do

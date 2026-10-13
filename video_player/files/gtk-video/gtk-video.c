@@ -410,7 +410,8 @@ static int show_picture(player_t *p, AVFrame *f, struct SwsContext **sws, int *s
 {
 	int tw, th, key, stride, threads;
 	picture_t tmp;
-	AVFrame *dst;
+	uint8_t *dst_data[4] = { NULL, NULL, NULL, NULL };
+	int dst_linesize[4] = { 0, 0, 0, 0 };
 	const char *e;
 
 	fit_size(p, f->width, f->height, f->sample_aspect_ratio, &tw, &th);
@@ -448,17 +449,14 @@ static int show_picture(player_t *p, AVFrame *f, struct SwsContext **sws, int *s
 			return -1;
 		}
 	}
-	dst = av_frame_alloc();
-	dst->format = AV_PIX_FMT_BGRA;
-	dst->width = tw;
-	dst->height = th;
-	dst->data[0] = p->back.buf;
-	dst->linesize[0] = stride;
-	if (sws_scale_frame(*sws, dst, f) < 0) {
-		av_frame_free(&dst);
+	/* sws_scale(), not sws_scale_frame(): given a frame without buf[0], sws_scale_frame()
+	 * allocates a new buffer for the result and replaces data[0] -- the picture went there
+	 * and this buffer stayed empty, so the window showed black (KNOWN-ISSUES C19) */
+	dst_data[0] = p->back.buf;
+	dst_linesize[0] = stride;
+	if (sws_scale(*sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst_data, dst_linesize) != th) {
 		return -1;
 	}
-	av_frame_free(&dst);
 	p->back.w = tw;
 	p->back.h = th;
 	p->back.stride = stride;
