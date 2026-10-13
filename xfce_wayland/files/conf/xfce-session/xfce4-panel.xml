@@ -6,8 +6,8 @@
   channel over the plain one in /etc/xdg (property by property; every property of that file
   is set here). One 30 px panel on the top edge: the applications menu; launchers for the
   terminal (foot) and Thunar (the session's .desktop files in
-  /usr/share/xfce-session/applications), the web browser (the webkit_wpe port's
-  /usr/share/applications/wpe-browser.desktop: /bin/browser) and the application finder (its
+  /usr/share/xfce-session/applications), the web browser (the webkit_gtk port's
+  /usr/share/applications/webkit-browser.desktop: tabs and downloads; owner 2026-10-13) and the application finder (its
   own .desktop file, found by its bare Exec on the session's PATH); the window buttons (libxfce4windowing:
   wlr-foreign-toplevel); a spacer; the memory in use (the memory plugin of patches/xfce4-panel/
   0003: used/total GB, green/yellow/red, a MEMMON line on the console every 30 s); the clock
@@ -61,7 +61,7 @@
     </property>
     <property name="plugin-12" type="string" value="launcher">
       <property name="items" type="array">
-        <value type="string" value="/usr/share/applications/wpe-browser.desktop"/>
+        <value type="string" value="/usr/share/applications/webkit-browser.desktop"/>
       </property>
     </property>
     <property name="plugin-9" type="string" value="launcher">

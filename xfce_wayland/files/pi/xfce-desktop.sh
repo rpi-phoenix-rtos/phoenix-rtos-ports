@@ -217,6 +217,20 @@ done
 echo "XFCE start session=${SESSION} renderer=${RENDERER} input=${LIBINPUT_PHOENIX_DEVICES:-none} hold=${HOLD} conf=${CONF_DIR} labwc=${LABWC} thunar=${THUNAR} missing=${staged:-none} t=${SECONDS}"
 echo "XFCE env PATH=${PATH} XDG_CONFIG_DIRS=${XDG_CONFIG_DIRS} XDG_DATA_DIRS=${XDG_DATA_DIRS} TZ=${TZ:-unset}"
 
+# --- 0: the low-memory guard (xfce session) ----------------------------------------------------
+# Phoenix has no OOM killer: when a program (typically a browser on a heavy site) takes the
+# last of the memory, the desktop stops responding (KNOWN-ISSUES C17). lowmemd kills the
+# largest process (at least 256 MB) once less than 200 MB is free, never the compositor, the
+# panel or the desktop, and logs a "LOWMEMD ..." line on the console. LOWMEMD=0 turns it off;
+# LOWMEMD_ARGS replaces the arguments.
+mpid=""
+if [ "${SESSION}" = xfce ] && [ "${LOWMEMD:-1}" != 0 ] && [ -x /bin/lowmemd ]; then
+	/bin/lowmemd ${LOWMEMD_ARGS:--k 200 -m 256 -x labwc -x xfce4-panel -x xfdesktop -l /dev/console} \
+		> "${LOGS}/lowmemd.log" 2>&1 &
+	mpid=$!
+	echo "XFCE lowmemd pid=${mpid} args=${LOWMEMD_ARGS:-default} t=${SECONDS}"
+fi
+
 # --- 1: the session bus ---------------------------------------------------------------------
 "${DAEMON}" --config-file="${BUS_CONF}" --nofork > "${LOGS}/dbus-daemon.log" 2>&1 &
 dpid=$!
@@ -509,6 +523,11 @@ wait "${dpid}" 2>/dev/null
 rc=$?
 [ -e "${SOCK}" ] && left=left || left=gone
 echo "XFCE dbus exited rc=${rc} after_term_s=${i} socket=${left} t=${SECONDS}"
+if [ -n "${mpid}" ]; then
+	kill -TERM "${mpid}" 2>/dev/null
+	wait "${mpid}" 2>/dev/null
+	echo "XFCE lowmemd stopped rc=$? t=${SECONDS}"
+fi
 for f in "${LOGS}"/*.log; do
 	[ -e "${f}" ] || continue
 	n="${f##*/}"
