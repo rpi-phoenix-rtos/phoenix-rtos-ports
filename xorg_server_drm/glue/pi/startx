@@ -214,16 +214,23 @@ for ((i = ${#pids[@]} - 1; i >= 0; i--)); do
 	fi
 done
 
-# -terminate: the server exits by itself after its last client; give it 15 s, then TERM.
+# -terminate: the server exits by itself after its last client. Programs opened from the
+# window manager's menu are not ours to wait for, and one of them (an xterm) would keep the
+# server up -- borderless, with the window manager gone -- so once the session is over give the
+# server 2 s, then TERM it (its clients then exit with it), polling up to 5 s more.
 i=0
-while alive "${xpid}" && [ "${i}" -lt 15 ]; do
+while alive "${xpid}" && [ "${i}" -lt 2 ]; do
 	sleep 1
 	i=$((i + 1))
 done
 if alive "${xpid}"; then
-	echo "XDRM server still up after ${i}s: sending TERM"
+	echo "XDRM server still up after ${i}s (clients not started here): sending TERM"
 	kill "${xpid}" 2>/dev/null
-	sleep 5
+	i=0
+	while alive "${xpid}" && [ "${i}" -lt 5 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
 fi
 wait "${xpid}" 2>/dev/null
 rc=$?

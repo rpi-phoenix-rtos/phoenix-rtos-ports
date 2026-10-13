@@ -1,0 +1,39 @@
+("Phoenix-RTOS",
+ ("Terminal", EXEC, "xterm -sb"),
+ ("Web Browser (Dillo)", EXEC, "dillo"),
+ ("Run...", SHEXEC, "%a(Run,Type command to run:)"),
+ ("Demos",
+  ("GL Window (V3D GPU)", EXEC, "/bin/eglx11-demo-x"),
+  ("Game of Life (Python)", EXEC, "xterm -geometry 96x28 -T Life -e /bin/python3 /usr/share/demo/life.py"),
+  ("XBill", EXEC, "xbill")
+ ),
+ ("Accessories",
+  ("Clock", EXEC, "xclock"),
+  ("Calculator", EXEC, "xcalc"),
+  ("Text Editor", EXEC, "xedit"),
+  ("X Logo", EXEC, "xlogo")
+ ),
+ ("Terminal Programs",
+  ("Midnight Commander", EXEC, "xterm -T mc -e mc"),
+  ("Process List (top)", EXEC, "xterm -T top -e top"),
+  ("Editor (nano)", EXEC, "xterm -T nano -e nano"),
+  ("Python 3", EXEC, "xterm -T python3 -e /bin/python3"),
+  ("Bash", EXEC, "xterm -T bash -e /bin/bash")
+ ),
+ ("Info",
+  ("Info Panel", INFO_PANEL),
+  ("Legal", LEGAL_PANEL)
+ ),
+ ("Workspaces", WORKSPACE_MENU),
+ ("Commands",
+  ("Hide Others", HIDE_OTHERS),
+  ("Show All", SHOW_ALL),
+  ("Arrange Icons", ARRANGE_ICONS),
+  ("Refresh", REFRESH)
+ ),
+ ("Appearance", OPEN_MENU, "appearance.menu"),
+ ("Session",
+  ("Restart Window Maker", RESTART),
+  ("Exit Session", EXIT)
+ )
+)

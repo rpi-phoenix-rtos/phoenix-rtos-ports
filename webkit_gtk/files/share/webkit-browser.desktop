@@ -3,7 +3,7 @@ Type=Application
 Name=WebKit Browser
 GenericName=Web Browser
 Comment=Browse the web with tabs and downloads (WebKitGTK)
-Exec=/usr/bin/webkit-browser %U
+Exec=/usr/bin/webkit-browser --memory-limit=1400 --memory-kill=0.55 --memory-poll-secs=3 %U
 Icon=web-browser
 Terminal=false
 StartupNotify=false

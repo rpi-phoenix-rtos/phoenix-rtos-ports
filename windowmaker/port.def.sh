@@ -170,6 +170,10 @@ p_build() {
 	done
 	rm -f "${PREFIX_PORT_BUILD}/wm.check"
 
+	# The root menu: upstream's default lists Firefox, GIMP, OpenOffice, Emacs, ... (none of
+	# which exist here); ship one with the X11 programs this image has (files/WMRootMenu).
+	cp -f "${PREFIX_PORT}/files/WMRootMenu" "$stage/etc/WindowMaker/WMRootMenu"
+
 	mkdir -p "${PREFIX_FS}/root/usr/share" "${PREFIX_FS}/root/etc"
 	cp -a "$stage/usr/share/WindowMaker" "${PREFIX_FS}/root/usr/share/"
 	cp -a "$stage/usr/share/WINGs"       "${PREFIX_FS}/root/usr/share/"
