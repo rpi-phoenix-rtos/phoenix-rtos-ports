@@ -461,6 +461,9 @@ p_build() {
 			install -D -m 644 "${F}/image/labwc-xfce-video/${f}" "${ST}/etc/xdg/labwc-xfce-video/${f}"
 		done
 		install -D -m 644 "${F}/image/video-demo.desktop" "${ST}/usr/share/applications/video-demo.desktop"
+		# Multimedia -> Video in the Browser: WebKitGTK (webkit_gtk port) on WPE's b8 page with the
+		# HEVC clip, decoded on rpivid with zero copy (demo 2026-10-15)
+		install -D -m 644 "${F}/image/browser-video-demo.desktop" "${ST}/usr/share/applications/browser-video-demo.desktop"
 	fi
 	# nothing installed may name a program of the tools' hand-staged sessions
 	if grep -rnE '(ffplay-(wl|drm)|video-play)2|-low\b|rpi4-kms-g[0-9]|(xfce-session|foot|fuzzel|labwc)-2|xfce-demo|/usr/share/m10' \

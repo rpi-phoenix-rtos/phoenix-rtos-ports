@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Video in the Browser
+GenericName=Web Browser
+Comment=HEVC video in the WebKit browser, decoded on the Pi's hardware block (zero copy)
+Exec=/usr/bin/webkit-browser --memory-limit=1400 --memory-kill=0.55 --memory-poll-secs=3 --autoplay=allow "file:///usr/share/wpe-browser/b8.html?src=file:///usr/share/video-demo/hevc-720p30-aac.mp4&loop=1"
+Icon=web-browser
+Terminal=false
+Categories=AudioVideo;Video;
