@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Tue, 3 Nov 2026 22:22:32 +0100
+Subject: [PATCH] v3d: hash shader-variant cache keys without a BLAKE3 per
+ lookup
+
+cache_hash() ran BLAKE3 over the variant key and the shader's stored BLAKE3
+digest at every hash-table lookup, i.e. at every draw that changes state.
+The table only needs a well-mixed 32-bit value and key->blake3 already is
+a digest, so hash both with _mesa_hash_data()/_mesa_hash_data_with_seed().
+The equality check is unchanged.
+
+On a Raspberry Pi 4 the BLAKE3 was 5.1 % of SuperTuxKart's CPU in its menu.
+
+Ported unchanged from a Mesa 26.2.x tree used by another operating
+system port on the same board (Raspberry Pi 4, V3D 4.2). The numbers
+below were measured there, not yet on Phoenix-RTOS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/gallium/drivers/v3d/v3d_program.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/src/gallium/drivers/v3d/v3d_program.c b/src/gallium/drivers/v3d/v3d_program.c
+index f646383..f2df4fb 100644
+--- a/src/gallium/drivers/v3d/v3d_program.c
++++ b/src/gallium/drivers/v3d/v3d_program.c
+@@ -969,13 +969,13 @@ cache_hash(const void *_key, uint32_t key_size)
+ {
+         const struct v3d_cache_key *key = (struct v3d_cache_key *) _key;
+ 
+-        blake3_hasher ctx;
+-        unsigned char blake3[BLAKE3_KEY_LEN];
+-        _mesa_blake3_init(&ctx);
+-        _mesa_blake3_update(&ctx, key->key, key_size);
+-        _mesa_blake3_update(&ctx, key->blake3, BLAKE3_KEY_LEN);
+-        _mesa_blake3_final(&ctx, blake3);
+-        return _mesa_hash_data(blake3, BLAKE3_KEY_LEN);
++        /* The hash table only needs a well-mixed 32-bit value: key->blake3 is
++         * already a digest of the shader, so hash it and the variant key with
++         * the table's own hash instead of a BLAKE3 at every lookup (a variant
++         * lookup runs at every draw that changes state).
++         */
++        uint32_t hash = _mesa_hash_data(key->blake3, BLAKE3_KEY_LEN);
++        return _mesa_hash_data_with_seed(key->key, key_size, hash);
+ }
+ 
+ static inline bool
