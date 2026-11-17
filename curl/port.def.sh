@@ -31,7 +31,7 @@ p_common() {
 }
 
 p_prepare() {
-	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
+	b_port_apply_patches .
 
 	# --with-zlib: HTTP gzip/deflate content-encoding decode (Accept-Encoding).
 	# libz.a + zlib.h come from the framework zlib port in the shared sysroot,
@@ -62,15 +62,14 @@ p_prepare() {
 	# __stack_chk_fail. Enabled per port, network- and parser-facing ones first.
 	CFLAGS+=" -fstack-protector-strong"
 
-	if [ ! -f "$PREFIX_PORT_WORKDIR/config.status" ]; then
-		(cd "$PREFIX_PORT_WORKDIR" && "$PREFIX_PORT_WORKDIR/configure" CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" \
-			"${CONFIGURE_PARAMS[@]}")
+	if [ ! -f "config.status" ]; then
+		./configure CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" "${CONFIGURE_PARAMS[@]}"
 	fi
 }
 
 p_build() {
-	make -C "$PREFIX_PORT_WORKDIR"
-	make -C "$PREFIX_PORT_WORKDIR" install
+	make
+	make install
 
 	cp -a "$PREFIX_CURL_INSTALL/include/curl" "$PREFIX_H"
 	cp -a "$PREFIX_CURL_INSTALL/lib/"* "$PREFIX_A"

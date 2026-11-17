@@ -27,10 +27,10 @@
 }
 
 p_prepare() {
-	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
+	b_port_apply_patches .
 
-	if [ ! -f "$PREFIX_PORT_WORKDIR/config.h" ]; then
-		cp -a "$PREFIX_PORT/localoptions.h" "$PREFIX_PORT_WORKDIR"
+	if [ ! -f "config.h" ]; then
+		cp -a "$PREFIX_PORT/localoptions.h" .
 
 		# -O2: the framework passes no optimisation level, and the post-quantum
 		# key exchanges (sntrup761, mlkem768) are slow enough at -O0 to delay
@@ -45,19 +45,19 @@ p_prepare() {
 		b_use "zlib" && ENABLE_ZLIB="yes"
 
 		# shellcheck disable=2153 # CFLAGS, LDFLAGS are externally provided
-		(cd "${PREFIX_PORT_WORKDIR}" && ./configure CFLAGS="${CFLAGS} ${DROPBEAR_CFLAGS}" \
+		./configure CFLAGS="${CFLAGS} ${DROPBEAR_CFLAGS}" \
 			LDFLAGS="${CFLAGS} ${LDFLAGS} ${DROPBEAR_LDFLAGS}" ARFLAGS="-r" \
 			--host="${HOST}" --prefix="${PREFIX_PORT_INSTALL}" --enable-zlib="$ENABLE_ZLIB" --enable-static \
-			--disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx --disable-harden)
+			--disable-lastlog --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx --disable-harden
 	fi
 }
 
 p_build() {
 	# create multi-binary and hardlinks
-	make PROGRAMS="dropbear dbclient dropbearkey scp" -C "${PREFIX_PORT_WORKDIR}" MULTI=1
+	make PROGRAMS="dropbear dbclient dropbearkey scp" MULTI=1
 
-	$STRIP -o "$PREFIX_PROG_STRIPPED/dropbearmulti" "$PREFIX_PORT_WORKDIR/dropbearmulti"
-	cp -a "$PREFIX_PORT_WORKDIR/dropbearmulti" "$PREFIX_PROG/dropbearmulti"
+	$STRIP -o "$PREFIX_PROG_STRIPPED/dropbearmulti" dropbearmulti
+	cp -a dropbearmulti "$PREFIX_PROG/dropbearmulti"
 
 	b_install "$PREFIX_PROG_TO_INSTALL/dropbearmulti" /usr/bin
 

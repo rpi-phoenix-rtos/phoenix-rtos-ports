@@ -27,7 +27,7 @@
 }
 
 p_prepare() {
-	b_port_apply_patches "${PREFIX_PORT_WORKDIR}"
+	b_port_apply_patches .
 
 	# Generated OUTSIDE the config.h guard on purpose. Its input -- lighttpd.conf --
 	# lives outside the port workdir, while that guard keys on a file INSIDE it, and
@@ -47,9 +47,9 @@ p_prepare() {
 	# happily extracts the name out of `#  "mod_auth",`. That silently
 	# compiled 13 plugins into the static table where lighttpd.conf enables
 	# 9 -- registering modules the config deliberately disabled.
-	grep -E '^[[:space:]]*"mod_' "$CONFIGFILE" | cut -d'"' -f2 | xargs -L1 -I{} echo "PLUGIN_INIT({})" >"$PREFIX_PORT_WORKDIR"/src/plugin-static.h
+	grep -E '^[[:space:]]*"mod_' "$CONFIGFILE" | cut -d'"' -f2 | xargs -L1 -I{} echo "PLUGIN_INIT({})" >src/plugin-static.h
 
-	if [ ! -f "$PREFIX_PORT_WORKDIR/config.h" ]; then
+	if [ ! -f "config.h" ]; then
 
 		# -fstack-protector-strong: libphoenix provides __stack_chk_guard and
 		# __stack_chk_fail. Enabled per port, network- and parser-facing ones first.
@@ -66,14 +66,14 @@ p_prepare() {
 		# Nothing is installed there -- lib_LTLIBRARIES is empty in a static build -- so
 		# `make install` still writes only under --prefix (the work dir) and --sbindir.
 		# FIXME: lighttpd ./configure ignores custom openssl location provided by pkg-config
-		(cd "$PREFIX_PORT_WORKDIR" && "./autogen.sh")
-		(cd "$PREFIX_PORT_WORKDIR" && "./configure" LIGHTTPD_STATIC=yes CFLAGS="${LIGHTTPD_CFLAGS} ${CFLAGS}" CPPFLAGS="" LDFLAGS="${LDFLAGS}" AR_FLAGS="-r" \
+		"./autogen.sh"
+		"./configure" LIGHTTPD_STATIC=yes CFLAGS="${LIGHTTPD_CFLAGS} ${CFLAGS}" CPPFLAGS="" LDFLAGS="${LDFLAGS}" AR_FLAGS="-r" \
 			-C --disable-ipv6 --disable-mmap --with-bzip2=no \
 			--with-zlib="$WITH_ZLIB" --enable-shared=no --enable-static=yes --disable-shared --host="$HOST" \
 			--with-openssl="$(b_dependency_dir 'openssl')" \
 			--with-pcre="$(b_dependency_dir "pcre")" \
 			--enable-silent-rules \
-			--prefix="$PREFIX_PORT_WORKDIR" --sbindir="$PREFIX_PROG" --libdir=/usr/lib/lighttpd)
+			--prefix="$PREFIX_PORT_WORKDIR" --sbindir="$PREFIX_PROG" --libdir=/usr/lib/lighttpd
 
 		sed -i.bak \
 			-e '/HAVE_MMAP 1/d' \
@@ -82,12 +82,12 @@ p_prepare() {
 			-e '/HAVE_SYS_POLL_H 1/d' \
 			-e '/HAVE_SIGACTION 1/d' \
 			-e '/HAVE_DLFCN_H 1/d' \
-			"$PREFIX_PORT_WORKDIR/config.h"
+			"config.h"
 	fi
 }
 
 p_build() {
-	make -C "${PREFIX_PORT_WORKDIR}" install
+	make install
 
 	$STRIP -o "$PREFIX_PROG_STRIPPED/lighttpd" "$PREFIX_PROG/lighttpd"
 
