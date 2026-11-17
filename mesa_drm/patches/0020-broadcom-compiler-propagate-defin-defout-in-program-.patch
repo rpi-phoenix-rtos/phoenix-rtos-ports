@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 25 Oct 2026 14:00:40 +0100
+Subject: [PATCH] broadcom/compiler: propagate defin/defout in program order
+
+vir_live_variables_defin_defout_dataflow() spreads each block's (partial)
+definitions to its successors, a forward problem, but visited the blocks
+in reverse order: a definition moved one block per pass, so the loop ran
+about as many passes as the program has blocks in a row, each pass over
+all blocks and all temps. Liveness is recomputed after every spill, and
+for a big shader (an unrolled WGSL loop: 667 blocks, 10.5k temps, 13k
+instructions) this pass was 225 ms of each of the 81 recomputations its
+register allocation went through, most of a 33 s compile.
+
+Visit the blocks in program order; the fixpoint is the same (the union
+of the definitions reaching each block), it is reached in a couple of
+passes for acyclic code.
+
+Raspberry Pi 4 (V3D 4.2), the compositor pipelines of a wgpu/Vulkan
+application with the shader cache disabled: its largest fragment shader
+27.5 -> 9.9 s (measured with the next commit's liveness changes
+applied), the same QPU code for all 105 shaders of the set
+(V3D_DEBUG=qpu,fs,vs,cs output equal), shader-db stats equal.
+
+Ported unchanged from a Mesa 26.2.x tree used by another operating
+system port on the same board (Raspberry Pi 4, V3D 4.2). The numbers
+below were measured there, not yet on Phoenix-RTOS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/broadcom/compiler/vir_live_variables.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/broadcom/compiler/vir_live_variables.c b/src/broadcom/compiler/vir_live_variables.c
+index 34e2e5f..cb7fd70 100644
+--- a/src/broadcom/compiler/vir_live_variables.c
++++ b/src/broadcom/compiler/vir_live_variables.c
+@@ -358,7 +358,11 @@ vir_live_variables_defin_defout_dataflow(struct v3d_compile *c, int bitset_words
+ {
+         bool cont = false;
+ 
+-        vir_for_each_block_rev(block, c) {
++        /* A forward problem: in program order a definition reaches the end
++         * of an acyclic region in one pass (in reverse order it moved one
++         * block per pass, and a big unrolled shader took hundreds of passes).
++         */
++        vir_for_each_block(block, c) {
+                 /* Propagate defin/defout down the successors to produce the
+                  * union of blocks with a reachable (partial) definition of
+                  * the var.
