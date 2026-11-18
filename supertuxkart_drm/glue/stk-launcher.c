@@ -21,9 +21,10 @@
  * DATADIR/../../stk-assets; we set it explicitly to avoid relying on `../..`
  * path resolution over NFS.
  *
- * Video args mirror the Quake launchers: --screensize=1920x1080 --fullscreen, the
- * display's native mode. Extra user args are passed on, and an option the user gives
- * replaces the launcher's default (e.g. `stk --screensize=1280x720`). Install as /bin/stk.
+ * Video args: --screensize=1280x720 --fullscreen. The display server scales the 720p mode to
+ * the screen; STK is GPU-bound here, so this runs at ~22 fps against ~13 at the native 1080p.
+ * Extra user args are passed on, and an option the user gives replaces the launcher's default
+ * (e.g. `stk --screensize=1920x1080` for native). Install as /bin/stk.
  *
  * `race` (anywhere in the arguments) stands for an AI race with no input:
  * --track=hacienda --numkarts=4 --profile-laps=2 (STK's profile mode: four AI karts, two
@@ -248,7 +249,9 @@ int main(int argc, char **argv)
 
 	static char *base[] = {
 		"supertuxkart",
-		"--screensize=1920x1080",
+		/* 720p, scaled to the screen by the display server: ~22 fps against ~13 at 1080p
+		 * (STK is GPU-bound on this board). `stk --screensize=1920x1080` gives native. */
+		"--screensize=1280x720",
 		"--fullscreen",
 		/*
 		 * --disable-texture-compression is essential on this port: with it ON,
