@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 25 Oct 2026 09:05:07 +0100
+Subject: [PATCH] v3dv: align the supertile grid to the render area
+
+The hardware renders every tile of each supertile in the RCL, and when
+the render area is tile-aligned we do not load the attachments
+(tile_aligned_render_area), so the tiles of a supertile that lie outside
+the render area are stored with undefined contents.
+
+Since "v3dv: consider render area when configuring supertiles" the frame
+ends at the render area's far edge, so this only happens at its top-left
+corner: when the render area's offset is not a multiple of the supertile
+size. With a 4096x4096 RGBA32F image, the meta copy of a 256x256 region
+to (2048, 256) gets a 2304x512 frame of 32x32 tiles and 2x3-tile
+(64x96 pixel) supertiles: the supertile row 192..287 is stored whole,
+and rows 192..255 of the region above were overwritten.
+vkCmdCopyBufferToImage of many tiles (wgpu's staged texture uploads;
+2048x2048 float documents of an image editor) lost parts of earlier
+tiles that way.
+
+Choose the smallest supertile size within the limits whose grid is
+aligned to the render area's offset (in tiles), and fall back to the
+previous sizing when there is none.
+
+Tested on a Raspberry Pi 4 (V3D 4.2): 192 tiled 256x256 copies into a
+4096x4096 image, RGBA32F and RGBA8: 2.48M and 1.48M wrong pixels before,
+none after; the image editor's 2048x2048 float compositing equal to its
+CPU compositor.
+
+Ported unchanged from a Mesa 26.2.x tree used by another operating
+system port on the same board (Raspberry Pi 4, V3D 4.2). The numbers
+below were measured there, not yet on Phoenix-RTOS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/broadcom/vulkan/v3dv_cmd_buffer.c | 51 +++++++++++++++++++++++++++
+ src/broadcom/vulkan/v3dv_pass.h       |  7 ++++
+ 2 files changed, 58 insertions(+)
+
+diff --git a/src/broadcom/vulkan/v3dv_cmd_buffer.c b/src/broadcom/vulkan/v3dv_cmd_buffer.c
+index 56643df..544f0c2 100644
+--- a/src/broadcom/vulkan/v3dv_cmd_buffer.c
++++ b/src/broadcom/vulkan/v3dv_cmd_buffer.c
+@@ -443,6 +443,53 @@ job_compute_frame_tiling(struct v3dv_job *job,
+    tiling->draw_tiles_x = DIV_ROUND_UP(width, tiling->tile_width);
+    tiling->draw_tiles_y = DIV_ROUND_UP(height, tiling->tile_height);
+ 
++   /* The hardware renders every tile of each supertile it is given, so a
++    * supertile that is only partly inside the render area also stores the
++    * tiles outside it. When the render area is tile-aligned we skip loading
++    * them (tile_aligned_render_area), so those tiles would be overwritten with
++    * undefined contents. The frame ends at the render area's far edge, so this
++    * can only happen at its top-left corner: use the smallest supertiles that
++    * fit the limits and whose grid is aligned to that corner. If there are
++    * none, fall back to the plain sizing below.
++    */
++   const uint32_t origin_x_tiles =
++      tiling->origin_x % tiling->tile_width == 0 ?
++      tiling->origin_x / tiling->tile_width : 0;
++   const uint32_t origin_y_tiles =
++      tiling->origin_y % tiling->tile_height == 0 ?
++      tiling->origin_y / tiling->tile_height : 0;
++   if (origin_x_tiles != 0 || origin_y_tiles != 0) {
++      uint32_t best_w = 0, best_h = 0;
++      /* The supertile size fields are 8 bits wide. */
++      for (uint32_t h = 1; h <= MIN2(tiling->draw_tiles_y, 255); h++) {
++         if (origin_y_tiles % h != 0)
++            continue;
++         for (uint32_t w = 1; w <= MIN2(tiling->draw_tiles_x, 255); w++) {
++            if (origin_x_tiles % w != 0)
++               continue;
++            const uint32_t frame_w = DIV_ROUND_UP(tiling->draw_tiles_x, w);
++            const uint32_t frame_h = DIV_ROUND_UP(tiling->draw_tiles_y, h);
++            if (frame_w >= V3D_MAX_SUPERTILES ||
++                frame_h >= V3D_MAX_SUPERTILES ||
++                frame_w * frame_h > V3D_MAX_SUPERTILES) {
++               continue;
++            }
++            if (best_w == 0 || w * h < best_w * best_h)
++               best_w = w, best_h = h;
++            break;
++         }
++      }
++      if (best_w != 0) {
++         tiling->supertile_width = best_w;
++         tiling->supertile_height = best_h;
++         tiling->frame_width_in_supertiles =
++            DIV_ROUND_UP(tiling->draw_tiles_x, best_w);
++         tiling->frame_height_in_supertiles =
++            DIV_ROUND_UP(tiling->draw_tiles_y, best_h);
++         return tiling;
++      }
++   }
++
+    /* Size up our supertiles until we get under the limit */
+    tiling->supertile_width = 1;
+    tiling->supertile_height = 1;
+@@ -1796,6 +1843,8 @@ cmd_buffer_subpass_create_job(struct v3dv_cmd_buffer *cmd_buffer,
+          state->render_area.offset.x + state->render_area.extent.width;
+       uint32_t height =
+          state->render_area.offset.y + state->render_area.extent.height;
++      job->frame_tiling.origin_x = state->render_area.offset.x;
++      job->frame_tiling.origin_y = state->render_area.offset.y;
+ 
+       v3dv_job_start_frame(job,
+                            width,
+@@ -2790,6 +2839,8 @@ cmd_buffer_restart_job_for_msaa_if_needed(struct v3dv_cmd_buffer *cmd_buffer)
+                  cmd_buffer->state.subpass_idx);
+    cmd_buffer->state.job = job;
+ 
++   job->frame_tiling.origin_x = old_job->frame_tiling.origin_x;
++   job->frame_tiling.origin_y = old_job->frame_tiling.origin_y;
+    v3dv_job_start_frame(job,
+                         old_job->frame_tiling.width,
+                         old_job->frame_tiling.height,
+diff --git a/src/broadcom/vulkan/v3dv_pass.h b/src/broadcom/vulkan/v3dv_pass.h
+index 9a53f2c..44d9447 100644
+--- a/src/broadcom/vulkan/v3dv_pass.h
++++ b/src/broadcom/vulkan/v3dv_pass.h
+@@ -125,6 +125,13 @@ struct v3dv_framebuffer {
+ struct v3dv_frame_tiling {
+    uint32_t width;
+    uint32_t height;
++   /* Top-left corner of the render area (0 outside render passes): the frame
++    * ends at the render area's far edge, and the supertile grid is aligned to
++    * this corner when possible, so that no supertile is only partly inside the
++    * render area (see job_compute_frame_tiling).
++    */
++   uint32_t origin_x;
++   uint32_t origin_y;
+    uint32_t layers;
+    uint32_t render_target_count;
+    uint32_t internal_bpp;

@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Witold=20Bo=C5=82t?= <witold.bolt@jit.team>
+Date: Sun, 25 Oct 2026 10:41:15 +0100
+Subject: [PATCH] broadcom/compiler: move every channel of a vector mov
+
+nir_trivialize_registers copies whole registers with vector movs: before
+a store_reg whose value is not trivially stored (e.g. a load_reg, or a
+value from another block) and after a load_reg it trivializes. ALU ops
+are scalar by then otherwise, so ntq_emit_alu only emitted the first
+channel of a mov and the other channels of the destination register kept
+whatever they held.
+
+It shows with a vec4 phi whose source is not coalesced with the phi web
+(a texel fetch in one branch, a value that stays live after the if in the
+other): from SSA, the other branch copies the source register into the
+phi register through such a vec4 mov, and only .x was copied. A WGSL
+fragment shader of the form
+
+   var c = textureLoad(tex_b, p, 0);
+   if (u.flag < 0.5) { c = textureLoad(tex_c, p, 0); }
+   ... uses of c and of the first fetch ...
+
+read c.yzw from the other branch's (here never written) registers when
+the uniform flag was set.
+
+Handle a mov with more than one component like the vecN ops: read every
+channel through its swizzle, then move each one.
+
+Tested on a Raspberry Pi 4 (V3D 4.2): the shader above (the blend pass
+of a wgpu/Vulkan image editor's compositor) now matches the CPU
+reference; that compositor's GPU tests pass 91 of 91 (90 before); the
+other GL and Vulkan test programs render unchanged.
+
+Ported unchanged from a Mesa 26.2.x tree used by another operating
+system port on the same board (Raspberry Pi 4, V3D 4.2). The numbers
+below were measured there, not yet on Phoenix-RTOS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/broadcom/compiler/nir_to_vir.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/broadcom/compiler/nir_to_vir.c b/src/broadcom/compiler/nir_to_vir.c
+index e669ff1..063152f 100644
+--- a/src/broadcom/compiler/nir_to_vir.c
++++ b/src/broadcom/compiler/nir_to_vir.c
+@@ -1381,6 +1381,22 @@ ntq_emit_alu(struct v3d_compile *c, nir_alu_instr *instr)
+                 return;
+         }
+ 
++        /* Movs are the other ALU op that can still be a vector here:
++         * nir_trivialize_registers copies whole registers with them (e.g.
++         * a vec4 phi web whose source lives in another register), so move
++         * every channel, not only the first.
++         */
++        if (instr->op == nir_op_mov && instr->def.num_components > 1) {
++                struct qreg srcs[NIR_MAX_VEC_COMPONENTS];
++                for (int i = 0; i < instr->def.num_components; i++)
++                        srcs[i] = ntq_get_src(c, instr->src[0].src,
++                                              instr->src[0].swizzle[i]);
++                for (int i = 0; i < instr->def.num_components; i++)
++                        ntq_store_def(c, &instr->def, i,
++                                      vir_MOV(c, srcs[i]));
++                return;
++        }
++
+         /* General case: We can just grab the one used channel per src. */
+         assert(nir_op_infos[instr->op].num_inputs <= 3);
+         struct qreg src[3] = { 0 };
