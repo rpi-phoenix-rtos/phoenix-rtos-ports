@@ -31,6 +31,13 @@
  * is any register access while the clock is off. MOCK_PA_HIGH_SIZE=<bytes>: contiguous memory
  * of that size gets bus addresses above 16 GiB (beyond the block's reach). MOCK_DEAD_PATH: the
  * file rpivid_hw.c keeps the block's cross-process state in (rpivid_dead_path()).
+ * MOCK_P2_ASYNC=<n>: phase 2 runs on after the NUMROWS write that starts it, as on the Pi, and
+ * completes at the n-th read of the interrupt controller after it (a phase-1 wait's or its own
+ * wait's); until then its output buffers hold a poison pattern, so a decoder that reads a
+ * picture before waiting for it is caught by the golden comparison. Errors in driving the
+ * pipelined block ("MOCK ERROR ...": a phase 2 started while one runs, a phase 1 writing the
+ * buffers the running phase 2 reads) go to the log and to stderr; at exit stderr gets
+ * "MOCK phase-1 runs beside a phase 2: <n>".
  *
  * Copyright 2026 Phoenix Systems
  *
@@ -321,6 +328,18 @@ int resourceDestroy(handle_t h)
 
 static FILE *logf_;
 static long pic_no;
+static long p2_async = -1;      /* MOCK_P2_ASYNC; -1: phase 2 completes at its start */
+static long n_overlap;          /* phase-1 starts while a phase 2 ran */
+
+/* the running phase 2 (MOCK_P2_ASYNC) */
+static struct {
+	int busy;
+	long reads;                 /* controller reads until it completes */
+	uint64_t pur, coeffr;       /* the phase-1 buffers it reads */
+	uint8_t *py, *pc;           /* its output */
+	int32_t golden;             /* the golden frame it writes there, -1: none */
+	uint32_t w, h, bd, ys, cs;
+} p2;
 static long fail_at = -1, wedge_at = -1;
 static int failing;
 static FILE *golden;
@@ -357,6 +376,9 @@ static FILE *lg(void)
 		}
 		if ((f = getenv("MOCK_GOLDEN")) != NULL) {
 			golden = fopen(f, "rb");
+		}
+		if ((f = getenv("MOCK_P2_ASYNC")) != NULL) {
+			p2_async = (atol(f) > 0) ? atol(f) : 1;
 		}
 	}
 	return logf_;
@@ -462,30 +484,45 @@ static void put_sample(uint8_t *plane, uint32_t stride, unsigned int bd, uint32_
 }
 
 
-/* write frame `poc` of the golden file into the output, SAND tiled */
-static void golden_picture(uint8_t *py, uint8_t *pc, int32_t poc)
+/* the output geometry phase 2 writes (the golden file's picture size: MOCK_GOLDEN_SIZE) */
+static void out_geometry(uint32_t *w, uint32_t *h, uint32_t *bd, uint32_t *ys, uint32_t *cs)
 {
-	uint32_t w = reg(RPI_FRAMESIZE) & 0xffffu, h = reg(RPI_FRAMESIZE) >> 16, bd = reg(RPI_CONFIG2) & 15u;
 	const char *gs = getenv("MOCK_GOLDEN_SIZE");
 
-	if ((gs != NULL) && (sscanf(gs, "%ux%u", &w, &h) != 2)) {
-		w = reg(RPI_FRAMESIZE) & 0xffffu;
-		h = reg(RPI_FRAMESIZE) >> 16;
+	*w = reg(RPI_FRAMESIZE) & 0xffffu;
+	*h = reg(RPI_FRAMESIZE) >> 16;
+	if ((gs != NULL) && (sscanf(gs, "%ux%u", w, h) != 2)) {
+		*w = reg(RPI_FRAMESIZE) & 0xffffu;
+		*h = reg(RPI_FRAMESIZE) >> 16;
 	}
-	uint32_t ys = reg(RPI_OUTYSTRIDE) << 6, cs = reg(RPI_OUTCSTRIDE) << 6, bps = (bd == 8u) ? 1u : 2u, x, y;
+	*bd = reg(RPI_CONFIG2) & 15u;
+	*ys = reg(RPI_OUTYSTRIDE) << 6;
+	*cs = reg(RPI_OUTCSTRIDE) << 6;
+}
+
+
+/* write frame `poc` of the golden file into the output, SAND tiled; poc < 0: a poison pattern
+ * (phase 2 still running) */
+static void golden_picture(uint8_t *py, uint8_t *pc, int32_t poc, uint32_t w, uint32_t h, uint32_t bd, uint32_t ys, uint32_t cs)
+{
+	uint32_t bps = (bd == 8u) ? 1u : 2u, x, y, poison = (bd == 8u) ? 0x5au : 0x15au;
 	uint32_t cw = (w + 1u) / 2u, ch = (h + 1u) / 2u;
 	size_t fsize = ((size_t)w * h + 2u * (size_t)cw * ch) * bps;
 	uint8_t *f = malloc(fsize), *u, *v;
 
-	if ((f == NULL) || (py == NULL) || (pc == NULL) || (poc < 0) || (fseek(golden, (long)fsize * poc, SEEK_SET) != 0) ||
-			(fread(f, 1, fsize, golden) != fsize)) {
+	if ((f == NULL) || (py == NULL) || (pc == NULL)) {
+		fprintf(lg(), "MOCK no output for POC %d\n", poc);
+		free(f);
+		return;
+	}
+	if ((poc >= 0) && ((fseek(golden, (long)fsize * poc, SEEK_SET) != 0) || (fread(f, 1, fsize, golden) != fsize))) {
 		fprintf(lg(), "MOCK no golden frame for POC %d\n", poc);
 		free(f);
 		return;
 	}
 	u = f + (size_t)w * h * bps;
 	v = u + (size_t)cw * ch * bps;
-#define SMP(p, i) ((bps == 1u) ? (uint32_t)(p)[i] : ((uint32_t)(p)[2u * (i)] | ((uint32_t)(p)[2u * (i) + 1u] << 8)))
+#define SMP(p, i) ((poc < 0) ? poison : (bps == 1u) ? (uint32_t)(p)[i] : ((uint32_t)(p)[2u * (i)] | ((uint32_t)(p)[2u * (i) + 1u] << 8)))
 	for (y = 0; y < h; y++) {
 		for (x = 0; x < w; x++) {
 			put_sample(py, ys, bd, x, y, SMP(f, (size_t)y * w + x));
@@ -499,6 +536,33 @@ static void golden_picture(uint8_t *py, uint8_t *pc, int32_t poc)
 	}
 #undef SMP
 	free(f);
+}
+
+
+static void mock_error(const char *what)
+{
+	fprintf(lg(), "MOCK ERROR %s\n", what);
+	fflush(lg());
+	fprintf(stderr, "MOCK ERROR %s (picture %ld)\n", what, pic_no);
+}
+
+
+/* MOCK_P2_ASYNC: the running phase 2 finishes */
+static void phase2_complete(void)
+{
+	if (p2.golden >= 0) {
+		golden_picture(p2.py, p2.pc, p2.golden, p2.w, p2.h, p2.bd, p2.ys, p2.cs);
+	}
+	p2.busy = 0;
+	ictrl |= ACTIVE2_INT_SET;
+}
+
+
+__attribute__((destructor)) static void mock_report(void)
+{
+	if (p2_async > 0) {
+		fprintf(stderr, "MOCK phase-1 runs beside a phase 2: %ld\n", n_overlap);
+	}
 }
 
 
@@ -530,6 +594,7 @@ static void phase2(void)
 	fprintf(f, "\n");
 	fflush(f);
 
+	p2.golden = -1;
 	if (golden != NULL) {
 		static long gop_base;
 
@@ -551,7 +616,16 @@ static void phase2(void)
 		else if ((poc == 0) && (pic_no > 0)) {
 			gop_base = pic_no; /* an IDR: every earlier picture is displayed before it */
 		}
-		golden_picture(pa2va(y, 1), pa2va(c, 1), (int32_t)(gop_base + poc));
+		p2.golden = (int32_t)(gop_base + poc);
+	}
+	p2.py = pa2va(y, 1);
+	p2.pc = pa2va(c, 1);
+	p2.pur = (uint64_t)reg(RPI_PURBASE) << 6;
+	p2.coeffr = (uint64_t)reg(RPI_COEFFRBASE) << 6;
+	out_geometry(&p2.w, &p2.h, &p2.bd, &p2.ys, &p2.cs);
+	if (p2.golden >= 0) {
+		/* MOCK_P2_ASYNC: poisoned until phase 2 completes */
+		golden_picture(p2.py, p2.pc, (p2_async > 0) ? -1 : p2.golden, p2.w, p2.h, p2.bd, p2.ys, p2.cs);
 	}
 
 	map_set(y, poc, 0);
@@ -575,7 +649,12 @@ static uint32_t mmio_rd(const volatile uint8_t *base, uint32_t off)
 {
 	clock_check("read", off);
 	if (base == intc) {
-		uint32_t v = (off == ARG_IC_ICTRL) ? ictrl : 0u;
+		uint32_t v;
+
+		if ((off == ARG_IC_ICTRL) && p2.busy && (--p2.reads <= 0)) {
+			phase2_complete();
+		}
+		v = (off == ARG_IC_ICTRL) ? ictrl : 0u;
 
 		if ((off == ARG_IC_ICTRL) && (isr_fn != NULL) && !in_isr && ((v & (ACTIVE1_INT_SET | ACTIVE2_INT_SET)) != 0u)) {
 			/* the handler runs between this read and the waiter's use of it */
@@ -606,6 +685,12 @@ static void mmio_wr(volatile uint8_t *base, uint32_t off, uint32_t v)
 	}
 	*(uint32_t *)(void *)(regs + off) = v;
 	if (off == RPI_CFBASE) {
+		if (p2.busy) {
+			n_overlap++;
+			if ((((uint64_t)reg(RPI_PUWBASE) << 6) == p2.pur) || (((uint64_t)reg(RPI_COEFFWBASE) << 6) == p2.coeffr)) {
+				mock_error("phase 1 writes the buffers the running phase 2 reads");
+			}
+		}
 		if (failing) {
 			/* the failed picture never reached phase 2 */
 			failing = 0;
@@ -627,8 +712,17 @@ static void mmio_wr(volatile uint8_t *base, uint32_t off, uint32_t v)
 		if (wedged) {
 			return;
 		}
+		if (p2.busy) {
+			mock_error("phase 2 started while phase 2 runs");
+		}
 		phase2();
-		ictrl |= ACTIVE2_INT_SET;
+		if (p2_async > 0) {
+			p2.busy = 1;
+			p2.reads = p2_async;
+		}
+		else {
+			ictrl |= ACTIVE2_INT_SET;
+		}
 	}
 }
 

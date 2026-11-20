@@ -4,7 +4,7 @@
 # as the reference player that was proved bit-exact on the Pi 4 does?
 #
 #   files/rpivid/hosttest/run.sh --coord <coordination repo> [--work <dir>] [--tarball <ffmpeg-6.1.tar.gz>]
-#                                [--threads N] [clip...]
+#                                [--threads N] [--loop] [--pipeline] [clip...]
 #
 # Builds, for the host (x86, ASan):
 #   - FFmpeg 6.1 with this port's rpivid patch and sources, the hardware layer (src/rpivid_hw.c)
@@ -43,6 +43,13 @@
 # earlier boot is ignored -- and a zero-copy buffer beyond the block's reach (MOCK_PA_HIGH_SIZE):
 # the stream keeps system-memory frames, still decoded by the block.
 #
+# --pipeline: everything above with FFMPEG_RPIVID_PIPELINE=1 (phase 2 of a picture left running
+# while the next picture is parsed and its phase 1 runs) against a mock whose phase 2 runs on
+# after its start (MOCK_P2_ASYNC=2: it completes during the next phase 1's wait, or its own; its
+# output is poisoned until then). Also: no "MOCK ERROR" (a phase 2 started while one ran, a
+# phase 1 writing the buffers the running phase 2 reads), and phase 1 ran beside a phase 2 in
+# the single-threaded loop runs (frame threads keep the decode serial).
+#
 # Copyright 2026 Phoenix Systems
 #
 # This file is part of Phoenix-RTOS.
@@ -54,7 +61,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rp="$(cd "${here}/.." && pwd)"
 port="$(cd "${rp}/../.." && pwd)"
-coord="" work="${TMPDIR:-/tmp}/rpivid-hosttest" tarball="${port}/ffmpeg-6.1.tar.gz" threads=4 loop=0
+coord="" work="${TMPDIR:-/tmp}/rpivid-hosttest" tarball="${port}/ffmpeg-6.1.tar.gz" threads=4 loop=0 pipeline=0
 clips=()
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -63,6 +70,7 @@ while [ $# -gt 0 ]; do
 		--tarball) tarball="$2"; shift ;;
 		--threads) threads="$2"; shift ;;
 		--loop) loop=1 ;;
+		--pipeline) pipeline=1 ;;
 		-h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}"; exit 0 ;;
 		*) clips+=("$1") ;;
 	esac
@@ -128,6 +136,9 @@ else
 	mt=1
 fi
 export ASAN_OPTIONS=detect_leaks=0
+if [ "${pipeline}" = 1 ]; then
+	export FFMPEG_RPIVID_PIPELINE=1 MOCK_P2_ASYNC=2
+fi
 # the block's cross-process state (rpivid_hw.c's /tmp/.rpivid.dead on the Pi)
 dead="${work}/rpivid.dead"
 export MOCK_DEAD_PATH="${dead}"
@@ -179,6 +190,10 @@ for c in "${clips[@]}"; do
 	fi
 done
 echo "RESULT same=${n_same} diff=${n_diff} ref-skip=${n_skip} cpu=${n_cpu}"
+if [ "${pipeline}" = 1 ] && grep -l 'MOCK ERROR' "${work}"/*.hw.out "${work}"/*.hw-mt.out 2>/dev/null; then
+	grep -h 'MOCK ERROR' "${work}"/*.hw.out "${work}"/*.hw-mt.out | sort | uniq -c | head
+	n_diff=$((n_diff + 1))
+fi
 
 n_loop_bad=0
 if [ "${loop}" = 1 ]; then
@@ -192,7 +207,16 @@ if [ "${loop}" = 1 ]; then
 			# hw_used=1: a hardware pass that fell back to the CPU (e.g. the block's lock file held
 			# by a concurrent run) would be bit-exact against the CPU pass trivially
 			v="$(grep -o 'verdict=[A-Z-]* frames=[0-9]* bad=[0-9]* first_bad=[0-9-]* hw_used=[0-9]' "${work}/${b}.loop${t}.out" || echo 'verdict=none')"
-			echo "LOOP      ${b} threads=${t}: ${v}"
+			ov=""
+			if [ "${pipeline}" = 1 ]; then
+				# the decoder's count and the mock's, which must agree
+				od="$(grep -Eo '[0-9]+ phase-1 runs beside a phase 2' "${work}/${b}.loop${t}.out" | awk '{ s += $1 } END { print s + 0 }')"
+				om="$(grep -Eo 'MOCK phase-1 runs beside a phase 2: [0-9]+' "${work}/${b}.loop${t}.out" | awk '{ s += $NF } END { print s + 0 }')"
+				ov="; phase 1 beside a phase 2: ${od} (mock ${om})"
+				[ "${od}" = "${om}" ] || n_loop_bad=$((n_loop_bad + 1))
+				[ "${t}" = 1 ] && n_overlap=$(( ${n_overlap:-0} + om ))
+			fi
+			echo "LOOP      ${b} threads=${t}: ${v}${ov}"
 			case "${v}" in *BIT-EXACT*hw_used=1) ;; *) n_loop_bad=$((n_loop_bad + 1)) ;; esac
 		done
 		# the interrupt path (MOCK_ISR_RACE=1: a handler registered, running inside the waiter's
@@ -338,6 +362,14 @@ if [ "${loop}" = 1 ]; then
 			wcheck reach 0 "no zero-copy size in ${b}.zc1.out"
 		fi
 		rm -f "${dead}"
+	fi
+	if [ "${pipeline}" = 1 ]; then
+		if grep -l 'MOCK ERROR' "${work}"/*.out; then
+			grep -h 'MOCK ERROR' "${work}"/*.out | sort | uniq -c | head
+			n_loop_bad=$((n_loop_bad + 1))
+		fi
+		echo "PIPELINE  phase-1 runs beside a phase 2 in the single-threaded loop runs: ${n_overlap:-0}"
+		[ "${n_overlap:-0}" -gt 0 ] || n_loop_bad=$((n_loop_bad + 1))
 	fi
 	echo "RESULT loop_bad=${n_loop_bad}"
 fi
