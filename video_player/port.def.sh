@@ -75,7 +75,9 @@
 #   position, which the seek restarts at 0) and the target segment's keyframe kept.
 # Knobs: FFMPEG_RPIVID=0 (CPU only) | 1 (default: the default tool set) | 2 (every tool), or
 # the decoder option -rpivid N; FFMPEG_RPIVID_TOOLS=-amp,+tiles turns single coding tools off
-# or on (rpivid_hevc.c tools[]); ffplay -vcodec hevc = the plain CPU decoder.
+# or on (rpivid_hevc.c tools[]); FFMPEG_RPIVID_PIPELINE=1 runs a picture's phase 2 while the next
+# picture is parsed and its phase 1 runs (not under frame threads); ffplay -vcodec hevc = the
+# plain CPU decoder.
 #
 # Installs (${PREFIX_PORT_INSTALL}): bin/ (stripped), prog/ (unstripped, addr2line),
 # share/video-player/ (link maps, stage.MANIFEST), ffmpeg/ (the FFmpeg libraries for other
