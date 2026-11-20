@@ -14,6 +14,14 @@
  * with the HEVCFrame for as long as hevcdec.c keeps it, which is exactly as long as the
  * picture can be a reference.
  *
+ * FFMPEG_RPIVID_PIPELINE=1: phase 2 of a picture runs while the decoder parses the next picture
+ * and the block runs its phase 1 (rpivid_hw.h). end_frame then returns with phase 2 running; the
+ * picture is completed (phase 2 waited for, planar: de-tiled) when its frame leaves the decoder
+ * (FrameDecodeData.post_process), before the next phase 2 starts, or when the hwaccel detaches,
+ * whichever comes first (RPIVIDPending). A picture that leaves the decoder with its own packet
+ * (no reordering) is completed in end_frame, as without the pipeline. Not under frame threads
+ * or SEI picture-hash checking (AV_EF_CRCCHECK reads the picture right after end_frame).
+ *
  * Two outputs (the decoder option rpivid_out, rpivid_drm.h):
  *   planar     ff_hevc_rpivid_hwaccel: the SAND pictures (two cached buffers each, luma and
  *              chroma) de-tiled by the CPU into the system-memory frames hevcdec.c allocated
@@ -75,6 +83,7 @@ typedef struct RPIVIDBuf {
 	rpivid_dma_t y, c, mv;         /* drm_prime: y and c are views of one buffer */
 	struct RPIVIDBuf *next;
 	struct RPIVIDPool *pool;
+	int holders;                   /* planar: back to the pool when the frame and a pending conversion let it go */
 	RpividDrmBuffer bo;            /* drm_prime: the picture buffer */
 	int has_bo;                    /* from the buffer operations (else rpivid_dma_alloc'd, in y) */
 	int handed_out;                /* drm_prime: it was a frame before (wait_idle on reuse) */
@@ -96,6 +105,24 @@ typedef struct RPIVIDPool {
 	int nbufs;
 	char err[128];                 /* why the last buffer could not be made */
 } RPIVIDPool;
+
+struct RPIVIDContext;
+
+/* FFMPEG_RPIVID_PIPELINE: a picture whose phase 2 may still run or (planar) whose SAND->planar
+ * conversion waits for its frame's output; the post_process data of its frames. All on the
+ * decoding thread: the pipeline is off under frame threads. */
+typedef struct RPIVIDPending {
+	int refs;                      /* the frames' FrameDecodeData; the context while phase 2 runs */
+	struct RPIVIDContext *ctx;     /* NULL once completed or after the hwaccel detached */
+	struct RPIVIDPending *prev, *next;  /* the context's list of pictures not completed */
+	FrameDecodeData *fdd;          /* its frames' (NULL once they are all gone) */
+	RPIVIDBuf *buf;                /* planar: the SAND picture, held until converted */
+	uint8_t *data[3];              /* planar: the frame's planes, uncropped */
+	int linesize[3];
+	unsigned int bit_depth;
+	int poc;
+	int failed;                    /* phase 2 did not finish */
+} RPIVIDPending;
 
 /* hwaccel_picture_private of an HEVCFrame */
 typedef struct RPIVIDFrame {
@@ -138,6 +165,11 @@ typedef struct RPIVIDContext {
 	uint64_t t_start;
 	uint32_t p1_reruns, missing_total;
 	int zc;                        /* drm_prime output */
+	int pipeline;                  /* FFMPEG_RPIVID_PIPELINE (see the top) */
+	RPIVIDPending *p2;             /* pipeline: the picture whose phase 2 runs */
+	RPIVIDPending *pending;        /* pipeline: pictures not completed yet */
+	uint64_t sum_blk, w_blk;       /* time spent waiting for the block (both phases) */
+	uint32_t overlaps, w_overlaps; /* pictures whose phase 1 ran beside a phase 2 */
 	uint32_t refuse_at;            /* FFMPEG_RPIVID_REFUSE_AT: picture number + 1 the block refuses (a test, once per process) */
 } RPIVIDContext;
 
@@ -322,6 +354,7 @@ static RPIVIDBuf *pool_get(RPIVIDPool *p)
 			ff_mutex_unlock(&p->lock);
 			return NULL;
 		}
+		b->holders = 1;
 		return b;
 	}
 
@@ -347,6 +380,7 @@ static RPIVIDBuf *pool_get(RPIVIDPool *p)
 	ff_mutex_lock(&p->lock);
 	p->nbufs++;
 	ff_mutex_unlock(&p->lock);
+	b->holders = 1;
 	return b;
 }
 
@@ -360,6 +394,30 @@ static void pool_put(RPIVIDPool *p, RPIVIDBuf *b)
 }
 
 
+/* planar: one more holder of b (a pending SAND->planar conversion) */
+static void buf_hold(RPIVIDBuf *b)
+{
+	ff_mutex_lock(&b->pool->lock);
+	b->holders++;
+	ff_mutex_unlock(&b->pool->lock);
+}
+
+
+/* planar: a holder lets b go; the last one puts it back in the pool */
+static void buf_drop(RPIVIDBuf *b)
+{
+	RPIVIDPool *p = b->pool;
+	int last;
+
+	ff_mutex_lock(&p->lock);
+	last = (--b->holders == 0);
+	ff_mutex_unlock(&p->lock);
+	if (last) {
+		pool_put(p, b);
+	}
+}
+
+
 static void rpivid_frame_free(FFRefStructOpaque opaque, void *data)
 {
 	RPIVIDFrame *f = data;
@@ -369,7 +427,7 @@ static void rpivid_frame_free(FFRefStructOpaque opaque, void *data)
 		av_buffer_unref(&f->bref);   /* drm_prime: the buffer goes back with its last reference */
 	}
 	else if (f->buf != NULL) {
-		pool_put(f->pool, f->buf);
+		buf_drop(f->buf);
 	}
 	pool_unref(f->pool);
 }
@@ -428,6 +486,24 @@ static RPIVIDBuf *drm_buf(const AVFrame *f)
 	}
 	d = (const RPIVIDDrm *)(const void *)f->buf[0]->data;
 	return ((d->magic == RPIVID_DRM_MAGIC) && ((const uint8_t *)&d->desc == f->data[0])) ? d->buf : NULL;
+}
+
+
+/* planar: convert the SAND picture b (8 or 10 bit) into a frame's planes */
+static void sand_to_planar(const RPIVIDBuf *b, uint8_t *const data[3], const int linesize[3], unsigned int bit_depth)
+{
+	const RPIVIDPool *p = b->pool;
+
+	rpivid_dma_sync_for_cpu(&b->y, p->g.luma_size);
+	rpivid_dma_sync_for_cpu(&b->c, p->g.chroma_size);
+	if (bit_depth == 8u) {
+		rpivid_sand8_to_planar(data[0], linesize[0], data[1], linesize[1], data[2], linesize[2], b->y.cpu, b->c.cpu, p->g.luma_stride,
+			p->g.chroma_stride, p->width, p->height);
+	}
+	else {
+		rpivid_sand10_to_planar16(data[0], linesize[0], data[1], linesize[1], data[2], linesize[2], b->y.cpu, b->c.cpu, p->g.luma_stride,
+			p->g.chroma_stride, p->width, p->height);
+	}
 }
 
 
@@ -875,6 +951,194 @@ static void tools_used(AVCodecContext *avctx, RPIVIDContext *ctx, uint32_t m)
 }
 
 
+/* ---- the pipeline (FFMPEG_RPIVID_PIPELINE): pictures completed after end_frame ---- */
+
+static void pending_unlink(RPIVIDPending *r)
+{
+	RPIVIDContext *ctx = r->ctx;
+
+	if (ctx == NULL) {
+		return;
+	}
+	if (r->prev != NULL) {
+		r->prev->next = r->next;
+	}
+	else {
+		ctx->pending = r->next;
+	}
+	if (r->next != NULL) {
+		r->next->prev = r->prev;
+	}
+	r->prev = r->next = NULL;
+	r->ctx = NULL;
+}
+
+
+static void pending_unref(RPIVIDPending *r)
+{
+	RPIVIDPool *p;
+
+	if (--r->refs > 0) {
+		return;
+	}
+	pending_unlink(r);
+	if (r->buf != NULL) {
+		p = r->buf->pool;
+		buf_drop(r->buf);
+		pool_unref(p);
+	}
+	av_free(r);
+}
+
+
+/* FrameDecodeData.post_process_opaque_free: the picture's frames are all gone, nothing is
+ * converted for them any more (the SAND buffer stays held while its phase 2 may run) */
+static void pending_frames_gone(void *opaque)
+{
+	RPIVIDPending *r = opaque;
+
+	r->fdd = NULL;
+	pending_unlink(r);
+	pending_unref(r);
+}
+
+
+/* Take a picture whose phase 2 the block failed out of the output, as rpivid_fallback drops the
+ * current one: it may be the frame chosen for output with this packet, or wait in the DPB */
+static void drop_output(HEVCContext *s, const RPIVIDPending *r)
+{
+	int i;
+
+	if ((r->fdd != NULL) && (s->output_frame->private_ref != NULL) && (s->output_frame->private_ref->data == (uint8_t *)r->fdd)) {
+		av_frame_unref(s->output_frame);
+	}
+	for (i = 0; (i < (int)FF_ARRAY_ELEMS(s->DPB)) && (r->fdd != NULL); i++) {
+		const AVFrame *f = s->DPB[i].frame;
+
+		if ((f != NULL) && (f->private_ref != NULL) && (f->private_ref->data == (uint8_t *)r->fdd)) {
+			ff_hevc_unref_frame(&s->DPB[i], HEVC_FRAME_FLAG_OUTPUT | HEVC_FRAME_FLAG_BUMPING);
+		}
+	}
+}
+
+
+/* Wait for the running phase 2 and let the context's hold of its picture go. s (in end_frame): a
+ * picture the block failed is taken out of the output; elsewhere its frame is flagged. */
+static int collect_p2(void *logctx, RPIVIDContext *ctx, HEVCContext *s)
+{
+	RPIVIDPending *r = ctx->p2;
+	rpivid_hw_stat_t st;
+	int rc;
+
+	if (r == NULL) {
+		return 0;
+	}
+	memset(&st, 0, sizeof(st));
+	rc = rpivid_hw_p2_wait(ctx->hw, &st);
+	ctx->p2 = NULL;
+	ctx->sum_blk += st.p2_wait_ns;
+	ctx->w_blk += st.p2_wait_ns;
+	ctx->sum_p2 += st.p2_ns;
+	ctx->w_p2 += st.p2_ns;
+	if (rc < 0) {
+		r->failed = 1;
+		av_log(logctx, AV_LOG_ERROR, "rpivid: the block failed picture POC %d: timeout in phase %u (CFSTATUS %u CFNUM %u STATUS 0x%x) after its "
+			"end_frame; the block is not used again until reboot (clock %s)\n", r->poc, st.timeout_phase, st.cfstatus, st.cfnum, st.status,
+			st.clock_off ? "switched off" : "left on");
+		if (s != NULL) {
+			drop_output(s, r);
+		}
+	}
+	pending_unref(r);
+	return rc;
+}
+
+
+/* Complete r: its phase 2 waited for if it runs, and (planar) its frame converted */
+static void pending_complete(void *logctx, RPIVIDPending *r)
+{
+	RPIVIDContext *ctx = r->ctx;
+	uint64_t t0;
+
+	if (ctx == NULL) {
+		return;   /* completed already, or its frames are gone */
+	}
+	if (ctx->p2 == r) {
+		(void)collect_p2(logctx, ctx, NULL);
+	}
+	if (r->buf != NULL) {
+		t0 = (uint64_t)av_gettime_relative();
+		sand_to_planar(r->buf, r->data, r->linesize, r->bit_depth);
+		t0 = ((uint64_t)av_gettime_relative() - t0) * 1000u;
+		ctx->sum_detile += t0;
+		ctx->w_detile += t0;
+	}
+	pending_unlink(r);
+}
+
+
+/* FrameDecodeData.post_process: the frame leaves the decoder */
+static int pending_post_process(void *logctx, AVFrame *frame)
+{
+	RPIVIDPending *r = ((FrameDecodeData *)(void *)frame->private_ref->data)->post_process_opaque;
+
+	pending_complete(logctx, r);
+	if (r->failed) {
+		frame->decode_error_flags |= FF_DECODE_ERROR_INVALID_BITSTREAM;
+	}
+	return 0;
+}
+
+
+/* The current picture, its phase 2 started: completed when its frame leaves the decoder (or
+ * earlier, see the top). NULL (complete it now) if its frame cannot carry that. */
+static RPIVIDPending *pending_new(RPIVIDContext *ctx, const HEVCContext *s, RPIVIDFrame *cur, AVFrame *out)
+{
+	FrameDecodeData *fdd = (out->private_ref != NULL) ? (FrameDecodeData *)(void *)out->private_ref->data : NULL;
+	RPIVIDPending *r;
+	int i;
+
+	if ((fdd == NULL) || (fdd->post_process != NULL) || ((r = av_mallocz(sizeof(*r))) == NULL)) {
+		return NULL;
+	}
+	r->refs = 2;   /* the frames', the running phase 2's */
+	r->fdd = fdd;
+	r->poc = s->poc;
+	r->bit_depth = (unsigned int)s->ps.sps->bit_depth;
+	if (!ctx->zc) {
+		r->buf = cur->buf;
+		buf_hold(r->buf);
+		(void)pool_ref(r->buf->pool);
+		for (i = 0; i < 3; i++) {
+			r->data[i] = out->data[i];
+			r->linesize[i] = out->linesize[i];
+		}
+	}
+	r->ctx = ctx;
+	r->next = ctx->pending;
+	if (r->next != NULL) {
+		r->next->prev = r;
+	}
+	ctx->pending = r;
+	ctx->p2 = r;
+	fdd->post_process = pending_post_process;
+	fdd->post_process_opaque = r;
+	fdd->post_process_opaque_free = pending_frames_gone;
+	return r;
+}
+
+
+/* Every picture completed: before the hwaccel lets the block and the buffers go, and before the
+ * CPU decoder reads the pictures it holds (rpivid_fallback, ff_rpivid_hevc_drm_to_cpu) */
+static void pipeline_drain(void *logctx, RPIVIDContext *ctx)
+{
+	(void)collect_p2(logctx, ctx, NULL);
+	while (ctx->pending != NULL) {
+		pending_complete(logctx, ctx->pending);
+	}
+}
+
+
 /* ---- attach / detach ---- */
 
 static int rpivid_uninit(AVCodecContext *avctx)
@@ -884,13 +1148,14 @@ static int rpivid_uninit(AVCodecContext *avctx)
 	if (ctx == NULL) {
 		return 0;
 	}
+	pipeline_drain(avctx, ctx);
 	if (ctx->n != 0u) {
 		av_log(avctx, AV_LOG_INFO, "rpivid: %" PRIu64 " pictures on the block: hw %.2f ms (phase 1 %.2f, phase 2 %.2f), "
-			"SAND->planar %.2f ms, slices (bitstream copy, commands) %.2f ms per picture; %u phase-1 reruns, %u missing references, %d buffers, "
-			"%u stale completions\n",
+			"waiting for the block %.2f ms, SAND->planar %.2f ms, slices (bitstream copy, commands) %.2f ms per picture; %u phase-1 reruns, "
+			"%u missing references, %d buffers, %u stale completions, %u phase-1 runs beside a phase 2\n",
 			ctx->n, (ctx->sum_p1 + ctx->sum_p2) / 1e6 / ctx->n, ctx->sum_p1 / 1e6 / ctx->n, ctx->sum_p2 / 1e6 / ctx->n,
-			ctx->sum_detile / 1e6 / ctx->n, ctx->sum_slices / 1e6 / ctx->n, ctx->p1_reruns, ctx->missing_total,
-			(ctx->pool != NULL) ? ctx->pool->nbufs : 0, ctx->stale_total);
+			ctx->sum_blk / 1e6 / ctx->n, ctx->sum_detile / 1e6 / ctx->n, ctx->sum_slices / 1e6 / ctx->n, ctx->p1_reruns, ctx->missing_total,
+			(ctx->pool != NULL) ? ctx->pool->nbufs : 0, ctx->stale_total, ctx->overlaps);
 	}
 	rpivid_cmd_free(&ctx->cmd);
 	rpivid_dma_free(&ctx->bs);
@@ -1022,13 +1287,28 @@ int ff_rpivid_hevc_attach(AVCodecContext *avctx, int level, int out)
 	ctx->zc = zc;
 	e = getenv("FFMPEG_RPIVID_REFUSE_AT");
 	ctx->refuse_at = ((e != NULL) && (e[0] != '\0')) ? (uint32_t)strtoul(e, NULL, 10) + 1u : 0u;
+	e = getenv("FFMPEG_RPIVID_PIPELINE");
+	if ((e != NULL) && (e[0] == '1')) {
+		if ((avctx->active_thread_type & FF_THREAD_FRAME) != 0) {
+			av_log(avctx, AV_LOG_INFO, "rpivid: FFMPEG_RPIVID_PIPELINE: not under frame threads\n");
+		}
+		else if ((avctx->err_recognition & AV_EF_CRCCHECK) != 0) {
+			av_log(avctx, AV_LOG_INFO, "rpivid: FFMPEG_RPIVID_PIPELINE: not with SEI picture hash checking\n");
+		}
+		else if (rpivid_hw_pipeline(ctx->hw, (uint32_t)sps->width, (uint32_t)sps->height) < 0) {
+			av_log(avctx, AV_LOG_INFO, "rpivid: FFMPEG_RPIVID_PIPELINE: no memory for a second set of phase-1 buffers\n");
+		}
+		else {
+			ctx->pipeline = 1;
+		}
+	}
 
 	avctx->internal->hwaccel_priv_data = ctx;
 	avctx->hwaccel = zc ? &ff_hevc_rpivid_drm_hwaccel.p : &ff_hevc_rpivid_hwaccel.p;
 	/* "tools: " lists what the stream uses beyond the proven set (hevc-rpivid-check reports it) */
-	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit, tools: %s, HEVC clock %u MHz, completion %s\n", sps->width,
+	av_log(avctx, AV_LOG_INFO, "rpivid: hardware HEVC decode %dx%d %d-bit, tools: %s, HEVC clock %u MHz, completion %s%s\n", sps->width,
 		sps->height, sps->bit_depth, tool_list(list, sizeof(list), need), rpivid_hw_clock(ctx->hw) / 1000000u,
-		rpivid_hw_irq(ctx->hw) ? "by interrupt" : "POLLED (no interrupt)");
+		rpivid_hw_irq(ctx->hw) ? "by interrupt" : "POLLED (no interrupt)", ctx->pipeline ? ", phase 2 beside the next picture (pipeline)" : "");
 	if (rpivid_hw_note(ctx->hw)[0] != '\0') {
 		av_log(avctx, AV_LOG_WARNING, "rpivid: %s\n", rpivid_hw_note(ctx->hw));
 	}
@@ -1409,14 +1689,19 @@ static int rpivid_decode_slice(AVCodecContext *avctx, const uint8_t *buf, uint32
 
 static void stat_window(AVCodecContext *avctx, RPIVIDContext *ctx)
 {
+	char pipe[48] = "";
+
 	if (ctx->wn < STAT_EVERY) {
 		return;
 	}
-	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) sand=%.2fms slices=%.2fms%s stale=%u\n", ctx->n,
-		(ctx->w_p1 + ctx->w_p2) / 1e6 / ctx->wn, ctx->w_p1 / 1e6 / ctx->wn, ctx->w_p2 / 1e6 / ctx->wn, ctx->w_detile / 1e6 / ctx->wn,
-		ctx->w_slices / 1e6 / ctx->wn, ctx->zc ? " zc=1" : "", ctx->w_stale);
-	ctx->wn = ctx->w_slices = ctx->w_p1 = ctx->w_p2 = ctx->w_detile = 0;
-	ctx->w_stale = 0;
+	if (ctx->pipeline) {
+		snprintf(pipe, sizeof(pipe), " pipe=1 overlap=%u", ctx->w_overlaps);
+	}
+	av_log(avctx, AV_LOG_INFO, "rpivid-stat pictures=%" PRIu64 " hw=%.2fms (p1 %.2f p2 %.2f) wait=%.2fms sand=%.2fms slices=%.2fms%s stale=%u%s\n",
+		ctx->n, (ctx->w_p1 + ctx->w_p2) / 1e6 / ctx->wn, ctx->w_p1 / 1e6 / ctx->wn, ctx->w_p2 / 1e6 / ctx->wn, ctx->w_blk / 1e6 / ctx->wn,
+		ctx->w_detile / 1e6 / ctx->wn, ctx->w_slices / 1e6 / ctx->wn, ctx->zc ? " zc=1" : "", ctx->w_stale, pipe);
+	ctx->wn = ctx->w_slices = ctx->w_p1 = ctx->w_p2 = ctx->w_detile = ctx->w_blk = 0;
+	ctx->w_stale = ctx->w_overlaps = 0;
 }
 
 
@@ -1428,6 +1713,7 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	RPIVIDFrame *cur = s->ref->hwaccel_picture_private;
 	const rpivid_geom_t *g = &ctx->pool->g;
 	AVFrame *out = s->ref->frame;
+	RPIVIDPending *r = NULL;
 	rpivid_hw_stat_t st;
 	rpivid_job_t j;
 	uint64_t t0, t1, t2;
@@ -1480,10 +1766,41 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	}
 
 	t1 = (uint64_t)av_gettime_relative();
-	rc = rpivid_hw_decode(ctx->hw, &j, &st);
+	if (!ctx->pipeline) {
+		rc = rpivid_hw_decode(ctx->hw, &j, &st);
+	}
+	else if (rpivid_hw_dead()) {
+		/* it stopped in a phase 2 collected after its picture's end_frame */
+		memset(&st, 0, sizeof(st));
+		ctx->frame_err = "the block stopped responding earlier";
+		rc = -ETIMEDOUT;
+	}
+	else {
+		/* phase 1 beside the previous picture's phase 2, which is collected next: this
+		 * picture's phase 2 reuses its registers */
+		rc = rpivid_hw_p1(ctx->hw, &j, &st);
+		if ((collect_p2(avctx, ctx, s) < 0) && (rc == 0)) {
+			ctx->frame_err = "the block stopped responding in the previous picture";
+			rc = -ETIMEDOUT;
+		}
+		if (rc == 0) {
+			rc = rpivid_hw_p2_start(ctx->hw, &j, &st);
+		}
+		/* left running unless the frame leaves the decoder with this packet (no reordering) */
+		if ((rc == 0) && ((out->buf[0] == NULL) || (s->output_frame->buf[0] == NULL) || (s->output_frame->buf[0]->buffer != out->buf[0]->buffer))) {
+			r = pending_new(ctx, s, cur, out);
+		}
+		if ((rc == 0) && (r == NULL)) {
+			rc = rpivid_hw_p2_wait(ctx->hw, &st);
+		}
+		ctx->overlaps += st.p1_overlap;
+		ctx->w_overlaps += st.p1_overlap;
+	}
 	t2 = (uint64_t)av_gettime_relative();
 	ctx->stale_total += st.stale;
 	ctx->w_stale += st.stale;
+	ctx->sum_blk += st.p1_ns + st.p2_wait_ns;
+	ctx->w_blk += st.p1_ns + st.p2_wait_ns;
 	if ((rc == 0) && (st.p1_ns + st.p2_ns > 100000000u)) {
 		/* a decode that waited long for the block (a stall to explain) */
 		av_log(avctx, AV_LOG_WARNING, "rpivid: picture POC %d took %.0f ms on the block (phase 1 %.0f, phase 2 %.0f)\n", s->poc,
@@ -1492,7 +1809,10 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	if (st.p1_runs > 1u) {
 		ctx->p1_reruns += st.p1_runs - 1u;
 	}
-	if (rc == -ETIMEDOUT) {
+	if (ctx->frame_err != NULL) {
+		/* said already (collect_p2) */
+	}
+	else if (rc == -ETIMEDOUT) {
 		av_log(avctx, AV_LOG_ERROR, "rpivid: the block failed picture POC %d: timeout in phase %u (CFSTATUS %u CFNUM %u STATUS 0x%x, "
 			"%u phase-1 runs); the block is not used again until reboot (clock %s)\n", s->poc, st.timeout_phase, st.cfstatus, st.cfnum,
 			st.status, st.p1_runs, st.clock_off ? "switched off" : "left on: the mailbox refused");
@@ -1505,18 +1825,10 @@ static int rpivid_end_frame(AVCodecContext *avctx)
 	}
 
 	/* the planar frame, also from a failed decode: what the block wrote beats a stale buffer
-	 * (drm_prime: the frame is the buffer; ff_rpivid_hevc_drm_to_cpu de-tiles on a fallback) */
-	if (!ctx->zc) {
-		rpivid_dma_sync_for_cpu(&cur->buf->y, g->luma_size);
-		rpivid_dma_sync_for_cpu(&cur->buf->c, g->chroma_size);
-		if (sps->bit_depth == 8) {
-			rpivid_sand8_to_planar(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
-				cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);
-		}
-		else {
-			rpivid_sand10_to_planar16(out->data[0], out->linesize[0], out->data[1], out->linesize[1], out->data[2], out->linesize[2],
-				cur->buf->y.cpu, cur->buf->c.cpu, g->luma_stride, g->chroma_stride, j.width, j.height);
-		}
+	 * (drm_prime: the frame is the buffer; ff_rpivid_hevc_drm_to_cpu de-tiles on a fallback;
+	 * a pending picture is converted when it completes) */
+	if (!ctx->zc && (r == NULL)) {
+		sand_to_planar(cur->buf, out->data, out->linesize, (unsigned int)sps->bit_depth);
 	}
 	if (ctx->frame_err != NULL) {
 		goto fail;

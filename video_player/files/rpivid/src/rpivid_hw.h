@@ -53,7 +53,9 @@ typedef struct {
 } rpivid_job_t;
 
 typedef struct {
-	uint64_t p1_ns, p2_ns;         /* phase durations */
+	uint64_t p1_ns, p2_ns;         /* phase durations (phase 2: from its start until its completion was seen) */
+	uint64_t p2_wait_ns;           /* how long rpivid_hw_p2_wait waited */
+	uint32_t p1_overlap;           /* phase 1 ran beside the previous picture's phase 2 */
 	uint32_t p1_runs;              /* phase-1 runs (> 1: a PU/coefficient buffer was enlarged) */
 	uint32_t stale;                /* completions already pending when a phase was started (cleared) */
 	uint32_t status, cfstatus, cfnum;
@@ -86,9 +88,31 @@ uint32_t rpivid_hw_clock(const rpivid_hw_t *hw);
 /* 1: a decode sleeps on the block's interrupt; 0: it polls the interrupt controller */
 int rpivid_hw_irq(const rpivid_hw_t *hw);
 
-/* Decode one picture. 0, -ETIMEDOUT (a phase did not finish: the block is not used again,
- * see rpivid_hw_open), -EIO (phase 1 rejected the stream), -ENOMEM. */
+/* Decode one picture: rpivid_hw_p1, rpivid_hw_p2_start, rpivid_hw_p2_wait. 0, -ETIMEDOUT (a phase
+ * did not finish: the block is not used again, see rpivid_hw_open), -EIO (phase 1 rejected the
+ * stream), -ENOMEM. */
 int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st);
+
+/* The two phases apart, so that phase 1 of a picture runs while phase 2 of the previous one
+ * still runs (the block does both at once, phase 1 into the other of two buffer sets):
+ *
+ *   rpivid_hw_p1        phase 1 of a picture, waited for: its command buffer and bitstream are
+ *                       free again on return; it may run beside a phase 2
+ *   rpivid_hw_p2_start  phase 2 of the picture the last rpivid_hw_p1 ran, not waited for; only
+ *                       when no phase 2 runs (-EBUSY): its registers are reused
+ *   rpivid_hw_p2_wait   waits for the running phase 2 (0 at once if none); its output, the
+ *                       picture's buffers, is then complete
+ *
+ * Until rpivid_hw_p2_wait returned, the picture's output buffers, its references, its MV
+ * buffers and the job's collocated buffer stay mapped and unchanged. Each returns as
+ * rpivid_hw_decode does; once the block stopped responding every call fails with -ETIMEDOUT
+ * without touching it. rpivid_hw_pipeline first makes both buffer sets for pictures of this
+ * size (-ENOMEM: rpivid_hw_decode alone, one set, still works). One thread at a time. */
+int rpivid_hw_pipeline(rpivid_hw_t *hw, uint32_t width, uint32_t height);
+int rpivid_hw_p1(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st);
+int rpivid_hw_p2_start(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st);
+int rpivid_hw_p2_wait(rpivid_hw_t *hw, rpivid_hw_stat_t *st);
+int rpivid_hw_p2_busy(const rpivid_hw_t *hw);
 
 /* Contiguous uncached memory the block can address (zeroed; below RPIVID_DMA_LIMIT) */
 int rpivid_dma_alloc(rpivid_dma_t *d, size_t size);

@@ -83,14 +83,27 @@ typedef struct {
 	uint32_t out[VCMBOX_MAX_WORDS];
 } vcmbox_resp_t;
 
+/* Phase 1's output, phase 2's input: one set per picture between the phases. Phase 1 of the
+ * next picture writes one set while phase 2 of the previous one reads the other. */
+#define P1_SETS 2
+
+typedef struct {
+	rpivid_dma_t pu, coeff;
+	size_t pu_size, coeff_size;    /* the sizes asked for: the strides derive from these */
+	uint32_t pu_stride, coeff_stride; /* the strides the last phase 1 wrote with */
+} p1_set_t;
+
 struct rpivid_hw {
 	volatile uint8_t *regs, *intc;
 	uint32_t clock;
 	int lockfd;
 	handle_t irq_cond, irq_mtx, irq_h;
 	int have_irq;
-	rpivid_dma_t cmd, pu, coeff;
-	size_t pu_size, coeff_size;    /* the sizes asked for: the strides derive from these */
+	rpivid_dma_t cmd;
+	p1_set_t set[P1_SETS];
+	int p1_set;                    /* the set the last phase 1 wrote */
+	int p2_set;                    /* the set the running phase 2 reads; -1: no phase 2 runs */
+	uint64_t p2_t0;                /* when it started */
 	int resetting;                 /* the block is tried again after it stopped responding */
 	char note[256];
 };
@@ -273,7 +286,7 @@ static int clear_stale(rpivid_hw_t *hw, uint32_t bit)
 static int wait_active(rpivid_hw_t *hw, uint32_t bit, int timeout_ms)
 {
 	int waited_us = 0, rc = -ETIMEDOUT;
-	uint32_t ic;
+	uint32_t ic, a;
 
 	if (hw->have_irq) {
 		mutexLock(hw->irq_mtx);
@@ -284,12 +297,14 @@ static int wait_active(rpivid_hw_t *hw, uint32_t bit, int timeout_ms)
 			break;
 		}
 		ic = rd(hw->intc, ARG_IC_ICTRL);
-		if ((ic & bit) != 0u) {
+		a = ic & (ACTIVE1_INT_SET | ACTIVE2_INT_SET);
+		if (a != 0u) {
+			/* acknowledged as the handler does, both phases at once: the other phase's
+			 * completion (phase 2 runs beside the next phase 1) is kept for its waiter. The
+			 * handler may mark the same completion meanwhile; it is consumed once. */
 			wr(hw->intc, ARG_IC_ICTRL, ic & ~SET_ZERO_MASK);
-			/* the handler may have marked the same completion meanwhile */
-			__atomic_fetch_and(&irq_active, ~bit, __ATOMIC_SEQ_CST);
-			rc = 0;
-			break;
+			__atomic_fetch_or(&irq_active, a, __ATOMIC_SEQ_CST);
+			continue;
 		}
 		if (waited_us >= timeout_ms * 1000) {
 			break;
@@ -545,6 +560,8 @@ void rpivid_dma_free(rpivid_dma_t *d)
 
 static void hw_release(rpivid_hw_t *hw)
 {
+	int i;
+
 	if (hw->have_irq) {
 		isr_intc = NULL;
 		rpivid_dma_fence();
@@ -553,8 +570,10 @@ static void hw_release(rpivid_hw_t *hw)
 		resourceDestroy(hw->irq_mtx);
 	}
 	rpivid_dma_free(&hw->cmd);
-	rpivid_dma_free(&hw->pu);
-	rpivid_dma_free(&hw->coeff);
+	for (i = 0; i < P1_SETS; i++) {
+		rpivid_dma_free(&hw->set[i].pu);
+		rpivid_dma_free(&hw->set[i].coeff);
+	}
 	if (hw->regs != NULL) {
 		munmap((void *)hw->regs, RPIVID_HEVC_SIZE);
 	}
@@ -594,6 +613,7 @@ int rpivid_hw_open(rpivid_hw_t **out, char *why, size_t whylen)
 		pthread_mutex_unlock(&hw_lock);
 		return -ENOMEM;
 	}
+	hw->p2_set = -1;
 	hw->lockfd = take_lock(why, whylen);
 	if (hw->lockfd == -2) {
 		hw->lockfd = -1;
@@ -676,9 +696,13 @@ fail:
 
 void rpivid_hw_close(rpivid_hw_t *hw)
 {
+	rpivid_hw_stat_t st;
+
 	if (hw == NULL) {
 		return;
 	}
+	/* nothing it writes is unmapped while a phase 2 runs */
+	(void)rpivid_hw_p2_wait(hw, &st);
 	pthread_mutex_lock(&hw_lock);
 	if (hw_owner == hw) {
 		hw_owner = NULL;
@@ -731,37 +755,62 @@ static int ensure_p1(rpivid_dma_t *d, size_t *cur, size_t want)
 }
 
 
-int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *st)
+/* The phase-1 sets at the size a picture of wh luma samples starts with */
+static int ensure_set(p1_set_t *b, size_t wh)
 {
-	size_t wh = (size_t)j->width * j->height;
-	uint32_t pu_stride, coeff_stride, i, status = 0;
-	uint64_t t0, t1;
+	return ((ensure_p1(&b->pu, &b->pu_size, round_up_size(wh / 4u)) < 0) ||
+		(ensure_p1(&b->coeff, &b->coeff_size, round_up_size(wh)) < 0)) ? -ENOMEM : 0;
+}
+
+
+int rpivid_hw_pipeline(rpivid_hw_t *hw, uint32_t width, uint32_t height)
+{
+	size_t wh = (size_t)width * height;
+	int i;
+
+	for (i = 0; i < P1_SETS; i++) {
+		if (ensure_set(&hw->set[i], wh) < 0) {
+			return -ENOMEM;
+		}
+	}
+	return 0;
+}
+
+
+int rpivid_hw_p1(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *st)
+{
+	/* the set phase 2 does not read: the first one whenever no phase 2 runs */
+	p1_set_t *b = &hw->set[(hw->p2_set == 0) ? 1 : 0];
+	uint32_t status = 0;
+	uint64_t t0;
 	int runs;
 
 	memset(st, 0, sizeof(*st));
+	if (hw_wedged) {
+		return -ETIMEDOUT;
+	}
 	if ((j->ctb_rows == 0u) || (j->cmd_len == 0u)) {
 		return -EINVAL;
 	}
-	if ((ensure_p1(&hw->pu, &hw->pu_size, round_up_size(wh / 4u)) < 0) ||
-			(ensure_p1(&hw->coeff, &hw->coeff_size, round_up_size(wh)) < 0) ||
-			(ensure(&hw->cmd, (size_t)j->cmd_len * 8u) < 0)) {
+	if ((ensure_set(b, (size_t)j->width * j->height) < 0) || (ensure(&hw->cmd, (size_t)j->cmd_len * 8u) < 0)) {
 		return -ENOMEM;
 	}
+	st->p1_overlap = (hw->p2_set >= 0) ? 1u : 0u;
 
 	/* drain earlier uncached stores (the previous picture's output reads, our copies)
-	 * before writing this picture's command buffer */
+	 * before writing this picture's command buffer (no phase 2 reads it) */
 	rpivid_dma_fence();
 	memcpy(hw->cmd.cpu, j->cmd, (size_t)j->cmd_len * 8u);
 
 	t0 = now_ns();
 	for (runs = 1;; runs++) {
-		pu_stride = (uint32_t)((hw->pu_size / j->ctb_rows) & ~(size_t)63u);
-		coeff_stride = (uint32_t)((hw->coeff_size / j->ctb_rows) & ~(size_t)63u);
+		b->pu_stride = (uint32_t)((b->pu_size / j->ctb_rows) & ~(size_t)63u);
+		b->coeff_stride = (uint32_t)((b->coeff_size / j->ctb_rows) & ~(size_t)63u);
 		rpivid_dma_fence();
-		wr(hw->regs, RPI_PUWBASE, RPI_VC_ADDR(hw->pu.pa));
-		wr(hw->regs, RPI_PUWSTRIDE, RPI_VC_LEN(pu_stride));
-		wr(hw->regs, RPI_COEFFWBASE, RPI_VC_ADDR(hw->coeff.pa));
-		wr(hw->regs, RPI_COEFFWSTRIDE, RPI_VC_LEN(coeff_stride));
+		wr(hw->regs, RPI_PUWBASE, RPI_VC_ADDR(b->pu.pa));
+		wr(hw->regs, RPI_PUWSTRIDE, RPI_VC_LEN(b->pu_stride));
+		wr(hw->regs, RPI_COEFFWBASE, RPI_VC_ADDR(b->coeff.pa));
+		wr(hw->regs, RPI_COEFFWSTRIDE, RPI_VC_LEN(b->coeff_stride));
 		wr(hw->regs, RPI_CFNUM, j->cmd_len);
 		st->stale += (uint32_t)clear_stale(hw, ACTIVE1_INT_SET);
 		wr(hw->regs, RPI_CFBASE, RPI_VC_ADDR(hw->cmd.pa));
@@ -781,20 +830,35 @@ int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *s
 			st->p1_runs = (uint32_t)runs;
 			return -EIO;
 		}
-		if ((((status & RPI_STATUS_PU_EXHAUSTED) != 0u) && (ensure_p1(&hw->pu, &hw->pu_size, round_up_size(hw->pu_size + 1u)) < 0)) ||
+		if ((((status & RPI_STATUS_PU_EXHAUSTED) != 0u) && (ensure_p1(&b->pu, &b->pu_size, round_up_size(b->pu_size + 1u)) < 0)) ||
 				(((status & RPI_STATUS_COEFF_EXHAUSTED) != 0u) &&
-				(ensure_p1(&hw->coeff, &hw->coeff_size, round_up_size(hw->coeff_size + 1u)) < 0))) {
+				(ensure_p1(&b->coeff, &b->coeff_size, round_up_size(b->coeff_size + 1u)) < 0))) {
 			return -ENOMEM;
 		}
 	}
-	t1 = now_ns();
-	st->p1_ns = t1 - t0;
+	st->p1_ns = now_ns() - t0;
 	st->p1_runs = (uint32_t)runs;
+	hw->p1_set = (int)(b - hw->set);
+	return 0;
+}
 
-	wr(hw->regs, RPI_PURBASE, RPI_VC_ADDR(hw->pu.pa));
-	wr(hw->regs, RPI_PURSTRIDE, RPI_VC_LEN(pu_stride));
-	wr(hw->regs, RPI_COEFFRBASE, RPI_VC_ADDR(hw->coeff.pa));
-	wr(hw->regs, RPI_COEFFRSTRIDE, RPI_VC_LEN(coeff_stride));
+
+int rpivid_hw_p2_start(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *st)
+{
+	const p1_set_t *b = &hw->set[hw->p1_set];
+	uint32_t i;
+
+	if (hw_wedged) {
+		return -ETIMEDOUT;
+	}
+	if (hw->p2_set >= 0) {
+		return -EBUSY;   /* its registers are the running phase 2's */
+	}
+	hw->p2_t0 = now_ns();
+	wr(hw->regs, RPI_PURBASE, RPI_VC_ADDR(b->pu.pa));
+	wr(hw->regs, RPI_PURSTRIDE, RPI_VC_LEN(b->pu_stride));
+	wr(hw->regs, RPI_COEFFRBASE, RPI_VC_ADDR(b->coeff.pa));
+	wr(hw->regs, RPI_COEFFRSTRIDE, RPI_VC_LEN(b->coeff_stride));
 	wr(hw->regs, RPI_OUTYBASE, RPI_VC_ADDR(j->out_y));
 	wr(hw->regs, RPI_OUTCBASE, RPI_VC_ADDR(j->out_c));
 	wr(hw->regs, RPI_OUTYSTRIDE, RPI_VC_LEN(j->luma_stride));
@@ -817,16 +881,59 @@ int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *s
 	rpivid_dma_fence();
 	st->stale += (uint32_t)clear_stale(hw, ACTIVE2_INT_SET);
 	wr(hw->regs, RPI_NUMROWS, j->ctb_rows);
-	if (wait_active(hw, ACTIVE2_INT_SET, P2_TIMEOUT_MS) < 0) {
+	hw->p2_set = hw->p1_set;
+	return 0;
+}
+
+
+int rpivid_hw_p2_busy(const rpivid_hw_t *hw)
+{
+	return hw->p2_set >= 0;
+}
+
+
+int rpivid_hw_p2_wait(rpivid_hw_t *hw, rpivid_hw_stat_t *st)
+{
+	uint64_t t0;
+	int rc;
+
+	if (hw->p2_set < 0) {
+		return 0;
+	}
+	if (hw_wedged) {
+		/* the block stopped responding in a phase 1 that ran beside this phase 2 */
+		hw->p2_set = -1;
+		st->timeout_phase = 1;
+		return -ETIMEDOUT;
+	}
+	t0 = now_ns();
+	rc = wait_active(hw, ACTIVE2_INT_SET, P2_TIMEOUT_MS);
+	st->p2_wait_ns = now_ns() - t0;
+	st->p2_ns = now_ns() - hw->p2_t0;
+	hw->p2_set = -1;
+	if (rc < 0) {
 		return block_dead(hw, 2, st);
 	}
-	st->p2_ns = now_ns() - t1;
 	if (hw->resetting) {
 		/* the try after a clock reset worked: the block is usable again */
 		hw->resetting = 0;
 		(void)unlink(RPIVID_DEAD_PATH);
 	}
 	return 0;
+}
+
+
+int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *j, rpivid_hw_stat_t *st)
+{
+	int rc = rpivid_hw_p1(hw, j, st);
+
+	if (rc == 0) {
+		rc = rpivid_hw_p2_start(hw, j, st);
+	}
+	if (rc == 0) {
+		rc = rpivid_hw_p2_wait(hw, st);
+	}
+	return rc;
 }
 
 #else /* !__phoenix__: no block; ordinary memory so the code around it can be tested */
@@ -879,10 +986,49 @@ int rpivid_hw_dead(void)
 
 int rpivid_hw_decode(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st)
 {
+	return rpivid_hw_p1(hw, job, st);
+}
+
+
+int rpivid_hw_pipeline(rpivid_hw_t *hw, uint32_t width, uint32_t height)
+{
+	(void)hw;
+	(void)width;
+	(void)height;
+	return -ENOSYS;
+}
+
+
+int rpivid_hw_p1(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st)
+{
 	(void)hw;
 	(void)job;
 	memset(st, 0, sizeof(*st));
 	return -ENOSYS;
+}
+
+
+int rpivid_hw_p2_start(rpivid_hw_t *hw, const rpivid_job_t *job, rpivid_hw_stat_t *st)
+{
+	(void)hw;
+	(void)job;
+	(void)st;
+	return -ENOSYS;
+}
+
+
+int rpivid_hw_p2_wait(rpivid_hw_t *hw, rpivid_hw_stat_t *st)
+{
+	(void)hw;
+	(void)st;
+	return 0;
+}
+
+
+int rpivid_hw_p2_busy(const rpivid_hw_t *hw)
+{
+	(void)hw;
+	return 0;
 }
 
 
