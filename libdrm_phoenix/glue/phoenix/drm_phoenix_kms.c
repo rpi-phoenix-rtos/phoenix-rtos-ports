@@ -965,13 +965,20 @@ static int ioc_addfb2(drmphx_conn_t *c, struct drm_mode_fb_cmd2 *f)
 	kms_resp_t r;
 	int rc;
 
+	int sand;
+
 	if ((f->flags & ~(uint32_t)DRM_MODE_FB_MODIFIERS) != 0u) {
 		return -EINVAL;   /* interlaced: no */
 	}
-	if ((f->handles[1] != 0u) || (f->handles[2] != 0u) || (f->handles[3] != 0u)) {
-		return -EINVAL;   /* Stage A: single-plane formats only */
+	/* The one two-plane case: NV12 in Broadcom SAND128 columns, both planes in one buffer
+	 * (video pictures for an overlay plane); rpi4-kms checks the layout itself. */
+	sand = ((f->flags & DRM_MODE_FB_MODIFIERS) != 0u) && (f->pixel_format == DRM_FORMAT_NV12) &&
+		(fourcc_mod_broadcom_mod(f->modifier[0]) == DRM_FORMAT_MOD_BROADCOM_SAND128) &&
+		((f->handles[1] == 0u) || (f->handles[1] == f->handles[0]));
+	if ((f->handles[2] != 0u) || (f->handles[3] != 0u) || ((sand == 0) && (f->handles[1] != 0u))) {
+		return -EINVAL;   /* otherwise single-plane formats only */
 	}
-	if (((f->flags & DRM_MODE_FB_MODIFIERS) != 0u) && (f->modifier[0] != DRM_FORMAT_MOD_LINEAR)) {
+	if ((sand == 0) && ((f->flags & DRM_MODE_FB_MODIFIERS) != 0u) && (f->modifier[0] != DRM_FORMAT_MOD_LINEAR)) {
 		return -EINVAL;
 	}
 	memset(&q, 0, sizeof(q));
@@ -981,7 +988,7 @@ static int ioc_addfb2(drmphx_conn_t *c, struct drm_mode_fb_cmd2 *f)
 	q.handle = f->handles[0];
 	q.pitch = f->pitches[0];
 	q.offset = f->offsets[0];
-	q.modifier = KMS_MOD_LINEAR;
+	q.modifier = (sand != 0) ? f->modifier[0] : KMS_MOD_LINEAR;
 	rc = kcall(c, KMS_OP_ADDFB2, &q, sizeof(q), &r, NULL, 0u, NULL, 0u);
 	if (rc == 0) {
 		f->fb_id = r.u.fb.fb_id;
