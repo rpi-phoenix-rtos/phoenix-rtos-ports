@@ -15,12 +15,33 @@ u_vbuf_translate_begin). Return PIPE_ERROR instead; the caller already treats a
 translate failure as "skip this draw's translate" (debug_warn_once + goto out),
 so the game continues instead of crashing.
 
+translate_cache_find() also inserted the NULL into the cache, and the next
+lookup with the same key memcmp()s every entry's data against the key, so the
+NULL alone only moved the crash to the following draw. Insert only a
+translate object that exists.
+
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 (cherry picked from commit f342ce502820f346a515b151911740961b2a7241)
 ---
- src/gallium/auxiliary/util/u_vbuf.c | 12 ++++++++++++
- 1 file changed, 12 insertions(+)
+ src/gallium/auxiliary/translate/translate_cache.c |  5 ++++-
+ src/gallium/auxiliary/util/u_vbuf.c               | 12 ++++++++++++
+ 2 files changed, 16 insertions(+), 1 deletion(-)
 
+diff --git a/src/gallium/auxiliary/translate/translate_cache.c b/src/gallium/auxiliary/translate/translate_cache.c
+--- a/src/gallium/auxiliary/translate/translate_cache.c
++++ b/src/gallium/auxiliary/translate/translate_cache.c
+@@ -99,7 +99,10 @@
+    if (!translate) {
+       /* create/insert */
+       translate = translate_create(key);
+-      cso_hash_insert(&cache->hash, hash_key, translate);
++      /* translate_create() can fail (see u_vbuf_translate_buffers()). Do not
++       * cache the NULL: the next lookup with this key would memcmp() it. */
++      if (translate)
++         cso_hash_insert(&cache->hash, hash_key, translate);
+    }
+ 
+    return translate;
 diff --git a/src/gallium/auxiliary/util/u_vbuf.c b/src/gallium/auxiliary/util/u_vbuf.c
 index 882f683e2a3..f6c64334d4c 100644
 --- a/src/gallium/auxiliary/util/u_vbuf.c
