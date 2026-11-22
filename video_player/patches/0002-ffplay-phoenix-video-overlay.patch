@@ -4,7 +4,8 @@ A picture of hevc_rpivid's drm_prime output (AV_PIX_FMT_DRM_PRIME) goes to a dis
 overlay of rpi4-kms at the moment ffplay presents it (rpivid/drm/rpivid_plane.c): no
 texture upload, no colour conversion, ffplay's pacing, audio sync, pause and seek
 unchanged. A picture the overlay refuses is converted to yuv420p on the CPU and shown the
-usual way. Without drm_prime output nothing changes.
+usual way. The video filter graph lets drm_prime pictures through unchanged. Without
+drm_prime output nothing changes.
 
 LGPL-2.1-or-later, as fftools/ffplay.c.
 
@@ -46,3 +47,22 @@ LGPL-2.1-or-later, as fftools/ffplay.c.
      if (!vp->uploaded) {
          if (upload_texture(&is->vid_texture, vp->frame) < 0) {
              set_sdl_yuv_conversion_mode(NULL);
+@@ -1842,7 +1864,7 @@
+ 
+ static int configure_video_filters(AVFilterGraph *graph, VideoState *is, const char *vfilters, AVFrame *frame)
+ {
+-    enum AVPixelFormat pix_fmts[FF_ARRAY_ELEMS(sdl_texture_format_map)];
++    enum AVPixelFormat pix_fmts[FF_ARRAY_ELEMS(sdl_texture_format_map) + 1];
+     char sws_flags_str[512] = "";
+     char buffersrc_args[256];
+     int ret;
+@@ -1861,6 +1883,9 @@
+             }
+         }
+     }
++    /* Phoenix: hevc_rpivid's drm_prime pictures pass the graph as they are (to the overlay) */
++    if (frame->format == AV_PIX_FMT_DRM_PRIME)
++        pix_fmts[nb_pix_fmts++] = AV_PIX_FMT_DRM_PRIME;
+     pix_fmts[nb_pix_fmts] = AV_PIX_FMT_NONE;
+ 
+     while ((e = av_dict_iterate(sws_dict, e))) {
