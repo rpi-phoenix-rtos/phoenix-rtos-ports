@@ -27,6 +27,8 @@
 #   AUTOEXIT     1 (default) = ffplay -autoexit: return to the prompt at the end of the file
 #                (0 = stay on the last frame until q, for interactive use)
 #   STATLINE_MS  the "ffplay-stat" line period (default 2000; 0 = ffplay's own \r status line)
+#   VIDEO_PLANE  1 = drm mode, HEVC only: decode on the rpivid block into display buffers and show the
+#                pictures on an overlay plane (no CPU pixel work; ffplay patch 0002, rpivid_plane.c)
 #   FFPLAY_AUTOKEYS  scripted key presses "<s>:<key>,..." (keys: pause fs left right up down
 #                step quit), for unattended recordings and control tests
 #
@@ -85,6 +87,7 @@ case "${MODE}" in
 		export SDL_VIDEODRIVER=wayland
 		# the xdg-toplevel app_id (labwc window rules), as /bin/game-window.sh does
 		export SDL_VIDEO_WAYLAND_WMCLASS=${SDL_VIDEO_WAYLAND_WMCLASS:-ffplay}
+		unset VIDEO_PLANE   # the compositor owns the planes
 		# the session's settings (xfce-desktop.sh / labwc-xfce/environment)
 		export XDG_SESSION_TYPE=wayland
 		export XKB_DEFAULT_LAYOUT=${XKB_DEFAULT_LAYOUT:-us}
@@ -99,6 +102,10 @@ case "${MODE}" in
 		fi
 		export SDL_VIDEODRIVER=KMSDRM
 		FS=${FS:-1}
+		if [ "${VIDEO_PLANE}" = 1 ]; then
+			export VIDEO_PLANE
+			plane_args=(-vcodec hevc_rpivid -rpivid_out drm_prime -thread_type slice)
+		fi
 		;;
 	*)
 		echo "VIDEO-PLAY FAIL unknown VIDEO_MODE ${MODE} (auto | wl | drm)"
@@ -116,10 +123,11 @@ args=(-hide_banner -loglevel "${LOGLEVEL:-info}" -loop "${LOOP}")
 [ "${AUTOEXIT}" = 1 ] && args+=(-autoexit)
 [ -n "${THREADS}" ] && args+=(-threads "${THREADS}")
 [ "${FFPLAY_STATLINE_MS}" = 0 ] && args+=(-stats)
+args+=("${plane_args[@]}")
 
 echo "VIDEO-PLAY start mode=${MODE} player=${player} file=${FILE} bytes=$(wc -c < "${FILE}") sock=${sock:-none}" \
 	"video=${SDL_VIDEODRIVER} audio=${SDL_AUDIODRIVER} fs=${FS} threads=${THREADS:-auto} loop=${LOOP}" \
-	"statline_ms=${FFPLAY_STATLINE_MS} autokeys=${FFPLAY_AUTOKEYS:-none} launcher=video-play t=${SECONDS}"
+	"statline_ms=${FFPLAY_STATLINE_MS} autokeys=${FFPLAY_AUTOKEYS:-none} plane=${VIDEO_PLANE:-0} launcher=video-play t=${SECONDS}"
 echo "VIDEO-PLAY args ${args[*]} $* ${FILE}"
 "${player}" "${args[@]}" "$@" "${FILE}"
 rc=$?

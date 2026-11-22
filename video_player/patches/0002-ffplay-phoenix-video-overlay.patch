@@ -1,0 +1,48 @@
+ffplay: Phoenix-RTOS video overlay (opt-in: video-play VIDEO_PLANE=1)
+
+A picture of hevc_rpivid's drm_prime output (AV_PIX_FMT_DRM_PRIME) goes to a display
+overlay of rpi4-kms at the moment ffplay presents it (rpivid/drm/rpivid_plane.c): no
+texture upload, no colour conversion, ffplay's pacing, audio sync, pause and seek
+unchanged. A picture the overlay refuses is converted to yuv420p on the CPU and shown the
+usual way. Without drm_prime output nothing changes.
+
+LGPL-2.1-or-later, as fftools/ffplay.c.
+
+--- a/fftools/ffplay.c
++++ b/fftools/ffplay.c
+@@ -953,6 +953,10 @@
+ #endif
+ }
+ 
++/* Phoenix: rpivid/drm/rpivid_plane.c, libavcodec/rpivid_drm.h */
++int rpivid_plane_show(const AVFrame *frame, int x, int y, int w, int h);
++int rpivid_drm_frame_to_planar(AVFrame *dst, const AVFrame *src);
++
+ static void video_image_display(VideoState *is)
+ {
+     Frame *vp;
+@@ -1008,6 +1012,24 @@
+     calculate_display_rect(&rect, is->xleft, is->ytop, is->width, is->height, vp->width, vp->height, vp->sar);
+     set_sdl_yuv_conversion_mode(vp->frame);
+ 
++    if (!vp->uploaded && (vp->frame->format == AV_PIX_FMT_DRM_PRIME)) {
++        /* Phoenix: hevc_rpivid's drm_prime pictures (video-play with VIDEO_PLANE=1) go to a
++         * display overlay at this moment, with no pixel work; a picture the overlay refuses
++         * is converted on the CPU and shown the usual way (rpivid_plane.c). */
++        AVFrame *planar = av_frame_alloc();
++
++        if (rpivid_plane_show(vp->frame, rect.x, rect.y, rect.w, rect.h) == 0) {
++            av_frame_free(&planar);
++            set_sdl_yuv_conversion_mode(NULL);
++            return;
++        }
++        if ((planar != NULL) && (rpivid_drm_frame_to_planar(planar, vp->frame) == 0)) {
++            av_frame_unref(vp->frame);
++            av_frame_move_ref(vp->frame, planar);
++        }
++        av_frame_free(&planar);
++    }
++
+     if (!vp->uploaded) {
+         if (upload_texture(&is->vid_texture, vp->frame) < 0) {
+             set_sdl_yuv_conversion_mode(NULL);

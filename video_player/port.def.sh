@@ -46,6 +46,7 @@
 # and gen-clips.sh. Same configure line, patch, glue, link shape and verification. Copies kept
 # identical to the tools files by the coordination repo's scripts/check-gpu-lane-ports-sync.sh:
 #   patches/0001            ffplay's opt-in FFPLAY_STATLINE_MS / FFPLAY_AUTOKEYS knobs
+#   patches/0002            ffplay's video overlay (VIDEO_PLANE=1: drm_prime pictures on an rpi4-kms overlay)
 #   files/components.sh     the player's FFmpeg component set (LGPL only)
 #   files/ffplay_phoenix_glue.c   --wrap=pthread_create: 8 MiB default thread stacks
 #   files/gtk-video/gtk-video.c   the GTK 3 player (FFmpeg decode, cairo paint, /dev/audio0)
@@ -146,9 +147,9 @@ _vp_link() {
 	for a in "${sdl}" "$@"; do [ -f "${a}" ] || b_die "video_player: missing ${a}"; done
 	"${NL_PHXCXX}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 "${lflags[@]}" \
 		-Wl,--wrap=pthread_create -Wl,-z,stack-size=16777216 -Wl,-Map,"${bin}.map" -o "${bin}" \
-		"${od}/ffplay.o" "${od}/cmdutils.o" "${od}/opt_common.o" "${VP_GLUE_O}" \
+		"${od}/ffplay.o" "${od}/cmdutils.o" "${od}/opt_common.o" "${VP_GLUE_O}" "${VP_PLANE_O}" \
 		-Wl,--whole-archive "${gallium}" -Wl,--no-whole-archive \
-		-Wl,--start-group "${VP_FF_A[@]}" "${sdl}" "$@" -Wl,--end-group -lm \
+		-Wl,--start-group "${VP_FF_A[@]}" "${sdl}" "$@" "${PORT_DEP_libdrm_phoenix}/lib/libdrm.a" -Wl,--end-group -lm \
 		>"${VP_OUT}/${name}-link.log" 2>&1 ||
 		{ head -60 "${VP_OUT}/${name}-link.log"; b_die "video_player: ${name}: link failed"; }
 	"${NL_STRIP}" -o "${bin}.stripped" "${bin}"
@@ -314,6 +315,10 @@ p_build() {
 	rm -f "${FFD}/lib/librpivid_bo_drm.a"
 	"${NL_AR}" rcs "${FFD}/lib/librpivid_bo_drm.a" "${VP_OUT}/rpivid_bo_drm.o"
 	install -m 644 "${F}/rpivid/drm/rpivid_bo_drm.h" "${FFD}/include/rpivid_bo_drm.h"
+	# pictures on a display overlay (rpi4-kms buffers): ffplay (patches/0002, VIDEO_PLANE=1) and video-plane
+	VP_PLANE_O="${VP_OUT}/rpivid_plane.o"
+	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" -I"${LDP}/include" -I"${LDP}/include/libdrm" \
+		-c "${F}/rpivid/drm/rpivid_plane.c" -o "${VP_PLANE_O}"
 
 	VP_GLUE_O="${VP_OUT}/ffplay_phoenix_glue.o"
 	"${NL_CC}" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${F}/ffplay_phoenix_glue.c" -o "${VP_GLUE_O}"
@@ -367,11 +372,11 @@ p_build() {
 
 	# --- 4b. video-plane: HEVC on the block shown on a display overlay, no CPU pixel work
 	# (NV12 SAND128 pictures in rpi4-kms dumb buffers; docs/misc/2026-11-21-yuv-sand-plane-design.md)
-	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" -I"${LDP}/include" -I"${LDP}/include/libdrm" \
+	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" -I"${F}/rpivid/drm" \
 		-c "${F}/rpivid/plane/video-plane.c" -o "${VP_OUT}/video-plane.o"
 	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=pthread_create \
 		-Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 \
-		-Wl,-z,stack-size=16777216 -Wl,-Map,"${VP_OUT}/video-plane.map" -o "${VP_OUT}/video-plane" "${VP_OUT}/video-plane.o" "${VP_GLUE_O}" \
+		-Wl,-z,stack-size=16777216 -Wl,-Map,"${VP_OUT}/video-plane.map" -o "${VP_OUT}/video-plane" "${VP_OUT}/video-plane.o" "${VP_PLANE_O}" "${VP_GLUE_O}" \
 		-Wl,--start-group "${VP_FS}/libavformat/libavformat.a" "${VP_FS}/libavcodec/libavcodec.a" "${VP_FS}/libswresample/libswresample.a" \
 		"${VP_FS}/libavutil/libavutil.a" "${ZV}/lib/libz.a" "${LDP}/lib/libdrm.a" -Wl,--end-group -lm \
 		>"${VP_OUT}/video-plane-link.log" 2>&1 ||
