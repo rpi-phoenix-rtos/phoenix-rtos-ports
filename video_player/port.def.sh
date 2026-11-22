@@ -86,6 +86,7 @@
 #   /usr/bin/ffplay                        ffplay: full screen on KMS from psh, a window on the
 #                                          desktop (SDL tries Wayland, then KMSDRM)
 #   /usr/bin/hevc-rpivid-check             the rpivid decoder checked against the CPU one
+#   /usr/bin/video-plane                   HEVC on the block straight to a display overlay (NV12 SAND128)
 #   /bin/video-play                        picks the mode (SDL_VIDEODRIVER, -fs) by whether a
 #                                          compositor socket exists
 #   /usr/bin/gtk-video         (gtk)       + /usr/share/applications/gtk-video.desktop
@@ -364,6 +365,25 @@ p_build() {
 	[ "${rbad}" = 0 ] || b_die "video_player: hevc-rpivid-check: verification failed (see above)"
 	progs+=(hevc-rpivid-check)
 
+	# --- 4b. video-plane: HEVC on the block shown on a display overlay, no CPU pixel work
+	# (NV12 SAND128 pictures in rpi4-kms dumb buffers; docs/misc/2026-11-21-yuv-sand-plane-design.md)
+	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" -I"${LDP}/include" -I"${LDP}/include/libdrm" \
+		-c "${F}/rpivid/plane/video-plane.c" -o "${VP_OUT}/video-plane.o"
+	"${NL_CC}" "${NL_TFLAGS[@]}" -static -Wl,--gc-sections -Wl,-z,max-page-size=0x1000 -Wl,--wrap=pthread_create \
+		-Wl,--wrap=mmap -Wl,--wrap=ioctl -Wl,--wrap=fcntl -Wl,--wrap=dup -Wl,--wrap=dup2 \
+		-Wl,-z,stack-size=16777216 -Wl,-Map,"${VP_OUT}/video-plane.map" -o "${VP_OUT}/video-plane" "${VP_OUT}/video-plane.o" "${VP_GLUE_O}" \
+		-Wl,--start-group "${VP_FS}/libavformat/libavformat.a" "${VP_FS}/libavcodec/libavcodec.a" "${VP_FS}/libswresample/libswresample.a" \
+		"${VP_FS}/libavutil/libavutil.a" "${ZV}/lib/libz.a" "${LDP}/lib/libdrm.a" -Wl,--end-group -lm \
+		>"${VP_OUT}/video-plane-link.log" 2>&1 ||
+		{ head -40 "${VP_OUT}/video-plane-link.log"; b_die "video_player: video-plane: link failed"; }
+	"${NL_STRIP}" -o "${VP_OUT}/video-plane.stripped" "${VP_OUT}/video-plane"
+	nl_no_undefined "${VP_OUT}/video-plane"
+	rsyms="$("${NL_NM}" "${VP_OUT}/video-plane")"
+	for rs in main ff_hevc_rpivid_decoder rpivid_drm_set_buffer_ops drmModeAddFB2WithModifiers drmPrimeFDToHandle __wrap_mmap __wrap_ioctl; do
+		grep -qE " [TtWwDdRr] ${rs}\$" <<<"${rsyms}" || b_die "video_player: video-plane: symbol ${rs}: NO"
+	done
+	progs+=(video-plane)
+
 	# --- 5. gtk-video: GTK 3 Wayland (gtk3_wayland, linked as its gtk3-hello) + the player's
 	# FFmpeg libraries + the glue; painted with cairo (no Mesa in this binary) --------------
 	if b_use gtk; then
@@ -446,6 +466,7 @@ p_build() {
 	rm -rf "${ST}"
 	install -D -m 755 "${I}/bin/ffplay" "${ST}/usr/bin/ffplay"
 	install -D -m 755 "${I}/bin/hevc-rpivid-check" "${ST}/usr/bin/hevc-rpivid-check"
+	install -D -m 755 "${I}/bin/video-plane" "${ST}/usr/bin/video-plane"
 	install -D -m 755 "${F}/image/video-play" "${ST}/bin/video-play"
 	if b_use gtk; then
 		install -D -m 755 "${I}/bin/gtk-video" "${ST}/usr/bin/gtk-video"
