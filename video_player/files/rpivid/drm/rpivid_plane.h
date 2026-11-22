@@ -39,4 +39,9 @@ void rpivid_plane_screen(uint32_t *w, uint32_t *h);
 /* Take the picture off the overlay and drop the held frames. */
 void rpivid_plane_close(void);
 
+/* Called with a picture buffer's dma-buf descriptor just before the buffer is freed (the
+ * decoder's thread): a user that made something from the descriptor (rpivid_wl.c: a
+ * compositor buffer) forgets it. NULL by default. */
+extern void (*rpivid_plane_buffer_freed)(int fd);
+
 #endif

@@ -107,11 +107,17 @@ static int buf_alloc(void *opaque, size_t size, RpividDrmBuffer *b)
 }
 
 
+void (*rpivid_plane_buffer_freed)(int fd);
+
+
 static void buf_free(void *opaque, RpividDrmBuffer *b)
 {
 	int i;
 
 	(void)opaque;
+	if ((rpivid_plane_buffer_freed != NULL) && (b->fd >= 0)) {
+		rpivid_plane_buffer_freed(b->fd);   /* rpivid_wl.c: forget the compositor buffer made from it */
+	}
 	pthread_mutex_lock(&pl.lock);
 	for (i = 0; i < pl.nfbs; i++) {
 		if (pl.fbs[i].handle == b->handle) {

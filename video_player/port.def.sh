@@ -28,7 +28,7 @@
 
 	# NEW GPU LANE: private prefix (nothing here reaches the shared ports prefix).
 	conflicts="video_player!=${version}"
-	depends="libdrm_phoenix mesa_drm[opengl] sdl2_kmsdrm zlib gtk? ( gtk3_wayland wayland_phoenix )"
+	depends="libdrm_phoenix mesa_drm[opengl] sdl2_kmsdrm zlib wayland_phoenix gtk? ( gtk3_wayland )"
 
 	# rootfs   install the staging tree (stage/) into the image rootfs
 	# gtk      also gtk-video, the GTK 3 player, and its XFCE menu entry
@@ -47,6 +47,7 @@
 # identical to the tools files by the coordination repo's scripts/check-gpu-lane-ports-sync.sh:
 #   patches/0001            ffplay's opt-in FFPLAY_STATLINE_MS / FFPLAY_AUTOKEYS knobs
 #   patches/0002            ffplay's video overlay (VIDEO_PLANE=1: drm_prime pictures on an rpi4-kms overlay)
+#   patches/0003            ffplay under a compositor (VIDEO_PLANE=1: drm_prime pictures on a window subsurface; ports-only, no tools copy)
 #   files/components.sh     the player's FFmpeg component set (LGPL only)
 #   files/ffplay_phoenix_glue.c   --wrap=pthread_create: 8 MiB default thread stacks
 #   files/gtk-video/gtk-video.c   the GTK 3 player (FFmpeg decode, cairo paint, /dev/audio0)
@@ -316,9 +317,27 @@ p_build() {
 	"${NL_AR}" rcs "${FFD}/lib/librpivid_bo_drm.a" "${VP_OUT}/rpivid_bo_drm.o"
 	install -m 644 "${F}/rpivid/drm/rpivid_bo_drm.h" "${FFD}/include/rpivid_bo_drm.h"
 	# pictures on a display overlay (rpi4-kms buffers): ffplay (patches/0002, VIDEO_PLANE=1) and video-plane
-	VP_PLANE_O="${VP_OUT}/rpivid_plane.o"
 	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" -I"${LDP}/include" -I"${LDP}/include/libdrm" \
-		-c "${F}/rpivid/drm/rpivid_plane.c" -o "${VP_PLANE_O}"
+		-c "${F}/rpivid/drm/rpivid_plane.c" -o "${VP_OUT}/rpivid_plane.o"
+	# ... and in a Wayland window, from the same buffers (patches/0003: a subsurface of
+	# linux-dmabuf NV12 SAND128 buffers scaled by wp_viewporter, the compositor samples them)
+	local WLP="${PORT_DEP_wayland_phoenix:?}" WPROTO pr
+	WPROTO="${WLP%/}/prefix/share/wayland-protocols/stable"
+	command -v wayland-scanner >/dev/null || b_die "video_player: host wayland-scanner missing"
+	for pr in linux-dmabuf/linux-dmabuf-v1 viewporter/viewporter; do
+		wayland-scanner client-header "${WPROTO}/${pr}.xml" "${VP_OUT}/${pr##*/}-client-protocol.h"
+		wayland-scanner private-code "${WPROTO}/${pr}.xml" "${VP_OUT}/${pr##*/}-protocol.c"
+		"${NL_CC}" -O2 -g -std=gnu11 "${NL_TFLAGS[@]}" -I"${WLP%/}/prefix/include" \
+			-c "${VP_OUT}/${pr##*/}-protocol.c" -o "${VP_OUT}/${pr##*/}-protocol.o"
+	done
+	"${NL_CC}" -O2 -g -std=gnu11 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -I"${VP_FS}" -I"${VP_OUT}" -I"${F}/rpivid/drm" \
+		-I"${WLP%/}/prefix/include" -I"${LDP}/include" -I"${LDP}/include/libdrm" \
+		-c "${F}/rpivid/wl/rpivid_wl.c" -o "${VP_OUT}/rpivid_wl.o"
+	# one archive: a program takes the parts it calls (video-plane: the overlay; ffplay: both)
+	VP_PLANE_O="${VP_OUT}/librpivid_show.a"
+	rm -f "${VP_PLANE_O}"
+	"${NL_AR}" rcs "${VP_PLANE_O}" "${VP_OUT}/rpivid_plane.o" "${VP_OUT}/rpivid_wl.o" "${VP_OUT}/linux-dmabuf-v1-protocol.o" \
+		"${VP_OUT}/viewporter-protocol.o"
 
 	VP_GLUE_O="${VP_OUT}/ffplay_phoenix_glue.o"
 	"${NL_CC}" -O2 -g -std=gnu17 -Wall -Wextra -Werror "${NL_TFLAGS[@]}" -c "${F}/ffplay_phoenix_glue.c" -o "${VP_GLUE_O}"

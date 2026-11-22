@@ -1,0 +1,67 @@
+ffplay: Phoenix-RTOS video in a Wayland window from the decoder's buffers (opt-in: VIDEO_PLANE=1)
+
+Under SDL's Wayland driver, a picture of hevc_rpivid's drm_prime output goes to a
+subsurface of ffplay's window as a linux-dmabuf buffer (NV12, SAND128 columns), scaled
+by wp_viewporter, at the moment ffplay presents it (rpivid/wl/rpivid_wl.c): no colour
+conversion or texture upload in the player; the compositor samples the buffer on the GPU.
+Without Wayland, patch 0002's overlay path; a picture neither takes is converted on the
+CPU and shown the usual way, with the subsurface hidden.
+
+LGPL-2.1-or-later, as fftools/ffplay.c.
+
+--- a/fftools/ffplay.c
++++ b/fftools/ffplay.c
+@@ -56,6 +56,7 @@
+ 
+ #include <SDL.h>
+ #include <SDL_thread.h>
++#include <SDL_syswm.h>
+ 
+ #include "cmdutils.h"
+ #include "opt_common.h"
+@@ -955,6 +956,29 @@
+ 
+ /* Phoenix: rpivid/drm/rpivid_plane.c, libavcodec/rpivid_drm.h */
+ int rpivid_plane_show(const AVFrame *frame, int x, int y, int w, int h);
++int rpivid_wl_open(struct wl_display *display, struct wl_surface *parent);
++int rpivid_wl_show(const AVFrame *frame, int x, int y, int w, int h);
++void rpivid_wl_hide(void);
++
++/* Phoenix: under SDL's Wayland driver, drm_prime pictures go to a subsurface of the window
++ * (rpivid/wl/rpivid_wl.c), opened on the first such picture; 1 = in use, -1 = not available */
++static int phx_wl_state;
++
++static int phx_wl_ready(void)
++{
++    if (phx_wl_state == 0) {
++        const char *drv = SDL_GetCurrentVideoDriver();
++        SDL_SysWMinfo info;
++
++        phx_wl_state = -1;
++        SDL_VERSION(&info.version);
++        if (drv && !strcmp(drv, "wayland") && SDL_GetWindowWMInfo(window, &info) &&
++                info.subsystem == SDL_SYSWM_WAYLAND &&
++                rpivid_wl_open(info.info.wl.display, info.info.wl.surface) == 0)
++            phx_wl_state = 1;
++    }
++    return phx_wl_state > 0;
++}
+ int rpivid_drm_frame_to_planar(AVFrame *dst, const AVFrame *src);
+ 
+ static void video_image_display(VideoState *is)
+@@ -1018,11 +1042,14 @@
+          * is converted on the CPU and shown the usual way (rpivid_plane.c). */
+         AVFrame *planar = av_frame_alloc();
+ 
+-        if (rpivid_plane_show(vp->frame, rect.x, rect.y, rect.w, rect.h) == 0) {
++        if ((phx_wl_ready() ? rpivid_wl_show(vp->frame, rect.x, rect.y, rect.w, rect.h)
++                            : rpivid_plane_show(vp->frame, rect.x, rect.y, rect.w, rect.h)) == 0) {
+             av_frame_free(&planar);
+             set_sdl_yuv_conversion_mode(NULL);
+             return;
+         }
++        if (phx_wl_state > 0)
++            rpivid_wl_hide();   /* this picture goes the usual way: uncover the window */
+         if ((planar != NULL) && (rpivid_drm_frame_to_planar(planar, vp->frame) == 0)) {
+             av_frame_unref(vp->frame);
+             av_frame_move_ref(vp->frame, planar);
