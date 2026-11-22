@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sys/mman.h>
@@ -164,38 +165,81 @@ static int find_plane(void)
 }
 
 
-/* COLOR_ENCODING / COLOR_RANGE from the stream's tags (DRM enum values: BT.601 0, BT.709 1,
- * BT.2020 2; limited 0, full 1). Untagged: BT.709 from 720 lines up, else BT.601. */
-static void set_colour(const AVFrame *f)
+/* The overlay's property ids, by name (0 = the server has no such property) */
+enum { P_FB_ID, P_CRTC_ID, P_SRC_X, P_SRC_Y, P_SRC_W, P_SRC_H, P_CRTC_X, P_CRTC_Y, P_CRTC_W, P_CRTC_H, P_ENC, P_RANGE, P_N };
+static const char *const pnames[P_N] = { "FB_ID", "CRTC_ID", "SRC_X", "SRC_Y", "SRC_W", "SRC_H", "CRTC_X", "CRTC_Y",
+	"CRTC_W", "CRTC_H", "COLOR_ENCODING", "COLOR_RANGE" };
+static uint32_t pids[P_N];
+
+
+static void find_props(void)
 {
 	drmModeObjectProperties *pr = drmModeObjectGetProperties(pl.card, pl.plane, DRM_MODE_OBJECT_PLANE);
-	uint64_t enc, range = (f->color_range == AVCOL_RANGE_JPEG) ? 1u : 0u;
-	uint32_t i;
+	uint32_t i, k;
 
-	switch (f->colorspace) {
-		case AVCOL_SPC_BT709: enc = 1u; break;
-		case AVCOL_SPC_BT470BG:
-		case AVCOL_SPC_SMPTE170M: enc = 0u; break;
-		case AVCOL_SPC_BT2020_NCL:
-		case AVCOL_SPC_BT2020_CL: enc = 2u; break;
-		default: enc = (f->height >= 720) ? 1u : 0u; break;
-	}
 	for (i = 0; (pr != NULL) && (i < pr->count_props); i++) {
 		drmModePropertyRes *p = drmModeGetProperty(pl.card, pr->props[i]);
-		if (p == NULL) {
-			continue;
-		}
-		if (strcmp(p->name, "COLOR_ENCODING") == 0) {
-			(void)drmModeObjectSetProperty(pl.card, pl.plane, DRM_MODE_OBJECT_PLANE, p->prop_id, enc);
-		}
-		else if (strcmp(p->name, "COLOR_RANGE") == 0) {
-			(void)drmModeObjectSetProperty(pl.card, pl.plane, DRM_MODE_OBJECT_PLANE, p->prop_id, range);
+		for (k = 0; (p != NULL) && (k < P_N); k++) {
+			if (strcmp(p->name, pnames[k]) == 0) {
+				pids[k] = p->prop_id;
+			}
 		}
 		drmModeFreeProperty(p);
 	}
 	drmModeFreeObjectProperties(pr);
-	fprintf(stderr, "rpivid-plane: colorspace %d range %d -> COLOR_ENCODING %llu COLOR_RANGE %llu\n", (int)f->colorspace,
-		(int)f->color_range, (unsigned long long)enc, (unsigned long long)range);
+}
+
+
+/* COLOR_ENCODING / COLOR_RANGE from the stream's tags (DRM enum values: BT.601 0, BT.709 1,
+ * BT.2020 2; limited 0, full 1). Untagged: BT.709 from 720 lines up, else BT.601. */
+static void stream_colour(const AVFrame *f, uint64_t *enc, uint64_t *range)
+{
+	*range = (f->color_range == AVCOL_RANGE_JPEG) ? 1u : 0u;
+	switch (f->colorspace) {
+		case AVCOL_SPC_BT709: *enc = 1u; break;
+		case AVCOL_SPC_BT470BG:
+		case AVCOL_SPC_SMPTE170M: *enc = 0u; break;
+		case AVCOL_SPC_BT2020_NCL:
+		case AVCOL_SPC_BT2020_CL: *enc = 2u; break;
+		default: *enc = (f->height >= 720) ? 1u : 0u; break;
+	}
+}
+
+
+/* The first picture: ONE atomic commit with the colour properties and the plane state.
+ * (Setting each property on its own is a commit per property, and the next one finds the
+ * previous still in flight: -EBUSY.) */
+static int first_commit(const AVFrame *f, uint32_t fb, int x, int y, int w, int h)
+{
+	drmModeAtomicReq *rq = drmModeAtomicAlloc();
+	uint64_t enc, range;
+	int rc;
+
+	if (rq == NULL) {
+		return -ENOMEM;
+	}
+	stream_colour(f, &enc, &range);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_FB_ID], fb);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_CRTC_ID], pl.crtc);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_SRC_X], 0);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_SRC_Y], 0);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_SRC_W], (uint64_t)f->width << 16);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_SRC_H], (uint64_t)f->height << 16);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_CRTC_X], (uint64_t)(int64_t)x);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_CRTC_Y], (uint64_t)(int64_t)y);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_CRTC_W], (uint64_t)w);
+	(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_CRTC_H], (uint64_t)h);
+	if (pids[P_ENC] != 0u) {
+		(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_ENC], enc);
+	}
+	if (pids[P_RANGE] != 0u) {
+		(void)drmModeAtomicAddProperty(rq, pl.plane, pids[P_RANGE], range);
+	}
+	rc = drmModeAtomicCommit(pl.card, rq, 0, NULL);
+	drmModeAtomicFree(rq);
+	fprintf(stderr, "rpivid-plane: colorspace %d range %d -> COLOR_ENCODING %llu COLOR_RANGE %llu: rc %d\n",
+		(int)f->colorspace, (int)f->color_range, (unsigned long long)enc, (unsigned long long)range, rc);
+	return rc;
 }
 
 
@@ -255,6 +299,7 @@ int rpivid_plane_open(void)
 		return -errno;
 	}
 	(void)drmSetClientCap(pl.card, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+	(void)drmSetClientCap(pl.card, DRM_CLIENT_CAP_ATOMIC, 1);
 	res = drmModeGetResources(pl.card);
 	if ((res == NULL) || (res->count_crtcs == 0) || !find_plane()) {
 		drmModeFreeResources(res);
@@ -264,6 +309,7 @@ int rpivid_plane_open(void)
 	}
 	pl.crtc = res->crtcs[0];
 	drmModeFreeResources(res);
+	find_props();
 	{
 		drmModeCrtc *c = drmModeGetCrtc(pl.card, pl.crtc);
 		if ((c != NULL) && c->mode_valid) {
@@ -291,16 +337,29 @@ int rpivid_plane_show(const AVFrame *frame, int x, int y, int w, int h)
 	if (rc != 0) {
 		return rc;
 	}
-	if (!pl.coloured) {
-		set_colour(frame);
-		pl.coloured = 1;
-	}
 	ref = av_frame_clone(frame);
 	if (ref == NULL) {
 		return -ENOMEM;
 	}
-	rc = drmModeSetPlane(pl.card, pl.plane, pl.crtc, fb, 0, x, y, (uint32_t)w, (uint32_t)h, 0, 0,
-		(uint32_t)frame->width << 16, (uint32_t)frame->height << 16);
+	/* -EBUSY: the previous picture's flip is still in flight (pictures faster than the
+	 * vblank); wait for it a little, as a blocking legacy call would, rather than drop */
+	for (i = 0; i < 20; i++) {
+		if (!pl.coloured) {
+			rc = first_commit(frame, fb, x, y, w, h);
+			pl.coloured = (rc == 0) ? 1 : 0;
+		}
+		else {
+			rc = drmModeSetPlane(pl.card, pl.plane, pl.crtc, fb, 0, x, y, (uint32_t)w, (uint32_t)h, 0, 0,
+				(uint32_t)frame->width << 16, (uint32_t)frame->height << 16);
+		}
+		if ((rc != -EBUSY) && !((rc == -1) && (errno == EBUSY))) {
+			break;
+		}
+		{
+			struct timespec ts = { 0, 2000000 };
+			nanosleep(&ts, NULL);
+		}
+	}
 	if (rc != 0) {
 		av_frame_free(&ref);
 		return rc;
