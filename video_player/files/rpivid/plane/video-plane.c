@@ -211,6 +211,43 @@ static int picture_fb(const AVFrame *f, uint32_t *fb)
 }
 
 
+/* COLOR_ENCODING / COLOR_RANGE of the overlay from the stream's tags (DRM enum values:
+ * BT.601 0, BT.709 1, BT.2020 2; limited 0, full 1). An untagged stream is BT.709 from
+ * 720 lines up, else BT.601 (what players assume). */
+static void set_colour(uint32_t plane, const AVFrame *f)
+{
+	drmModeObjectProperties *pr = drmModeObjectGetProperties(card, plane, DRM_MODE_OBJECT_PLANE);
+	uint64_t enc, range = (f->color_range == AVCOL_RANGE_JPEG) ? 1u : 0u;
+	uint32_t i;
+	int rc_e = -ENOENT, rc_r = -ENOENT;
+
+	switch (f->colorspace) {
+		case AVCOL_SPC_BT709: enc = 1u; break;
+		case AVCOL_SPC_BT470BG:
+		case AVCOL_SPC_SMPTE170M: enc = 0u; break;
+		case AVCOL_SPC_BT2020_NCL:
+		case AVCOL_SPC_BT2020_CL: enc = 2u; break;
+		default: enc = (f->height >= 720) ? 1u : 0u; break;
+	}
+	for (i = 0; (pr != NULL) && (i < pr->count_props); i++) {
+		drmModePropertyRes *p = drmModeGetProperty(card, pr->props[i]);
+		if (p == NULL) {
+			continue;
+		}
+		if (strcmp(p->name, "COLOR_ENCODING") == 0) {
+			rc_e = drmModeObjectSetProperty(card, plane, DRM_MODE_OBJECT_PLANE, p->prop_id, enc);
+		}
+		else if (strcmp(p->name, "COLOR_RANGE") == 0) {
+			rc_r = drmModeObjectSetProperty(card, plane, DRM_MODE_OBJECT_PLANE, p->prop_id, range);
+		}
+		drmModeFreeProperty(p);
+	}
+	drmModeFreeObjectProperties(pr);
+	printf("VIDEOPLANE colour: stream colorspace %d range %d -> COLOR_ENCODING %llu (rc %d) COLOR_RANGE %llu (rc %d)\n",
+		(int)f->colorspace, (int)f->color_range, (unsigned long long)enc, rc_e, (unsigned long long)range, rc_r);
+}
+
+
 static double cpu_seconds(void)
 {
 	struct timespec t;
@@ -359,6 +396,9 @@ int main(int argc, char *argv[])
 				while (av_gettime_relative() < due) {
 					av_usleep((unsigned int)(due - av_gettime_relative()));
 				}
+			}
+			if (shown == 0) {
+				set_colour(plane, f);
 			}
 			/* fit the picture to the screen, keeping its aspect */
 			{

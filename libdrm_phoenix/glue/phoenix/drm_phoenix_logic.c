@@ -57,6 +57,8 @@ void drmphx_plane_state_from_props(uint32_t plane_id, const kms_prop_value_t *pv
 			case KMS_PROP_ZPOS:     st->zpos = (int32_t)v; break;
 			case KMS_PROP_ALPHA:    st->alpha = (uint32_t)v; break;
 			case KMS_PROP_ROTATION: st->rotation = (uint32_t)v; break;
+			case KMS_PROP_COLOR_ENCODING: st->color_encoding = (uint32_t)v + 1u; break;
+			case KMS_PROP_COLOR_RANGE: st->color_range = (uint32_t)v + 1u; break;
 			default: break;   /* type, IN_FORMATS, IN_FENCE_FD: not state */
 		}
 	}
@@ -150,6 +152,18 @@ static int set_plane_prop(drmphx_atomic_t *a, uint32_t idx, kms_atomic_plane_t *
 			return 0;
 		case KMS_PROP_ROTATION:
 			st->rotation = (uint32_t)v;
+			return 0;
+		case KMS_PROP_COLOR_ENCODING:   /* the wire carries value + 1 (0 = not set) */
+			if (v > 2u) {
+				return -EINVAL;
+			}
+			st->color_encoding = (uint32_t)v + 1u;
+			return 0;
+		case KMS_PROP_COLOR_RANGE:
+			if (v > 1u) {
+				return -EINVAL;
+			}
+			st->color_range = (uint32_t)v + 1u;
 			return 0;
 		case KMS_PROP_TYPE:
 		case KMS_PROP_IN_FORMATS:

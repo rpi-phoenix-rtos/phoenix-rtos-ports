@@ -118,6 +118,8 @@ enum kms_prop {
 	KMS_PROP_ZPOS,           /* range */
 	KMS_PROP_ALPHA,          /* range 0..0xffff */
 	KMS_PROP_ROTATION,       /* bitmask: rotate-0, rotate-180, reflect-x, reflect-y */
+	KMS_PROP_COLOR_ENCODING, /* enum (DRM names): BT.601 0, BT.709 1, BT.2020 2 (YUV framebuffers) */
+	KMS_PROP_COLOR_RANGE,    /* enum (DRM names): limited 0, full 1 */
 	/* crtc */
 	KMS_PROP_ACTIVE = 0x140,
 	KMS_PROP_MODE_ID,        /* blob */
@@ -232,6 +234,17 @@ typedef struct {
 #define KMS_FMT_XBGR8888 KMS_FOURCC('X', 'B', '2', '4')   /* u32 x:B:G:R (the firmware fb here) */
 #define KMS_FMT_ABGR8888 KMS_FOURCC('A', 'B', '2', '4')
 #define KMS_MOD_LINEAR   0ull
+
+/* NV12 (Y plane, then interleaved CbCr at half resolution). Scanned out only as one
+ * Broadcom SAND128 buffer: 128-byte columns, each holding the whole picture's luma
+ * (H16 = height rounded up to 16 lines) and then its chroma (H16 / 2 lines). */
+#define KMS_FMT_NV12 KMS_FOURCC('N', 'V', '1', '2')
+
+/* DRM_FORMAT_MOD_BROADCOM_SAND128(v) (drm_fourcc.h: vendor 0x07, code 4, parameter in
+ * bits 8..55): the parameter is the column height in lines. */
+#define KMS_MOD_SAND128_BASE   ((0x07ull << 56) | 4ull)
+#define KMS_MOD_IS_SAND128(m)  (((m) & 0xff000000000000ffull) == KMS_MOD_SAND128_BASE)
+#define KMS_MOD_SAND128_COLH(m) ((uint32_t)(((m) >> 8) & 0xffffffffull))
 
 
 /* ------------------------------------------------------------------------- */
@@ -576,7 +589,8 @@ typedef struct {
 	int32_t zpos;
 	uint32_t alpha;         /* 0..0xffff */
 	uint32_t rotation;      /* DRM_MODE_ROTATE_0 (1) / ROTATE_180 (4) | REFLECT_X (16) | REFLECT_Y (32) */
-	uint32_t pad[2];
+	uint32_t color_encoding; /* COLOR_ENCODING + 1; 0 = not set (BT.709) -- these were padding */
+	uint32_t color_range;    /* COLOR_RANGE + 1; 0 = not set (limited) */
 	kms_fence_t in_fence;
 } kms_atomic_plane_t;
 
